@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { usePartnerListBatchAudit } from '@/composables/usePartnerListBatchAudit'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getTradingPartners,
@@ -9,9 +10,9 @@ import {
   type TradingPartner
 } from '@/utils/platformCollaborationService'
 import {
-  deleteSupplier,
+  batchDeleteSuppliers,
+  batchSetSupplierAuditStatus,
   loadAndEnsureSupplierList,
-  setSupplierAuditStatus,
   supplierTypeOptions,
   type SupplierMaster
 } from '@/utils/supplierStore'
@@ -19,6 +20,8 @@ import {
 const SEARCH_FORM_KEY = 'supplier-search-form'
 
 const router = useRouter()
+const tableRef = ref()
+const selectedRows = ref<SupplierMaster[]>([])
 const showAdvancedFilter = ref(false)
 const tableData = ref<SupplierMaster[]>([])
 const currentPage = ref(1)
@@ -105,6 +108,7 @@ const searchForm = ref({
 
 const { columnWidths, handleHeaderDragend } = useTableStyle('supplier-list', [
   { key: 'index', label: '行号', defaultWidth: 56 },
+  { key: 'select', label: '', defaultWidth: 42 },
   { key: 'id', label: '供应商编号', defaultWidth: 120 },
   { key: 'name', label: '供应商名称', defaultWidth: 180 },
   { key: 'contact', label: '联系人', defaultWidth: 100 },
@@ -116,8 +120,7 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('supplier-list', [
   { key: 'auditStatus', label: '审核状态', defaultWidth: 100 },
   { key: 'status', label: '状态', defaultWidth: 80 },
   { key: 'collaboration', label: '平台协同', defaultWidth: 100 },
-  { key: 'createTime', label: '建档日期', defaultWidth: 110 },
-  { key: 'action', label: '操作', defaultWidth: 220 }
+  { key: 'createTime', label: '建档日期', defaultWidth: 110 }
 ])
 
 const partnerKey = (name: string) => `supplier:${name}`
@@ -219,6 +222,13 @@ const pagedData = computed(() => {
 
 const indexMethod = (index: number) => (currentPage.value - 1) * pageSize.value + index + 1
 
+watch(filteredData, list => {
+  const maxPage = Math.max(1, Math.ceil(list.length / pageSize.value) || 1)
+  if (currentPage.value > maxPage) {
+    currentPage.value = maxPage
+  }
+})
+
 const handleCollaborationChange = (row: { name: string; collaborationEnabled: boolean }) => {
   const partner: TradingPartner = {
     partnerKey: partnerKey(row.name),
@@ -247,38 +257,29 @@ const handleCodeClick = (row: SupplierMaster) => {
   handleEdit(row.id)
 }
 
-const handleDelete = async (id: string) => {
-  try {
-    await ElMessageBox.confirm('确定删除该供应商吗？删除后不可恢复。', '删除确认', {
-      type: 'warning',
-      confirmButtonText: '确定',
-      cancelButtonText: '取消'
-    })
-    if (deleteSupplier(id)) {
-      loadSupplierListData()
-      loadCollaborationFlags()
-      ElMessage.success('删除成功')
-    } else {
-      ElMessage.error('供应商不存在')
-    }
-  } catch {
-    // 用户取消
+const handleToolbarDelete = async () => {
+  if (selectedRows.value.length === 0) {
+    ElMessage.warning('请先勾选要删除的供应商')
+    return
   }
-}
 
-const handleAuditToggle = async (row: SupplierMaster) => {
-  const isAudited = row.auditStatus === 'audited'
   try {
+    const count = selectedRows.value.length
+    const names = selectedRows.value.map(item => item.name).join('、')
     await ElMessageBox.confirm(
-      isAudited ? '确定反审核该供应商吗？' : '确定审核通过该供应商吗？',
-      isAudited ? '反审核确认' : '审核确认',
-      { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }
+      `请谨慎删除！确定删除选中的 ${count} 条供应商吗？\n${names}\n此操作不可恢复。`,
+      '删除确认',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
     )
-    const updated = setSupplierAuditStatus(row.id, !isAudited)
-    if (updated) {
-      Object.assign(row, updated)
-      ElMessage.success(isAudited ? '已反审核' : '审核通过')
-    }
+    const ids = selectedRows.value.map(item => item.id)
+    tableData.value = batchDeleteSuppliers(ids)
+    loadCollaborationFlags()
+    clearTableSelection()
+    ElMessage.success('删除成功')
   } catch {
     // 用户取消
   }
@@ -320,6 +321,25 @@ const handlePageSizeChange = (size: number) => {
   pageSize.value = size
   currentPage.value = 1
 }
+
+const handleSelectionChange = (rows: SupplierMaster[]) => {
+  selectedRows.value = rows
+}
+
+const clearTableSelection = () => {
+  selectedRows.value = []
+  tableRef.value?.clearSelection?.()
+}
+
+const {
+  canAudit,
+  canBatchAudit,
+  canBatchUnaudit,
+  handleBatchAudit
+} = usePartnerListBatchAudit(tableData, selectedRows, clearTableSelection, {
+  entityLabel: '供应商',
+  batchSetAudit: batchSetSupplierAuditStatus
+})
 
 onMounted(() => {
   const range = getDateRange('thisMonth')
@@ -392,6 +412,26 @@ onMounted(() => {
           <el-button @click="handleRefresh">刷新</el-button>
           <el-button type="primary" class="btn-teal" @click="handleCreate">新增</el-button>
           <el-button
+            v-if="canAudit"
+            type="success"
+            plain
+            :disabled="!canBatchAudit"
+            @click="handleBatchAudit('audit')"
+          >审核</el-button>
+          <el-button
+            v-if="canAudit"
+            class="btn-unaudit-pink"
+            plain
+            :disabled="!canBatchUnaudit"
+            @click="handleBatchAudit('unaudit')"
+          >反审核</el-button>
+          <el-button
+            type="danger"
+            plain
+            :disabled="selectedRows.length === 0"
+            @click="handleToolbarDelete"
+          >删除</el-button>
+          <el-button
             :type="showAdvancedFilter ? 'success' : 'default'"
             @click="showAdvancedFilter = !showAdvancedFilter; saveSearchForm()"
           >
@@ -444,14 +484,18 @@ onMounted(() => {
 
     <div class="table-card">
       <el-table
+        ref="tableRef"
         :data="pagedData"
+        row-key="id"
         class="common-table"
         border
         :fit="false"
         @row-dblclick="handleRowDoubleClick"
         @header-dragend="handleHeaderDragend"
+        @selection-change="handleSelectionChange"
       >
         <el-table-column type="index" label="行号" :index="indexMethod" :width="columnWidths.index" align="center" />
+        <el-table-column type="selection" :width="columnWidths.select" fixed="left" />
         <el-table-column prop="id" label="供应商编号" :width="columnWidths.id">
           <template #default="{ row }">
             <span class="code-link" @click="handleCodeClick(row)">{{ row.code || row.id }}</span>
@@ -494,20 +538,6 @@ onMounted(() => {
           </template>
         </el-table-column>
         <el-table-column prop="createTime" label="建档日期" :width="columnWidths.createTime" />
-        <el-table-column label="操作" :width="columnWidths.action" align="center" fixed="right">
-          <template #default="{ row }">
-            <el-button type="primary" link size="small" @click="handleEdit(row.id)">编辑</el-button>
-            <el-button
-              type="primary"
-              link
-              size="small"
-              @click="handleAuditToggle(row)"
-            >
-              {{ row.auditStatus === 'audited' ? '反审核' : '审核' }}
-            </el-button>
-            <el-button type="danger" link size="small" @click="handleDelete(row.id)">删除</el-button>
-          </template>
-        </el-table-column>
       </el-table>
 
       <div class="pagination">
@@ -587,6 +617,19 @@ onMounted(() => {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .btn-unaudit-pink {
+    --el-button-text-color: #db2777;
+    --el-button-border-color: #f9a8d4;
+    --el-button-bg-color: #fdf2f8;
+    --el-button-hover-text-color: #be185d;
+    --el-button-hover-border-color: #f472b6;
+    --el-button-hover-bg-color: #fce7f3;
+    --el-button-disabled-text-color: #f9a8d4;
+    --el-button-disabled-border-color: #fce7f3;
+    --el-button-disabled-bg-color: #fff;
   }
 
   .search-advanced {

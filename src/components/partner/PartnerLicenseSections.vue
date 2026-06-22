@@ -168,7 +168,7 @@ const emptyDescription = computed(() => {
     if (!props.companyType) {
       return '请先在公司资料中设置企业类型，以加载平台默认证照模板'
     }
-    return '当前分类下证照均已隐匿，请点击「企业证照展示」开启显示'
+    return '请打开「企业证照展示」，勾选需要的平台证照项目'
   }
   if (!props.companyType) {
     return displayVariant.value === 'platform'
@@ -430,22 +430,22 @@ onMounted(() => {
 <template>
   <div class="license-sections">
     <div class="license-layout-main">
-    <div class="qualification-profile-bar" :class="{ 'is-platform': displayVariant === 'platform' }">
+    <div class="qualification-profile-bar">
       <template v-if="displayVariant === 'platform'">
-        <span class="tripartite-title">三方信息</span>
-        <div class="tripartite-tabs">
-          <button
+        <span class="profile-bar-label">三方信息</span>
+        <div class="profile-filter-tags">
+          <el-tag
             v-for="item in PLATFORM_TRIPARTITE_ITEMS"
             :key="item.key"
-            type="button"
-            class="tripartite-tab"
-            :class="{ active: qualificationProfile === item.key, 'is-clickable': !readonly }"
-            :disabled="readonly"
+            :type="qualificationProfile === item.key ? 'success' : 'info'"
+            effect="plain"
+            :class="{ 'is-clickable': !readonly }"
             @click="handleTripartiteSelect(item.key)"
           >
-            <span class="tab-label">{{ item.label }}</span>
-          </button>
+            {{ item.label }}
+          </el-tag>
         </div>
+        <span class="profile-hint">已按三方类型筛选，仅显示需上传的资质分类</span>
         <span v-if="companyType" class="profile-current">
           当前企业：<strong>{{ profileLabel }}</strong>
         </span>
@@ -483,6 +483,9 @@ onMounted(() => {
         <div v-if="!readonly" class="license-quota-tip">
           <span>{{ LICENSE_IMAGE_UPLOAD_HINT }}</span>
           <span class="quota-usage">{{ licenseQuotaText }}</span>
+        </div>
+        <div v-if="!readonly" class="license-drag-tip">
+          同分类下有多张证照时，可按住卡片右上角「拖拽」调整顺序
         </div>
       </div>
       <div class="toolbar-actions">
@@ -568,63 +571,21 @@ onMounted(() => {
   border-radius: 6px;
   flex-wrap: wrap;
 
-  &.is-platform {
-    background: #f8fafc;
-    border-color: #dbe3ef;
-  }
-
-  .tripartite-title {
+  .profile-bar-label {
     font-size: 13px;
-    font-weight: 700;
+    font-weight: 600;
     color: #344054;
-    margin-right: 4px;
+    flex-shrink: 0;
   }
 
-  .tripartite-tabs {
+  .profile-filter-tags {
     display: flex;
     align-items: center;
     gap: 6px;
-  }
+    flex-wrap: wrap;
 
-  .tripartite-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 12px;
-    border-radius: 999px;
-    border: 1px solid #d0d5dd;
-    background: #fff;
-    font-size: 12px;
-    font-family: inherit;
-    color: #667085;
-    line-height: 1.4;
-
-    &.is-clickable {
+    :deep(.el-tag.is-clickable) {
       cursor: pointer;
-
-      &:hover:not(:disabled) {
-        border-color: #00bfa5;
-        background: #f6fffd;
-      }
-    }
-
-    &:disabled {
-      cursor: default;
-      opacity: 0.85;
-    }
-
-    .tab-label {
-      font-weight: 600;
-      color: #344054;
-    }
-
-    &.active {
-      border-color: #00bfa5;
-      background: #ecfdf8;
-
-      .tab-label {
-        color: #007a6a;
-      }
     }
   }
 
@@ -678,6 +639,17 @@ onMounted(() => {
     color: #007a6a;
     font-weight: 600;
   }
+}
+
+.license-drag-tip {
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px dashed #7fdcc8;
+  background: #f6fffd;
+  font-size: 12px;
+  color: #007a6a;
+  line-height: 1.45;
 }
 
   > .el-button {

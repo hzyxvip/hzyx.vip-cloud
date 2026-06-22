@@ -1,4 +1,5 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { getRolePermissions } from '@/constants/rolePermissions'
 
 /** 系统管理员或平台管理员 */
 export function isPlatformProductAdmin(): boolean {
@@ -6,9 +7,41 @@ export function isPlatformProductAdmin(): boolean {
   return role === 'admin' || role === 'platform_admin'
 }
 
+export function getUserPermissions(): string[] {
+  try {
+    const raw = localStorage.getItem('userPermissions')
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) return parsed.filter(Boolean)
+    }
+  } catch {
+    // ignore malformed cache
+  }
+
+  const role = localStorage.getItem('userRole') || ''
+  return getRolePermissions(role)
+}
+
+export function hasPermission(code: string): boolean {
+  if (isPlatformProductAdmin()) return true
+  return getUserPermissions().includes(code)
+}
+
+/** 可审核/反审核商品（平台管理员、企业管理员或具备 product_audit 权限） */
+export function isProductAuditor(): boolean {
+  const role = localStorage.getItem('userRole') || ''
+  return isPlatformProductAdmin() || role === 'company_admin' || hasPermission('product_audit')
+}
+
 export function requirePlatformProductAdmin(actionLabel: string): boolean {
   if (isPlatformProductAdmin()) return true
   ElMessage.warning(`仅平台管理员可${actionLabel}`)
+  return false
+}
+
+export function requireProductAudit(actionLabel: string): boolean {
+  if (isProductAuditor()) return true
+  ElMessage.warning(`您没有商品审核权限，无法${actionLabel}`)
   return false
 }
 

@@ -7,7 +7,7 @@ import { useTableStyle } from '@/composables/useTableStyle'
 import { useProductListColumnSettings } from '@/composables/useProductListColumnSettings'
 import { useProductListBatchActions } from '@/composables/useProductListBatchActions'
 import { productSourceLabel } from '@/utils/customerProductService'
-import { saveProductList, loadAndEnsureProductList, clearProductList } from '@/utils/productStore'
+import { saveProductList, loadAndEnsureProductList, clearProductList, getProductUnit } from '@/utils/productStore'
 import {
   PRODUCT_EXPORT_LIMIT,
   exportProductsToExcel,
@@ -18,6 +18,7 @@ import {
 import {
   confirmClearAllProducts,
   isPlatformProductAdmin,
+  isProductAuditor,
   requirePlatformProductAdmin
 } from '@/utils/userPermission'
 import {
@@ -33,6 +34,7 @@ import {
 const router = useRouter()
 const importInputRef = ref<HTMLInputElement | null>(null)
 const canProductAuditDelete = computed(() => isPlatformProductAdmin())
+const canProductAudit = computed(() => isProductAuditor())
 const LEGACY_CATEGORY_STORAGE_KEYS = ['defaultPlatformProductCategory', 'defaultProductCategory']
 
 const defaultCategories = [
@@ -229,6 +231,7 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('platform-product-li
   { key: 'code', label: '商品编码', defaultWidth: 120 },
   { key: 'name', label: '商品名称', defaultWidth: 150 },
   { key: 'spec', label: '规格型号', defaultWidth: 120 },
+  { key: 'measureUnit', label: '单位', defaultWidth: 72, align: 'center' },
   { key: 'manufacturer', label: '生产厂家', defaultWidth: 150 },
   { key: 'brand', label: '品牌', defaultWidth: 80 },
   { key: 'category', label: '商品分类', defaultWidth: 100 },
@@ -238,7 +241,6 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('platform-product-li
   { key: 'udiCode', label: 'UDI码', defaultWidth: 140 },
   { key: 'medicalCode', label: '医保码', defaultWidth: 180 },
   { key: 'medicalClass', label: '医保报销分类', defaultWidth: 120 },
-  { key: 'measureUnit', label: '计量单位', defaultWidth: 80 },
   { key: 'storageCondition', label: '储运条件', defaultWidth: 120 },
   { key: 'medType', label: '医疗器械分类', defaultWidth: 120 },
   { key: 'source', label: '商品来源', defaultWidth: 100 },
@@ -501,8 +503,9 @@ const {
   batchModifyColumn,
   batchModifyValue,
   batchModifiableColumns,
-  auditActionLabel,
-  handleAuditToggle,
+  canBatchAudit,
+  canBatchUnaudit,
+  handleBatchAudit,
   handleBatchDelete,
   openBatchModifyDialog,
   confirmBatchModify
@@ -702,9 +705,22 @@ const handleImportFile = async (event: Event) => {
             <span class="selected-text">已选中 <strong>{{ selectedIds.length }}</strong> 条</span>
           </div>
           <div class="action-bar-controls">
-            <el-button v-if="canProductAuditDelete" type="primary" link size="small" @click="handleAuditToggle">
-              {{ auditActionLabel }}
-            </el-button>
+            <el-button
+              v-if="canProductAudit"
+              type="success"
+              plain
+              size="small"
+              :disabled="!canBatchAudit"
+              @click="handleBatchAudit('audit')"
+            >审核</el-button>
+            <el-button
+              v-if="canProductAudit"
+              class="btn-unaudit-pink"
+              plain
+              size="small"
+              :disabled="!canBatchUnaudit"
+              @click="handleBatchAudit('unaudit')"
+            >反审核</el-button>
             <el-button
               type="danger"
               link
@@ -805,6 +821,8 @@ const handleImportFile = async (event: Event) => {
                 </span>
 
                 <span v-else-if="col.key === 'auditTime'">{{ scope.row.auditTime || '-' }}</span>
+
+                <span v-else-if="col.key === 'measureUnit'">{{ getProductUnit(scope.row) || '-' }}</span>
 
                 <span v-else>{{ scope.row[col.prop] ?? '' }}</span>
               </template>
@@ -1144,6 +1162,22 @@ const handleImportFile = async (event: Event) => {
     flex-wrap: wrap;
     gap: 4px 8px;
     flex: 1;
+
+    .audit-dropdown-icon {
+      margin-left: 4px;
+    }
+
+    .btn-unaudit-pink {
+      --el-button-text-color: #db2777;
+      --el-button-border-color: #f9a8d4;
+      --el-button-bg-color: #fdf2f8;
+      --el-button-hover-text-color: #be185d;
+      --el-button-hover-border-color: #f472b6;
+      --el-button-hover-bg-color: #fce7f3;
+      --el-button-disabled-text-color: #f9a8d4;
+      --el-button-disabled-border-color: #fce7f3;
+      --el-button-disabled-bg-color: #fff;
+    }
 
     :deep(.el-button.is-link) {
       padding: 4px 8px;

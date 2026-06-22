@@ -1,7 +1,7 @@
 import { ref, computed, type Ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { saveProductList } from '@/utils/productStore'
-import { requirePlatformProductAdmin } from '@/utils/userPermission'
+import { requirePlatformProductAdmin, requireProductAudit } from '@/utils/userPermission'
 import { PRODUCT_LIST_COLUMN_DEFINITIONS } from '@/composables/useProductListColumnSettings'
 
 const BATCH_MODIFY_EXCLUDED_KEYS = new Set(['code', 'auditStatus', 'auditTime', 'source'])
@@ -12,6 +12,10 @@ function normalizeProductId(id: unknown): string {
 
 function isSameProductId(a: unknown, b: unknown): boolean {
   return normalizeProductId(a) === normalizeProductId(b)
+}
+
+function isProductAudited(auditStatus: unknown): boolean {
+  return auditStatus === '已审核'
 }
 
 export function useProductListBatchActions(
@@ -42,26 +46,70 @@ export function useProductListBatchActions(
     )
   )
 
-  const auditActionLabel = computed(() => {
-    if (selectedIds.value.length === 0) return '审核'
-    return selectedProducts.value.every(p => p.auditStatus === '已审核') ? '反审核' : '审核'
+  const selectionAuditState = computed(() => {
+    const rows = selectedProducts.value
+    const auditedCount = rows.filter(row => isProductAudited(row.auditStatus)).length
+    const notAuditedCount = rows.length - auditedCount
+    return {
+      auditedCount,
+      notAuditedCount,
+      isMixed: auditedCount > 0 && notAuditedCount > 0
+    }
   })
+
+  const canBatchAudit = computed(() => {
+    const { notAuditedCount, isMixed } = selectionAuditState.value
+    return selectedIds.value.length > 0 && !isMixed && notAuditedCount > 0
+  })
+
+  const canBatchUnaudit = computed(() => {
+    const { auditedCount, isMixed } = selectionAuditState.value
+    return selectedIds.value.length > 0 && !isMixed && auditedCount > 0
+  })
+
+  const validateBatchAuditSelection = (action: 'audit' | 'unaudit'): string | null => {
+    if (selectedIds.value.length === 0) {
+      return '请先选择商品'
+    }
+
+    const { auditedCount, notAuditedCount, isMixed } = selectionAuditState.value
+    if (isMixed) {
+      return '不能同时勾选已审核和待审核的商品，请分开后再操作'
+    }
+
+    if (action === 'audit' && auditedCount > 0) {
+      return '选中的商品已是已审核状态，不能重复审核'
+    }
+
+    if (action === 'unaudit' && notAuditedCount > 0) {
+      return '选中的商品已是待审核状态，不能重复反审核'
+    }
+
+    return null
+  }
 
   const clearSelection = () => {
     selectedIds.value = []
     selectAll.value = false
   }
 
-  const handleAuditToggle = async () => {
-    if (!requirePlatformProductAdmin('审核商品')) return
-    if (!requireSelection()) return
+  const handleBatchAudit = async (action: 'audit' | 'unaudit' | string) => {
+    if (action !== 'audit' && action !== 'unaudit') return
+    if (!requireProductAudit(action === 'audit' ? '审核商品' : '反审核商品')) return
 
-    const isUnaudit = auditActionLabel.value === '反审核'
+    const validationError = validateBatchAuditSelection(action)
+    if (validationError) {
+      ElMessage.warning(validationError)
+      return
+    }
+
+    const isUnaudit = action === 'unaudit'
+    const count = selectedIds.value.length
     try {
       await ElMessageBox.confirm(
         isUnaudit
-          ? `确定反审核 ${selectedIds.value.length} 个商品吗？`
-          : `确定审核 ${selectedIds.value.length} 个商品吗？`,
+          ? `确定反审核选中的 ${count} 个商品吗？`
+          : `确定审核通过选中的 ${count} 个商品吗？`,
         isUnaudit ? '反审核确认' : '审核确认',
         { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
       )
@@ -76,7 +124,7 @@ export function useProductListBatchActions(
       saveProductList(allProducts.value)
       refreshList()
       clearSelection()
-      ElMessage.success(isUnaudit ? '已反审核' : '审核成功')
+      ElMessage.success(isUnaudit ? `已反审核 ${count} 个商品` : `已审核 ${count} 个商品`)
     } catch {
       // 用户取消
     }
@@ -136,8 +184,9 @@ export function useProductListBatchActions(
     batchModifyColumn,
     batchModifyValue,
     batchModifiableColumns,
-    auditActionLabel,
-    handleAuditToggle,
+    canBatchAudit,
+    canBatchUnaudit,
+    handleBatchAudit,
     handleBatchDelete,
     openBatchModifyDialog,
     confirmBatchModify

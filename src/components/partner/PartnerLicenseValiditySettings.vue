@@ -4,6 +4,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Rank } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import { PARTNER_LICENSE_SECTIONS, formatLicenseSectionCode } from '@/constants/partnerLicenseSections'
+import {
+  buildValidityNoteFromYears,
+  parseValidityYearsFromNote
+} from '@/constants/licenseValidityRules'
 import PartnerLicenseDocName from '@/components/partner/PartnerLicenseDocName.vue'
 import {
   LICENSE_WARNING_MONTH_OPTIONS,
@@ -36,12 +40,10 @@ import {
   TENANT_LICENSE_DELETE_CONFIRM,
   TENANT_LICENSE_RULE_TIP,
   applyTenantLicenseVisibilityScope,
-  buildTenantLicenseReferenceOptions,
   buildTenantLicenseSettingsSections,
-  getTenantLicenseReferenceStatusLabel,
   isTenantLicenseDeletable,
   isTenantLicenseKey,
-  TENANT_LICENSE_REFERENCE_TIP
+  TENANT_LICENSE_RULE_TIP
 } from '@/utils/tenantCompanyLicenseService'
 import type { PartnerDocument } from '@/types/partnerProfile'
 
@@ -90,15 +92,13 @@ const addDialogVisible = ref(false)
 const batchDialogVisible = ref(false)
 const editingLicenseKey = ref<string | null>(null)
 const selectedLicenseKeys = ref<string[]>([])
-const tenantReferenceKey = ref('')
-const tenantReferenceSectionCode = ref('')
 const addForm = reactive({
   docName: '',
   docNameSub: '',
   sectionCode: PARTNER_LICENSE_SECTIONS[0]?.code || '1',
   docNoLabel: '证照编号',
   longTerm: false,
-  validityNote: ''
+  validityYears: ''
 })
 const batchForm = reactive({
   applySectionCode: false,
@@ -108,7 +108,7 @@ const batchForm = reactive({
   applyLongTerm: false,
   longTerm: false,
   applyValidityNote: false,
-  validityNote: '',
+  validityYears: '',
   applyVisibility: false,
   visible: true
 })
@@ -185,37 +185,9 @@ const addSectionOptions = computed(() =>
   props.tenantMode ? licenseSections.value : PARTNER_LICENSE_SECTIONS
 )
 
-const tenantReferenceOptions = computed(() =>
-  buildTenantLicenseReferenceOptions(
-    props.companyType,
-    props.documents,
-    visibility.value,
-    tenantReferenceSectionCode.value || undefined
-  )
-)
-
-const tenantReferenceOptionGroups = computed(() => {
-  const groups = new Map<string, { code: string; title: string; items: typeof tenantReferenceOptions.value }>()
-  tenantReferenceOptions.value.forEach(option => {
-    if (!groups.has(option.sectionCode)) {
-      groups.set(option.sectionCode, {
-        code: option.sectionCode,
-        title: option.sectionTitle,
-        items: []
-      })
-    }
-    groups.get(option.sectionCode)?.items.push(option)
-  })
-  return Array.from(groups.values())
-})
-
-const selectableTenantReferenceCount = computed(() =>
-  tenantReferenceOptions.value.filter(option => option.selectable).length
-)
-
 const tenantAddDialogTitle = computed(() => {
   if (editingLicenseKey.value) return '修改证照'
-  return props.tenantMode ? '引用平台证照' : '新增证照'
+  return props.tenantMode ? '新增证照' : '新增证照'
 })
 
 const closeDrawer = () => {
@@ -235,11 +207,34 @@ const handleWarningMonthsChange = (months: number) => {
   emit('warning-months-change', normalized)
 }
 
+const ensureTenantLicenseReferenced = (itemKey: string) => {
+  if (isTenantLicenseKey(itemKey)) return
+  const exists = props.documents?.some(doc => String(doc.docKey) === itemKey)
+  if (!exists) {
+    emit('tenant-license-reference', itemKey)
+  }
+}
+
+const isTenantLicenseItemChecked = (itemKey: string): boolean => {
+  const referenced = props.documents?.some(doc => String(doc.docKey) === itemKey) === true
+  return referenced && visibility.value.items[itemKey] !== false
+}
+
+const handleTenantLicenseItemCheck = (sectionCode: string, itemKey: string, checked: boolean) => {
+  if (checked) {
+    ensureTenantLicenseReferenced(itemKey)
+  }
+  setItemVisible(sectionCode, itemKey, checked)
+}
+
 const setSectionVisible = (sectionCode: string, visible: boolean) => {
   if (props.tenantMode) {
     const section = licenseSections.value.find(item => item.code === sectionCode)
     const nextItems = { ...visibility.value.items }
     section?.items.forEach(item => {
+      if (visible) {
+        ensureTenantLicenseReferenced(item.key)
+      }
       nextItems[item.key] = visible
     })
     visibility.value = {
@@ -254,6 +249,9 @@ const setSectionVisible = (sectionCode: string, visible: boolean) => {
 
 const setItemVisible = (sectionCode: string, itemKey: string, visible: boolean) => {
   if (props.tenantMode) {
+    if (visible) {
+      ensureTenantLicenseReferenced(itemKey)
+    }
     const nextItems = { ...visibility.value.items, [itemKey]: visible }
     const section = licenseSections.value.find(item => item.code === sectionCode)
     const sectionVisible = section?.items.some(item => nextItems[item.key] !== false) ?? visible
@@ -269,6 +267,9 @@ const setItemVisible = (sectionCode: string, itemKey: string, visible: boolean) 
 
 const selectAll = () => {
   if (props.tenantMode) {
+    licenseSections.value.forEach(section => {
+      section.items.forEach(item => ensureTenantLicenseReferenced(item.key))
+    })
     visibility.value = applyTenantLicenseVisibilityScope(
       visibility.value,
       props.companyType,
@@ -314,6 +315,9 @@ const toggleSelectAllLicenses = (checked: boolean) => {
   selectedLicenseKeys.value = checked ? [...allLicenseKeys.value] : []
 }
 
+const composeValidityNote = (longTerm: boolean, validityYears: string) =>
+  longTerm ? '' : buildValidityNoteFromYears(validityYears)
+
 const resetBatchForm = () => {
   batchForm.applySectionCode = false
   batchForm.sectionCode = PARTNER_LICENSE_SECTIONS[0]?.code || '1'
@@ -322,7 +326,7 @@ const resetBatchForm = () => {
   batchForm.applyLongTerm = false
   batchForm.longTerm = false
   batchForm.applyValidityNote = false
-  batchForm.validityNote = ''
+  batchForm.validityYears = ''
   batchForm.applyVisibility = false
   batchForm.visible = true
 }
@@ -371,7 +375,7 @@ const submitBatchEdit = () => {
         sectionCode: batchForm.sectionCode,
         docNoLabel: batchForm.docNoLabel,
         longTerm: batchForm.longTerm,
-        validityNote: batchForm.validityNote
+        validityNote: composeValidityNote(batchForm.longTerm, batchForm.validityYears)
       }
     )
     updated = result.updated
@@ -416,17 +420,11 @@ const resetAddForm = () => {
   addForm.sectionCode = addSectionOptions.value[0]?.code || PARTNER_LICENSE_SECTIONS[0]?.code || '1'
   addForm.docNoLabel = '证照编号'
   addForm.longTerm = false
-  addForm.validityNote = ''
+  addForm.validityYears = ''
 }
 
 const openAddDialog = (sectionCode?: string) => {
   editingLicenseKey.value = null
-  if (props.tenantMode) {
-    tenantReferenceKey.value = ''
-    tenantReferenceSectionCode.value = sectionCode || ''
-    addDialogVisible.value = true
-    return
-  }
   resetAddForm()
   if (sectionCode) {
     addForm.sectionCode = sectionCode
@@ -458,7 +456,7 @@ const openEditDialog = () => {
     addForm.sectionCode = doc.sectionCode || PARTNER_LICENSE_SECTIONS[0]?.code || '1'
     addForm.docNoLabel = doc.docNoLabel || '证照编号'
     addForm.longTerm = doc.longTerm === true
-    addForm.validityNote = doc.validityNote || ''
+    addForm.validityYears = parseValidityYearsFromNote(doc.validityNote || '')
     addDialogVisible.value = true
     return
   }
@@ -475,8 +473,13 @@ const openEditDialog = () => {
   addForm.sectionCode = template.sectionCode
   addForm.docNoLabel = template.docNoLabel || '证照编号'
   addForm.longTerm = template.longTerm === true
-  addForm.validityNote = template.validityNote || ''
+  addForm.validityYears = parseValidityYearsFromNote(template.validityNote || '')
   addDialogVisible.value = true
+}
+
+const openTenantCustomEdit = (itemKey: string) => {
+  selectedLicenseKeys.value = [itemKey]
+  openEditDialog()
 }
 
 const toggleLicenseSelection = (itemKey: string, checked: boolean) => {
@@ -583,7 +586,7 @@ const submitAdd = async () => {
           sectionCode: addForm.sectionCode,
           docNoLabel: addForm.docNoLabel,
           longTerm: addForm.longTerm,
-          validityNote: addForm.validityNote
+          validityNote: composeValidityNote(addForm.longTerm, addForm.validityYears)
         }
         emit('tenant-license-update', { docKey: editingLicenseKey.value, ...payload })
         addDialogVisible.value = false
@@ -592,25 +595,16 @@ const submitAdd = async () => {
         return
       }
 
-      if (!tenantReferenceKey.value) {
-        ElMessage.warning('请选择要引用的平台证照项目')
-        return
-      }
-
-      const option = tenantReferenceOptions.value.find(item => item.key === tenantReferenceKey.value)
-      if (!option) {
-        ElMessage.warning('未找到所选平台证照项目')
-        return
-      }
-      if (!option.selectable) {
-        ElMessage.warning('该证照已在展示中')
-        return
-      }
-
-      emit('tenant-license-reference', tenantReferenceKey.value)
+      emit('tenant-license-create', {
+        docName: addForm.docName,
+        docNameSub: addForm.docNameSub,
+        sectionCode: addForm.sectionCode,
+        docNoLabel: addForm.docNoLabel,
+        longTerm: addForm.longTerm,
+        validityNote: composeValidityNote(addForm.longTerm, addForm.validityYears)
+      })
       addDialogVisible.value = false
-      tenantReferenceKey.value = ''
-      ElMessage.success(option.status === 'hidden' ? '已恢复展示该平台证照' : '已引用平台证照')
+      ElMessage.success('证照已新增')
       return
     }
 
@@ -621,7 +615,7 @@ const submitAdd = async () => {
         sectionCode: addForm.sectionCode,
         docNoLabel: addForm.docNoLabel,
         longTerm: addForm.longTerm,
-        validityNote: addForm.validityNote
+        validityNote: composeValidityNote(addForm.longTerm, addForm.validityYears)
       })
       if (!updated) {
         ElMessage.warning('修改失败，证照不存在')
@@ -647,7 +641,7 @@ const submitAdd = async () => {
       sectionCode: addForm.sectionCode,
       docNoLabel: addForm.docNoLabel,
       longTerm: addForm.longTerm,
-      validityNote: addForm.validityNote
+      validityNote: composeValidityNote(addForm.longTerm, addForm.validityYears)
     })
     visibility.value = setLicenseItemVisible(visibility.value, template.sectionCode, template.key, true)
     persistVisibility()
@@ -751,34 +745,43 @@ defineExpose({
         <div class="block-title row-with-actions">
           <span>{{ categoryBlockTitle }}</span>
           <div v-if="!readonly" class="quick-actions">
-            <el-button type="primary" :icon="Plus" size="small" @click="openAddDialog()">添加项</el-button>
             <el-button
+              v-if="!tenantMode"
+              type="primary"
+              :icon="Plus"
+              size="small"
+              @click="openAddDialog()"
+            >添加项</el-button>
+            <el-button
+              v-if="!tenantMode"
               size="small"
               :disabled="selectedLicenseKeys.length === 0"
               @click="openBatchEditDialog"
             >批量修改</el-button>
             <el-button
+              v-if="!tenantMode"
               size="small"
               :disabled="selectedLicenseKeys.length !== 1"
               @click="openEditDialog"
             >修改</el-button>
             <el-button
+              v-if="!tenantMode"
               type="danger"
               plain
               size="small"
               :disabled="selectedLicenseKeys.length === 0"
               @click="handleToolbarDelete"
             >删除</el-button>
-            <el-button type="primary" link size="small" @click="selectAll">全显示</el-button>
-            <el-button type="primary" link size="small" @click="clearAll">全隐匿</el-button>
+            <el-button type="primary" link size="small" @click="selectAll">{{ tenantMode ? '全选引用' : '全显示' }}</el-button>
+            <el-button type="primary" link size="small" @click="clearAll">{{ tenantMode ? '全取消' : '全隐匿' }}</el-button>
           </div>
         </div>
         <div class="block-hint">
-          <template v-if="tenantMode">仅展示当前企业身份适用的证照；添加项优先引用平台已有项目；本企业自定义证照可修改或删除，平台模板不可删除</template>
+          <template v-if="tenantMode">勾选需要的平台证照即可引用到企业证照列表；取消勾选将隐匿（已填写内容保留）；本企业自定义证照可修改或删除</template>
           <template v-else>勾选证照后可批量修改或删除；拖拽左侧手柄可调整排序，与证照展示页同步；关闭隐匿开关后，该证照不在列表中显示</template>
         </div>
 
-        <div v-if="!readonly" class="batch-select-bar">
+        <div v-if="!readonly && !tenantMode" class="batch-select-bar">
           <el-checkbox
             :model-value="isAllLicensesSelected"
             :indeterminate="isLicenseSelectionIndeterminate"
@@ -809,15 +812,7 @@ defineExpose({
                   @change="(val: string | number | boolean) => setSectionVisible(section.code, Boolean(val))"
                 />
               </div>
-              <span class="delete-slot section-action-slot">
-                <el-button
-                  v-if="!readonly"
-                  type="primary"
-                  link
-                  size="small"
-                  @click="openAddDialog(section.code)"
-                >添加项</el-button>
-              </span>
+              <span class="delete-slot section-action-slot" />
             </div>
 
             <div
@@ -837,8 +832,10 @@ defineExpose({
                   </button>
                   <el-checkbox
                     v-if="!readonly"
-                    :model-value="selectedLicenseKeys.includes(item.key)"
-                    @change="(val: string | number | boolean) => toggleLicenseSelection(item.key, Boolean(val))"
+                    :model-value="tenantMode ? isTenantLicenseItemChecked(item.key) : selectedLicenseKeys.includes(item.key)"
+                    @change="(val: string | number | boolean) => tenantMode
+                      ? handleTenantLicenseItemCheck(section.code, item.key, Boolean(val))
+                      : toggleLicenseSelection(item.key, Boolean(val))"
                   />
                 </span>
                 <PartnerLicenseDocName
@@ -849,9 +846,12 @@ defineExpose({
                 <div class="visibility-cell">
                   <span
                     class="visibility-status"
-                    :class="visibility.items[item.key] !== false ? 'is-visible' : 'is-hidden'"
-                  >{{ visibility.items[item.key] !== false ? '显示' : '隐匿' }}</span>
+                    :class="(tenantMode ? isTenantLicenseItemChecked(item.key) : visibility.items[item.key] !== false) ? 'is-visible' : 'is-hidden'"
+                  >{{ tenantMode
+                    ? (isTenantLicenseItemChecked(item.key) ? '已引用' : '未引用')
+                    : (visibility.items[item.key] !== false ? '显示' : '隐匿') }}</span>
                   <el-switch
+                    v-if="!tenantMode"
                     :model-value="visibility.items[item.key] !== false"
                     :disabled="readonly"
                     size="small"
@@ -859,6 +859,13 @@ defineExpose({
                   />
                 </div>
                 <span class="delete-slot">
+                  <el-button
+                    v-if="!readonly && tenantMode && isTenantLicenseDeletable(item.key)"
+                    type="primary"
+                    link
+                    size="small"
+                    @click="openTenantCustomEdit(item.key)"
+                  >修改</el-button>
                   <el-button
                     v-if="!readonly && (!tenantMode || isTenantLicenseDeletable(item.key))"
                     type="danger"
@@ -881,51 +888,14 @@ defineExpose({
       append-to-body
       destroy-on-close
     >
-      <template v-if="tenantMode && !editingLicenseKey">
-        <el-alert
-          class="tenant-add-tip"
-          type="info"
-          :closable="false"
-          show-icon
-          :title="TENANT_LICENSE_REFERENCE_TIP"
-        />
-        <div v-if="selectableTenantReferenceCount === 0" class="tenant-reference-empty">
-          {{ tenantReferenceSectionCode ? '当前分类下暂无可引用的平台证照，或已全部展示。' : '暂无可引用的平台证照，或已全部展示。' }}
-        </div>
-        <el-form v-else label-width="96px" @submit.prevent="submitAdd">
-          <el-form-item label="平台证照" required>
-            <el-select
-              v-model="tenantReferenceKey"
-              filterable
-              placeholder="请选择平台已有证照项目"
-              style="width: 100%;"
-            >
-              <el-option-group
-                v-for="group in tenantReferenceOptionGroups"
-                :key="group.code"
-                :label="`${formatLicenseSectionCode(group.code)}${group.title}`"
-              >
-                <el-option
-                  v-for="option in group.items"
-                  :key="option.key"
-                  :label="`${option.docName}${option.docNameSub || ''}`"
-                  :value="option.key"
-                  :disabled="!option.selectable"
-                >
-                  <div class="tenant-reference-option">
-                    <span>{{ option.docName }}{{ option.docNameSub || '' }}</span>
-                    <span
-                      class="tenant-reference-status"
-                      :class="`is-${option.status}`"
-                    >{{ getTenantLicenseReferenceStatusLabel(option.status) }}</span>
-                  </div>
-                </el-option>
-              </el-option-group>
-            </el-select>
-          </el-form-item>
-        </el-form>
-      </template>
-      <template v-else>
+      <el-alert
+        v-if="tenantMode && !editingLicenseKey"
+        class="tenant-add-tip"
+        type="info"
+        :closable="false"
+        show-icon
+        title="仅用于新增本企业自定义证照；平台模板证照请在列表中勾选引用。"
+      />
       <el-alert
         v-if="tenantMode && editingLicenseKey"
         class="tenant-add-tip"
@@ -957,19 +927,23 @@ defineExpose({
         <el-form-item label="长期有效">
           <el-switch v-model="addForm.longTerm" />
         </el-form-item>
-        <el-form-item v-if="!addForm.longTerm" label="效期说明">
-          <el-input v-model="addForm.validityNote" placeholder="如：有效期 5 年" />
+        <el-form-item v-if="!addForm.longTerm" label="有效期说明">
+          <div class="validity-note-field">
+            <span class="validity-note-prefix">有效期</span>
+            <el-input
+              v-model="addForm.validityYears"
+              class="validity-year-input"
+              maxlength="10"
+              inputmode="decimal"
+            />
+            <span class="validity-note-suffix">年</span>
+          </div>
         </el-form-item>
       </el-form>
-      </template>
       <template #footer>
         <el-button @click="addDialogVisible = false">取消</el-button>
-        <el-button
-          type="primary"
-          :disabled="tenantMode && !editingLicenseKey && selectableTenantReferenceCount === 0"
-          @click="submitAdd"
-        >
-          {{ editingLicenseKey ? '保存修改' : (tenantMode ? '确定引用' : '确定') }}
+        <el-button type="primary" @click="submitAdd">
+          {{ editingLicenseKey ? '保存修改' : '确定' }}
         </el-button>
       </template>
     </el-dialog>
@@ -1019,13 +993,21 @@ defineExpose({
           />
         </el-form-item>
         <el-form-item>
-          <el-checkbox v-model="batchForm.applyValidityNote">统一效期说明</el-checkbox>
-          <el-input
-            v-model="batchForm.validityNote"
-            :disabled="!batchForm.applyValidityNote || batchForm.applyLongTerm && batchForm.longTerm"
-            placeholder="如：有效期 5 年"
-            style="margin-top: 8px;"
-          />
+          <el-checkbox v-model="batchForm.applyValidityNote">统一有效期说明</el-checkbox>
+          <div
+            class="validity-note-field batch-validity-note-field"
+            :class="{ 'is-disabled': !batchForm.applyValidityNote || (batchForm.applyLongTerm && batchForm.longTerm) }"
+          >
+            <span class="validity-note-prefix">有效期</span>
+            <el-input
+              v-model="batchForm.validityYears"
+              class="validity-year-input"
+              maxlength="10"
+              inputmode="decimal"
+              :disabled="!batchForm.applyValidityNote || (batchForm.applyLongTerm && batchForm.longTerm)"
+            />
+            <span class="validity-note-suffix">年</span>
+          </div>
         </el-form-item>
         </template>
         <el-form-item>
@@ -1306,6 +1288,47 @@ defineExpose({
   align-items: center;
   justify-content: center;
   min-height: 24px;
+
+  :deep(.el-button.el-button--danger.is-link) {
+    color: #e55353;
+
+    &:hover,
+    &:focus {
+      color: #c93c3c;
+    }
+  }
+}
+
+.validity-note-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: #344054;
+
+  &.batch-validity-note-field {
+    margin-top: 8px;
+  }
+
+  &.is-disabled {
+    opacity: 0.55;
+  }
+}
+
+.validity-year-input {
+  width: 72px;
+
+  :deep(.el-input__wrapper) {
+    border-radius: 0;
+    box-shadow: none !important;
+    border-bottom: 1px solid #98a2b3;
+    background: transparent;
+    padding: 0 4px 2px;
+  }
+
+  :deep(.el-input__inner) {
+    text-align: center;
+  }
 }
 
 .drag-handle {

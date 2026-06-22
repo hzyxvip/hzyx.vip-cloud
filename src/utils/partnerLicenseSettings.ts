@@ -21,6 +21,26 @@ export type LicenseItemOrderConfig = Record<string, string[]>
 function migrateLicenseItemOrder(order: LicenseItemOrderConfig): LicenseItemOrderConfig {
   let next = { ...order }
 
+  if (next['3.1']?.length) {
+    const legacy31 = next['3.1'] || []
+    delete next['3.1']
+    const target = [...(next['2.1'] || [])]
+    legacy31.forEach(key => {
+      if (!target.includes(key)) target.push(key)
+    })
+    next['2.1'] = target
+  }
+
+  if (next['3.2']?.length) {
+    const legacy32 = next['3.2'] || []
+    delete next['3.2']
+    const target = [...(next['2.1'] || [])]
+    legacy32.forEach(key => {
+      if (!target.includes(key)) target.push(key)
+    })
+    next['2.1'] = target
+  }
+
   if (next['4']?.length) {
     const legacy4 = next['4'] || []
     delete next['4']

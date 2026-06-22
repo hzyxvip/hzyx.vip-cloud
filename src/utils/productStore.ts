@@ -132,9 +132,23 @@ function writeProductListRaw(
   localStorage.setItem(PRODUCT_LIST_KEY, JSON.stringify(list))
 }
 
+/** 统一读取商品名称（兼容历史字段别名） */
+export function getProductDisplayName(product: ProductMaster | Record<string, unknown>): string {
+  const raw = product as Record<string, unknown>
+  return String(raw.name || raw.productName || raw.goodsName || '').trim()
+}
+
+/** 规范化商品资料字段，确保开单/列表展示与商品资料一致 */
+export function normalizeProductMaster(product: ProductMaster): ProductMaster {
+  const code = String(product.code || '').trim()
+  const name = getProductDisplayName(product)
+  if (code === product.code && name === product.name) return product
+  return { ...product, code, name }
+}
+
 export function loadProductList(): ProductMaster[] {
   migrateLegacyPlatformProducts()
-  return readProductListRaw()
+  return readProductListRaw().map(normalizeProductMaster)
 }
 
 export function saveProductList(list: ProductMaster[]): void {
@@ -173,9 +187,10 @@ export function isProductAudited(product: ProductMaster): boolean {
 export function findProductInList(code: string): ProductMaster | undefined {
   const key = code.trim()
   if (!key) return undefined
-  return loadProductList().find(
+  const product = loadProductList().find(
     p => p.code === key || p.platformProductCode === key
   )
+  return product ? normalizeProductMaster(product) : undefined
 }
 
 export interface UnapprovedProductLine {
@@ -228,7 +243,7 @@ export function formatUnapprovedProductsMessage(
 export function isProductAvailableForPurchase(product: ProductMaster): boolean {
   if (!isProductAudited(product)) return false
   if (product.status && ['停用', '禁用'].includes(String(product.status))) return false
-  return Boolean(product.code && product.name)
+  return Boolean(String(product.code || '').trim() && getProductDisplayName(product))
 }
 
 /** 采购开单可选商品：已审核且未停用的商品资料 */
@@ -260,9 +275,10 @@ export function getProductAuxUnit(product: ProductMaster): string {
 
 function tokenMatchesProductField(product: ProductMaster, token: string): boolean {
   const t = token.toLowerCase()
+  const name = getProductDisplayName(product)
   return (
     (product.code?.toLowerCase().includes(t) ?? false) ||
-    (product.name?.toLowerCase().includes(t) ?? false) ||
+    (name.toLowerCase().includes(t) ?? false) ||
     (product.spec?.toLowerCase().includes(t) ?? false) ||
     (product.manufacturer?.toLowerCase().includes(t) ?? false)
   )
@@ -327,8 +343,8 @@ export function findProductByQuery(query: string, products?: ProductMaster[]): P
   return (
     list.find(p => p.code?.toLowerCase() === lower) ||
     list.find(p => p.udiCode?.toLowerCase() === lower) ||
-    list.find(p => p.name?.toLowerCase() === lower) ||
-    list.find(p => p.name?.toLowerCase().includes(lower)) ||
+    list.find(p => getProductDisplayName(p).toLowerCase() === lower) ||
+    list.find(p => getProductDisplayName(p).toLowerCase().includes(lower)) ||
     findProductByCompositeQuery(trimmed, products)
   )
 }
@@ -338,41 +354,44 @@ export function applyProductToOrderItem(
   product: ProductMaster,
   defaultWarehouse?: string
 ): void {
-  item.productCode = product.code
-  item.productName = product.name
-  item.spec = product.spec || ''
-  item.origin = product.origin || ''
-  item.manufacturer = product.manufacturer || ''
-  item.brand = product.brand || ''
-  item.productionLicense = product.licenseNo || ''
-  item.registrationNo = product.registerNo || ''
-  item.registrant = product.registrant || ''
-  item.unit = getProductUnit(product)
-  item.auxUnit = product.auxUnit || ''
-  item.auxUnitRatio = product.auxUnitRatio || 1
-  item.unitPrice = Number(product.unitPrice) || 0
-  item.lastPrice = Number(product.lastPrice ?? product.unitPrice) || 0
-  item.taxRate = Number(product.taxRate) || 13
-  item.retailPrice = Number(product.retailPrice) || 0
-  item.storageCondition = product.storageCondition || ''
+  const master = normalizeProductMaster(product)
+  item.productCode = master.code
+  item.productName = getProductDisplayName(master)
+  item.spec = master.spec || ''
+  item.origin = master.origin || ''
+  item.manufacturer = master.manufacturer || ''
+  item.brand = master.brand || ''
+  item.productionLicense = master.licenseNo || ''
+  item.registrationNo = master.registerNo || ''
+  item.registrant = master.registrant || ''
+  item.unit = getProductUnit(master)
+  item.auxUnit = master.auxUnit || ''
+  item.auxUnitRatio = master.auxUnitRatio || 1
+  item.unitPrice = Number(master.unitPrice) || 0
+  item.lastPrice = Number(master.lastPrice ?? master.unitPrice) || 0
+  item.taxRate = Number(master.taxRate) || 13
+  item.retailPrice = Number(master.retailPrice) || 0
+  item.storageCondition = master.storageCondition || ''
   if (!item.warehouse) {
-    item.warehouse = product.defaultWarehouse || defaultWarehouse || '公司库'
+    item.warehouse = master.defaultWarehouse || defaultWarehouse || '公司库'
   }
 }
 
 export function toBatchProductRow(product: ProductMaster) {
+  const master = normalizeProductMaster(product)
   return {
-    ...product,
-    unit: getProductUnit(product),
-    productionLicense: product.licenseNo || '',
-    registrationNo: product.registerNo || '',
-    registrant: product.registrant || '',
-    unitPrice: Number(product.unitPrice) || 0,
-    lastPrice: Number(product.lastPrice ?? product.unitPrice) || 0,
-    taxRate: Number(product.taxRate) || 13,
-    retailPrice: Number(product.retailPrice) || 0,
+    ...master,
+    name: getProductDisplayName(master),
+    unit: getProductUnit(master),
+    productionLicense: master.licenseNo || '',
+    registrationNo: master.registerNo || '',
+    registrant: master.registrant || '',
+    unitPrice: Number(master.unitPrice) || 0,
+    lastPrice: Number(master.lastPrice ?? master.unitPrice) || 0,
+    taxRate: Number(master.taxRate) || 13,
+    retailPrice: Number(master.retailPrice) || 0,
     stockQty: Math.floor(Math.random() * 500) + 50,
-    warehouse: product.defaultWarehouse || '主仓库'
+    warehouse: master.defaultWarehouse || '主仓库'
   }
 }
 

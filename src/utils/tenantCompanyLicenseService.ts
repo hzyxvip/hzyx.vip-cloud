@@ -6,10 +6,16 @@ import {
   type LicenseSection,
   PARTNER_LICENSE_SECTIONS
 } from '@/constants/partnerLicenseSections'
-import { getEffectiveLicenseSections } from '@/utils/partnerLicenseSettings'
-import { normalizePartnerDocuments } from '@/utils/partnerLicenseDocuments'
+import { getEffectiveLicenseSections, isCustomLicenseKey } from '@/utils/partnerLicenseSettings'
+import {
+  createDefaultPartnerDocuments,
+  isProductLicenseDuplicateKey,
+  resolvePartnerDocTemplateKey
+} from '@/utils/partnerLicenseDocuments'
 import type { PartnerDocument } from '@/types/partnerProfile'
 import type { LicenseVisibilityConfig } from '@/utils/partnerLicenseVisibility'
+
+const TENANT_LICENSE_REFERENCE_MIGRATED_KEY = 'tenantLicenseReferenceMigrated'
 
 /** 租户企业证照规则说明（页面提示） */
 export const TENANT_LICENSE_RULE_TIP =
@@ -25,7 +31,7 @@ export const TENANT_LICENSE_DELETE_CONFIRM =
 
 /** 租户引用平台证照说明 */
 export const TENANT_LICENSE_REFERENCE_TIP =
-  '优先从平台已有证照项目中选择引用；引用后可在证照列表中上传填写，无需重复新建。'
+  '打开「企业证照展示」，勾选需要的平台证照项目即可引用；引用后在证照卡片中上传填写。'
 
 export type TenantLicenseReferenceStatus = 'unreferenced' | 'hidden' | 'visible'
 
@@ -43,6 +49,62 @@ export function getTenantLicenseReferenceStatusLabel(status: TenantLicenseRefere
   if (status === 'visible') return '已展示'
   if (status === 'hidden') return '已隐匿'
   return '未引用'
+}
+
+function mergeStoredDocWithTemplate(stored: PartnerDocument, template: PartnerDocument): PartnerDocument {
+  return {
+    ...template,
+    ...stored,
+    id: stored.id || template.id,
+    docKey: template.docKey,
+    docName: template.docName,
+    docNameSub: template.docNameSub,
+    validityNote: template.validityNote,
+    longTerm: template.longTerm,
+    sectionCode: template.sectionCode,
+    sectionTitle: template.sectionTitle,
+    docNoLabel: stored.docNoLabel || template.docNoLabel,
+    templateKey: stored.templateKey
+  }
+}
+
+function isPlatformTemplateDocEmpty(doc: PartnerDocument): boolean {
+  return !String(doc.docNo || '').trim()
+    && !String(doc.imageUrl || '').trim()
+    && !String(doc.issueDate || '').trim()
+    && !String(doc.expireDate || '').trim()
+}
+
+/** 一次性迁移：去掉历史自动灌入、从未填写过的平台模板证照，以便启用引用流程 */
+export function migrateTenantDocumentsForReferenceFeature(
+  stored: PartnerDocument[] | undefined,
+  companyType?: string
+): PartnerDocument[] {
+  const documents = stored || []
+  if (localStorage.getItem(TENANT_LICENSE_REFERENCE_MIGRATED_KEY)) {
+    return documents
+  }
+
+  localStorage.setItem(TENANT_LICENSE_REFERENCE_MIGRATED_KEY, '1')
+
+  const profile = resolvePartnerQualificationProfile(companyType)
+  const defaults = createDefaultPartnerDocuments(profile)
+  const defaultKeys = new Set(defaults.map(item => String(item.docKey || '')))
+  const platformDocs = documents.filter(doc => defaultKeys.has(String(doc.docKey || '')))
+
+  if (platformDocs.length < defaults.length) {
+    return documents
+  }
+
+  const allAutoSeeded = platformDocs.every(isPlatformTemplateDocEmpty)
+  if (!allAutoSeeded) {
+    return documents
+  }
+
+  return documents.filter(doc => {
+    const key = String(doc.docKey || '')
+    return !defaultKeys.has(key) || isTenantLicenseKey(key) || isProductLicenseDuplicateKey(key)
+  })
 }
 
 /** 企业可引用的平台证照项目（按当前身份筛选） */
@@ -151,9 +213,13 @@ export function createTenantLicenseVisibility(
   const base: LicenseVisibilityConfig = { sections: {}, items: {} }
 
   sections.forEach(section => {
-    base.sections[section.code] = saved?.sections?.[section.code] ?? true
+    const sectionHasDoc = section.items.some(item =>
+      documents?.some(doc => String(doc.docKey || '') === item.key)
+    )
+    base.sections[section.code] = saved?.sections?.[section.code] ?? sectionHasDoc
     section.items.forEach(item => {
-      base.items[item.key] = saved?.items?.[item.key] ?? true
+      const hasDoc = documents?.some(doc => String(doc.docKey || '') === item.key)
+      base.items[item.key] = saved?.items?.[item.key] ?? hasDoc
     })
   })
 
@@ -196,16 +262,45 @@ export function createTenantLicenseDocument(input: {
   }
 }
 
-/** 租户证照：默认套用平台模板布局，再合并本企业已填数据与自定义证照 */
+/** 租户证照：仅保留已引用/已保存的证照，不再自动灌入全部平台模板 */
 export function normalizeTenantCompanyDocuments(
   stored?: PartnerDocument[],
   companyType?: string
 ): PartnerDocument[] {
-  const merged = normalizePartnerDocuments(stored, companyType)
-  const customDocs = (stored || []).filter(
-    doc => isTenantLicenseKey(doc.docKey) && !merged.some(item => item.docKey === doc.docKey)
-  )
-  return [...merged, ...customDocs]
+  const migrated = migrateTenantDocumentsForReferenceFeature(stored, companyType)
+  if (!migrated.length) return []
+
+  const profile = resolvePartnerQualificationProfile(companyType)
+  const defaults = createDefaultPartnerDocuments(profile)
+  const templateByKey = new Map(defaults.map(item => [String(item.docKey || ''), item]))
+
+  const result: PartnerDocument[] = []
+  const seen = new Set<string>()
+
+  migrated.forEach(raw => {
+    const key = String(raw.docKey || resolvePartnerDocTemplateKey(raw) || '')
+    if (!key || seen.has(key)) return
+
+    if (isTenantLicenseKey(key) || isProductLicenseDuplicateKey(key)) {
+      seen.add(key)
+      result.push({ ...raw, docKey: key })
+      return
+    }
+
+    const template = templateByKey.get(key)
+    if (template) {
+      seen.add(key)
+      result.push(mergeStoredDocWithTemplate(raw, template))
+      return
+    }
+
+    if (isCustomLicenseKey(key)) {
+      seen.add(key)
+      result.push({ ...raw, docKey: key })
+    }
+  })
+
+  return result
 }
 
 export function sortDocumentsInSection(

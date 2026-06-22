@@ -216,6 +216,13 @@ export function createEmptyProductSearchForm(): ProductListSearchForm {
   }
 }
 
+export const PRODUCT_AUDIT_STATUS_OPTIONS = [
+  { label: '全部', value: '' },
+  { label: '已审核', value: '已审核' },
+  { label: '待审核', value: '待审核' },
+  { label: '未建档', value: '未建档' }
+]
+
 export function hasActiveProductSearch(searchForm: ProductListSearchForm): boolean {
   return Object.values(searchForm).some(value => String(value).trim())
 }

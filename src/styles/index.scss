@@ -165,6 +165,38 @@ h1, h2, h3, h4, h5, h6 {
   --el-button-border-color: #{$danger-color};
   --el-button-text-color: #fff;
   --el-button-hover-text-color: #fff;
+  --el-button-hover-bg-color: #d64545;
+  --el-button-hover-border-color: #d64545;
+
+  &.is-plain {
+    --el-button-text-color: #{$danger-color};
+    --el-button-border-color: #fecdca;
+    --el-button-bg-color: #fff5f5;
+    --el-button-hover-text-color: #c93c3c;
+    --el-button-hover-border-color: #fda29b;
+    --el-button-hover-bg-color: #fef3f2;
+    color: #{$danger-color};
+
+    &:hover,
+    &:focus {
+      color: #c93c3c;
+    }
+  }
+
+  &.is-link {
+    --el-button-text-color: #{$danger-color};
+    --el-button-bg-color: transparent;
+    --el-button-border-color: transparent;
+    --el-button-hover-text-color: #c93c3c;
+    --el-button-hover-bg-color: transparent;
+    --el-button-hover-border-color: transparent;
+    color: #{$danger-color};
+
+    &:hover,
+    &:focus {
+      color: #c93c3c;
+    }
+  }
 }
 
 .el-message-box__btns {
@@ -680,5 +712,84 @@ h1, h2, h3, h4, h5, h6 {
         min-width: 100px;
       }
     }
+  }
+}
+
+// 商品联想下拉：解除 Element Plus 默认单行省略，避免多列内容叠压看不清
+.product-suggest-popper {
+  .el-autocomplete-suggestion li {
+    overflow: visible !important;
+    white-space: normal !important;
+    text-overflow: clip !important;
+    color: $text-primary !important;
+
+    &:hover,
+    &.highlighted {
+      background-color: #e6f4ff !important;
+      color: $text-primary !important;
+    }
+  }
+
+  .product-suggest-item {
+    color: $text-primary;
+
+    .col-code,
+    .s-code {
+      color: #0e42d2 !important;
+      font-weight: 600;
+    }
+
+    .col-name,
+    .s-name {
+      color: $text-primary !important;
+    }
+
+    .col-spec,
+    .col-mfr,
+    .col-aux,
+    .s-spec,
+    .s-mfr,
+    .s-aux {
+      color: $text-secondary !important;
+    }
+
+    .s-last-price {
+      color: #ad6800 !important;
+    }
+
+    .s-stock {
+      color: #0958d9 !important;
+    }
+
+    &.is-header {
+      .col-code,
+      .s-code,
+      .col-name,
+      .s-name,
+      .col-spec,
+      .col-mfr,
+      .col-aux,
+      .s-spec,
+      .s-mfr,
+      .s-aux {
+        color: $text-secondary !important;
+      }
+    }
+  }
+}
+
+.items-detail-table {
+  .product-code-autocomplete,
+  .product-field-autocomplete {
+    .el-input__inner {
+      color: $text-primary !important;
+      -webkit-text-fill-color: $text-primary !important;
+    }
+  }
+
+  .code-cell .select-btn {
+    flex-shrink: 0;
+    margin-left: 2px;
+    padding: 0 4px;
   }
 }

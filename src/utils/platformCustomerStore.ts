@@ -1,6 +1,11 @@
 import type { PartnerDocument, PartnerProfileExtension } from '@/types/partnerProfile'
 
 export const PLATFORM_CUSTOMER_LIST_KEY = 'platformCustomerList'
+export const PLATFORM_CUSTOMER_DELETED_CODES_KEY = 'platformCustomerDeletedCodes'
+
+export function normalizePlatformCustomerId(id: unknown): string {
+  return String(id ?? '')
+}
 
 export type PlatformCustomerDocument = PartnerDocument
 
@@ -36,6 +41,7 @@ export interface PlatformCustomer extends PartnerProfileExtension {
   editor: string
   editDate: string
   remark: string
+  status: 'normal' | 'disabled'
   recordStatus: string
   recordDate: string
 }
@@ -53,6 +59,24 @@ export function getCompanyTripartiteLabel(type: string): string {
 
 export function getCompanyTypeLabel(type: string): string {
   return companyTypeOptions.find(item => item.value === type)?.label || ''
+}
+
+export const platformCustomerStatusOptions = [
+  { label: '正常', value: 'normal' as const },
+  { label: '停用', value: 'disabled' as const }
+]
+
+export function normalizePlatformCustomerStatus(status: unknown): PlatformCustomer['status'] {
+  return status === 'disabled' ? 'disabled' : 'normal'
+}
+
+export function getPlatformCustomerStatusLabel(status: unknown): string {
+  const normalized = normalizePlatformCustomerStatus(status)
+  return platformCustomerStatusOptions.find(item => item.value === normalized)?.label || '正常'
+}
+
+export function getPlatformCustomerStatusTagType(status: unknown): 'success' | 'danger' {
+  return normalizePlatformCustomerStatus(status) === 'disabled' ? 'danger' : 'success'
 }
 
 export const defaultPlatformCustomers: PlatformCustomer[] = [
@@ -88,6 +112,7 @@ export const defaultPlatformCustomers: PlatformCustomer[] = [
     editor: '小周',
     editDate: '2026-06-15',
     remark: '',
+    status: 'normal',
     recordStatus: '是',
     recordDate: '2026-06-15'
   },
@@ -123,6 +148,7 @@ export const defaultPlatformCustomers: PlatformCustomer[] = [
     editor: '小周',
     editDate: '2026-06-14',
     remark: '',
+    status: 'normal',
     recordStatus: '是',
     recordDate: '2026-06-14'
   },
@@ -158,6 +184,7 @@ export const defaultPlatformCustomers: PlatformCustomer[] = [
     editor: '小周',
     editDate: '2026-06-13',
     remark: '',
+    status: 'normal',
     recordStatus: '是',
     recordDate: '2026-06-13'
   },
@@ -193,6 +220,7 @@ export const defaultPlatformCustomers: PlatformCustomer[] = [
     editor: '小周',
     editDate: '2026-06-12',
     remark: '',
+    status: 'normal',
     recordStatus: '否',
     recordDate: ''
   },
@@ -231,6 +259,7 @@ export const defaultPlatformCustomers: PlatformCustomer[] = [
     editor: '小华哥',
     editDate: '2026-06-21',
     remark: '',
+    status: 'normal',
     recordStatus: '否',
     recordDate: ''
   }
@@ -251,23 +280,60 @@ function writeList(list: PlatformCustomer[]): void {
   localStorage.setItem(PLATFORM_CUSTOMER_LIST_KEY, JSON.stringify(list))
 }
 
-export function loadPlatformCustomerList(): PlatformCustomer[] {
-  const stored = readList()
-  const codeSet = new Set(stored.map(item => item.companyCode).filter(Boolean))
-  const missing = defaultPlatformCustomers.filter(item => !codeSet.has(item.companyCode))
-  const source = stored.length > 0
-    ? (missing.length ? [...missing, ...stored] : stored)
-    : defaultPlatformCustomers
+function readDeletedCodes(): Set<string> {
+  const raw = localStorage.getItem(PLATFORM_CUSTOMER_DELETED_CODES_KEY)
+  if (!raw) return new Set()
+  try {
+    const parsed = JSON.parse(raw)
+    return new Set(Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [])
+  } catch {
+    return new Set()
+  }
+}
 
-  const normalized = source.map(item => ({
+function rememberDeletedCompanyCodes(codes: string[]): void {
+  if (codes.length === 0) return
+  const set = readDeletedCodes()
+  codes.forEach(code => {
+    if (code) set.add(code)
+  })
+  localStorage.setItem(PLATFORM_CUSTOMER_DELETED_CODES_KEY, JSON.stringify([...set]))
+}
+
+function getOperatorName(): string {
+  try {
+    const user = JSON.parse(localStorage.getItem('user') || '{}')
+    return user.realName || user.username || '平台管理员'
+  } catch {
+    return '平台管理员'
+  }
+}
+
+function normalizeListItem(item: PlatformCustomer): PlatformCustomer {
+  return {
     ...item,
+    status: normalizePlatformCustomerStatus(item.status),
     companyIntro: item.companyIntro || '',
     businessScope: item.businessScope || '',
     legalPerson: item.legalPerson || '',
     registerCapital: item.registerCapital || '',
     establishDate: item.establishDate || '',
     documents: Array.isArray(item.documents) ? item.documents : []
-  }))
+  }
+}
+
+export function loadPlatformCustomerList(): PlatformCustomer[] {
+  const stored = readList().map(normalizeListItem)
+  const deletedCodes = readDeletedCodes()
+  const codeSet = new Set(stored.map(item => item.companyCode).filter(Boolean))
+  const missing = defaultPlatformCustomers.filter(
+    item => item.companyCode && !codeSet.has(item.companyCode) && !deletedCodes.has(item.companyCode)
+  )
+  const source = stored.length > 0
+    ? (missing.length ? [...missing.map(normalizeListItem), ...stored] : stored)
+    : defaultPlatformCustomers.map(normalizeListItem)
+
+  const normalized = source.map(normalizeListItem)
 
   if (stored.length === 0 || missing.length > 0) {
     writeList(normalized)
@@ -276,12 +342,50 @@ export function loadPlatformCustomerList(): PlatformCustomer[] {
 }
 
 export function savePlatformCustomerList(list: PlatformCustomer[]): void {
-  writeList(list)
+  writeList(list.map(normalizeListItem))
+}
+
+export function deletePlatformCustomersByIds(ids: Array<number | string>): PlatformCustomer[] {
+  const idSet = new Set(ids.map(normalizePlatformCustomerId))
+  if (idSet.size === 0) return loadPlatformCustomerList()
+
+  const current = loadPlatformCustomerList()
+  const removedCodes = current
+    .filter(item => idSet.has(normalizePlatformCustomerId(item.id)))
+    .map(item => item.companyCode)
+    .filter(Boolean)
+  rememberDeletedCompanyCodes(removedCodes)
+
+  const next = current.filter(item => !idSet.has(normalizePlatformCustomerId(item.id)))
+  savePlatformCustomerList(next)
+  return next
+}
+
+export function batchSetPlatformCustomerAuditStatus(
+  ids: Array<number | string>,
+  platformStatus: PlatformCustomer['platformStatus']
+): PlatformCustomer[] {
+  const idSet = new Set(ids.map(normalizePlatformCustomerId))
+  if (idSet.size === 0) return loadPlatformCustomerList()
+
+  const today = formatToday()
+  const operator = getOperatorName()
+  const next = loadPlatformCustomerList().map(item => {
+    if (!idSet.has(normalizePlatformCustomerId(item.id))) return item
+    return {
+      ...item,
+      platformStatus,
+      editor: operator,
+      editDate: today
+    }
+  })
+  savePlatformCustomerList(next)
+  return next
 }
 
 export function findPlatformCustomerById(id: number | string): PlatformCustomer | undefined {
-  const key = String(id)
-  return loadPlatformCustomerList().find(item => String(item.id) === key)
+  const key = normalizePlatformCustomerId(id)
+  return loadPlatformCustomerList().find(item => normalizePlatformCustomerId(item.id) === key)
 }
 
 export function getCompanyCategory(type: string): string {

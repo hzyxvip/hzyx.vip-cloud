@@ -88,13 +88,14 @@ const getSelectOptions = (field: PlatformFieldDef) => {
 
 const quickEntryItems = [
   {
+    key: 'intro',
     label: '企业简介',
-    desc: '企业简介、主营业务与允许公示设置',
-    path: '/data/company/intro',
+    desc: '见下方本企业资料、企业介绍，可直接编辑',
     icon: OfficeBuilding,
     tone: 'intro'
   },
   {
+    key: 'investment',
     label: '招商信息',
     desc: '平台用户、备案与招商备注',
     path: '/data/company/investment',
@@ -102,6 +103,7 @@ const quickEntryItems = [
     tone: 'investment'
   },
   {
+    key: 'license',
     label: '企业证照',
     desc: '证照资料上传与有效期管理',
     path: '/data/company/license',
@@ -109,6 +111,19 @@ const quickEntryItems = [
     tone: 'license'
   }
 ]
+
+const profileSectionRef = ref<HTMLElement | null>(null)
+
+const handleQuickEntryClick = (item: (typeof quickEntryItems)[number]) => {
+  if (item.key === 'intro') {
+    profileSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    ElMessage.info('企业简介已在下方「本企业资料」「企业介绍」中展示，可直接编辑，无需跳转其他页面')
+    return
+  }
+  if (item.path) {
+    router.push(item.path)
+  }
+}
 
 const handleAllowPublicChange = async (val: string | number | boolean) => {
   const enabled = Boolean(val)
@@ -187,9 +202,9 @@ onMounted(async () => {
       <div class="quick-entry-row">
         <div
           v-for="item in quickEntryItems"
-          :key="item.path"
+          :key="item.key"
           class="quick-entry-item"
-          @click="router.push(item.path)"
+          @click="handleQuickEntryClick(item)"
         >
           <div class="quick-entry-icon" :class="item.tone">
             <el-icon><component :is="item.icon" /></el-icon>
@@ -202,7 +217,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <div class="form-card">
+    <div ref="profileSectionRef" class="form-card intro-content-zone">
       <div class="card-title">本企业资料</div>
       <el-form :model="form" label-width="140px" class="company-form">
         <el-row :gutter="16">
@@ -285,7 +300,7 @@ onMounted(async () => {
       </el-form>
     </div>
 
-    <div class="intro-card">
+    <div class="intro-card intro-content-zone">
       <div class="intro-header">
         <div class="card-title">企业介绍</div>
         <div class="intro-actions">
@@ -463,6 +478,11 @@ onMounted(async () => {
   margin-bottom: 16px;
   padding-left: 8px;
   border-left: 3px solid #00bfa5;
+}
+
+.intro-content-zone {
+  border: 1px solid #b2f0e3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), inset 0 0 0 1px rgba(178, 240, 227, 0.35);
 }
 
 .intro-header {

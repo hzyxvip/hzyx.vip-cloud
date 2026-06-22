@@ -1,4 +1,5 @@
 export const SUPPLIERS_KEY = 'suppliers'
+export const SUPPLIER_DELETED_CODES_KEY = 'supplierDeletedCodes'
 
 import type { PartnerDocument, PartnerProfileExtension } from '@/types/partnerProfile'
 import { getCurrentUserName } from '@/utils/customerStore'
@@ -92,6 +93,34 @@ export const defaultSuppliers: SupplierMaster[] = [
   }
 ]
 
+function readDeletedSupplierCodes(): Set<string> {
+  const raw = localStorage.getItem(SUPPLIER_DELETED_CODES_KEY)
+  if (!raw) return new Set()
+  try {
+    const parsed = JSON.parse(raw)
+    return new Set(Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function rememberDeletedSupplierCodes(codes: string[]): void {
+  if (codes.length === 0) return
+  const set = readDeletedSupplierCodes()
+  codes.forEach(code => {
+    if (code) set.add(code)
+  })
+  localStorage.setItem(SUPPLIER_DELETED_CODES_KEY, JSON.stringify([...set]))
+}
+
+function normalizeSupplierId(id: string | number): string {
+  return String(id ?? '').trim()
+}
+
+function supplierCodeOf(item: Pick<SupplierMaster, 'id' | 'code'>): string {
+  return String(item.code || item.id)
+}
+
 function readSupplierListRaw(): SupplierMaster[] {
   const stored = localStorage.getItem(SUPPLIERS_KEY)
   if (!stored || stored === '[]') return []
@@ -113,11 +142,13 @@ export function saveSupplierList(list: SupplierMaster[]): void {
 
 export function loadAndEnsureSupplierList(): SupplierMaster[] {
   const stored = readSupplierListRaw()
-  const idSet = new Set(stored.map(item => item.id))
-  const codeSet = new Set(stored.map(item => String(item.code || item.id)).filter(Boolean))
-  const missing = defaultSuppliers.filter(
-    item => !idSet.has(item.id) && !codeSet.has(item.code || item.id)
-  )
+  const deletedCodes = readDeletedSupplierCodes()
+  const idSet = new Set(stored.map(item => normalizeSupplierId(item.id)))
+  const codeSet = new Set(stored.map(item => supplierCodeOf(item)).filter(Boolean))
+  const missing = defaultSuppliers.filter(item => {
+    const code = supplierCodeOf(item)
+    return !idSet.has(normalizeSupplierId(item.id)) && !codeSet.has(code) && !deletedCodes.has(code)
+  })
   const merged = missing.length ? [...missing, ...stored] : stored.length ? stored : [...defaultSuppliers]
 
   if (stored.length === 0 || missing.length > 0) {
@@ -128,7 +159,8 @@ export function loadAndEnsureSupplierList(): SupplierMaster[] {
 }
 
 export function getSupplierById(id: string): SupplierMaster | undefined {
-  return loadSupplierList().find(item => item.id === id)
+  const normalizedId = normalizeSupplierId(id)
+  return loadSupplierList().find(item => normalizeSupplierId(item.id) === normalizedId)
 }
 
 export function upsertSupplier(supplier: SupplierMaster): void {
@@ -146,12 +178,32 @@ export function upsertSupplier(supplier: SupplierMaster): void {
   saveSupplierList(list)
 }
 
-export function deleteSupplier(id: string): boolean {
+export function deleteSupplier(id: string | number): boolean {
+  const normalizedId = normalizeSupplierId(id)
   const list = loadSupplierList()
-  const next = list.filter(item => item.id !== id)
-  if (next.length === list.length) return false
+  const target = list.find(item => normalizeSupplierId(item.id) === normalizedId)
+  if (!target) return false
+
+  rememberDeletedSupplierCodes([supplierCodeOf(target)])
+  const next = list.filter(item => normalizeSupplierId(item.id) !== normalizedId)
   saveSupplierList(next)
   return true
+}
+
+export function batchDeleteSuppliers(ids: Array<string | number>): SupplierMaster[] {
+  const idSet = new Set(ids.map(normalizeSupplierId).filter(Boolean))
+  if (idSet.size === 0) return loadAndEnsureSupplierList()
+
+  const list = loadSupplierList()
+  const removedCodes = list
+    .filter(item => idSet.has(normalizeSupplierId(item.id)))
+    .map(item => supplierCodeOf(item))
+    .filter(Boolean)
+  rememberDeletedSupplierCodes(removedCodes)
+
+  const next = list.filter(item => !idSet.has(normalizeSupplierId(item.id)))
+  saveSupplierList(next)
+  return loadAndEnsureSupplierList()
 }
 
 export function setSupplierAuditStatus(
@@ -172,4 +224,54 @@ export function setSupplierAuditStatus(
   }
   saveSupplierList(list)
   return list[index]
+}
+
+export function batchSetSupplierAuditStatus(
+  ids: string[],
+  audited: boolean
+): SupplierMaster[] {
+  const idSet = new Set(ids.map(String).filter(Boolean))
+  if (idSet.size === 0) return loadSupplierList()
+
+  const now = new Date().toLocaleString('zh-CN')
+  const auditor = getCurrentUserName()
+  const next = loadSupplierList().map(item => {
+    if (!idSet.has(item.id)) return item
+    return {
+      ...item,
+      auditStatus: audited ? 'audited' as const : 'notAudited' as const,
+      auditTime: audited ? now : '',
+      auditor: audited ? auditor : ''
+    }
+  })
+  saveSupplierList(next)
+  return next
+}
+
+export type SupplierSelectOption = {
+  label: string
+  value: string
+  code: string
+  address: string
+  id: string
+}
+
+function formatSupplierAddress(item: Pick<SupplierMaster, 'address' | 'province' | 'city'>): string {
+  if (item.address) return item.address
+  return [item.province, item.city].filter(Boolean).join('')
+}
+
+export function toSupplierSelectOption(item: SupplierMaster): SupplierSelectOption {
+  return {
+    label: item.name,
+    value: item.name,
+    code: supplierCodeOf(item),
+    address: formatSupplierAddress(item),
+    id: item.id
+  }
+}
+
+/** 采购等业务下拉：来自供应商资料，暂不过滤审核/停用状态 */
+export function loadSupplierSelectOptions(): SupplierSelectOption[] {
+  return loadAndEnsureSupplierList().map(toSupplierSelectOption)
 }

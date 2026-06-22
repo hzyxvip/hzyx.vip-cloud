@@ -8,6 +8,7 @@ import {
   buildTenantLicenseSectionOrder,
   createTenantLicenseVisibility,
   normalizeTenantCompanyDocuments,
+  TENANT_LICENSE_REFERENCE_TIP,
   TENANT_LICENSE_RULE_TIP
 } from '@/utils/tenantCompanyLicenseService'
 import { loadTenantCompanyProfile, saveTenantCompanyProfile } from '@/utils/companyDataService'
@@ -28,6 +29,7 @@ const loadData = async () => {
   try {
     const profile = await loadTenantCompanyProfile()
     tenantProfile.value = profile
+    const originalCount = profile.documents?.length || 0
     documents.value = normalizeTenantCompanyDocuments(profile.documents, profile.companyType)
     sectionOrder.value = { ...(profile.licenseSectionOrder || buildTenantLicenseSectionOrder(documents.value)) }
     licenseVisibility.value = createTenantLicenseVisibility(
@@ -35,6 +37,15 @@ const loadData = async () => {
       documents.value,
       profile.licenseVisibility
     )
+
+    if (documents.value.length !== originalCount) {
+      await saveTenantCompanyProfile({
+        ...profile,
+        documents: documents.value,
+        licenseSectionOrder: buildTenantLicenseSectionOrder(documents.value),
+        licenseVisibility: licenseVisibility.value
+      })
+    }
   } finally {
     loading.value = false
   }
@@ -87,7 +98,7 @@ onMounted(loadData)
       type="info"
       :closable="false"
       show-icon
-      :title="`${TENANT_LICENSE_RULE_TIP} 审核前可拖拽卡片右上角手柄调整排序。`"
+      :title="`${TENANT_LICENSE_REFERENCE_TIP} ${TENANT_LICENSE_RULE_TIP} 审核前可拖拽卡片右上角手柄调整排序。`"
     />
 
     <div v-loading="loading" class="form-card">

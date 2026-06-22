@@ -33,8 +33,9 @@ const HOSPITAL_LICENSE_DOC_KEYS = new Set([
   'receiving_authorization'
 ])
 
-/** 历史分段迁移：旧 4→2.3（医疗机构）；旧 2.3 消字号生产资质→2.1 */
+/** 历史分段迁移：旧 4→2.3（医疗机构）；旧 2.3 消字号生产资质→2.1；旧 3.1/3.2→2.1 */
 export function migrateLegacyLicenseSectionCode(sectionCode?: string, docKey?: string): string {
+  if (sectionCode === '3.1' || sectionCode === '3.2') return '2.1'
   if (sectionCode === '4') return HOSPITAL_LICENSE_SECTION_CODE
   if (sectionCode === HOSPITAL_LICENSE_SECTION_CODE) {
     if (docKey && HOSPITAL_LICENSE_DOC_KEYS.has(docKey)) return HOSPITAL_LICENSE_SECTION_CODE
@@ -132,12 +133,46 @@ export const PARTNER_LICENSE_SECTIONS: LicenseSection[] = [
         validityNote: '有效期 5 年',
         docNoLabel: '证照编号'
       }),
+      buildTemplate('md_class1_product_filing', {
+        key: 'md_class1_product_filing',
+        docName: '第一类医疗器械产品备案凭证',
+        validityNote: '',
+        longTerm: true,
+        docNoLabel: '备案编号'
+      }),
+      buildTemplate('md_class2_registration_cert', {
+        key: 'md_class2_registration_cert',
+        docName: '第二类医疗器械注册证',
+        validityNote: '有效期 5 年',
+        docNoLabel: '注册证编号'
+      }),
+      buildTemplate('md_class3_registration_cert', {
+        key: 'md_class3_registration_cert',
+        docName: '第三类医疗器械注册证',
+        validityNote: '有效期 5 年',
+        docNoLabel: '注册证编号'
+      }),
       buildTemplate('disinfection_health_license', {
         key: 'disinfection_health_license',
         docName: '消毒产品生产企业卫生许可证',
         docNameSub: '（卫消证字）',
         validityNote: '有效期 4 年',
         docNoLabel: '许可证编号'
+      }),
+      buildTemplate('disinfection_safety_report_class1', {
+        key: 'disinfection_safety_report_class1',
+        docName: '消毒产品卫生安全评价报告',
+        docNameSub: '（一类消毒产品）',
+        validityNote: '有效期 4 年',
+        docNoLabel: '报告编号'
+      }),
+      buildTemplate('disinfection_safety_report_class2', {
+        key: 'disinfection_safety_report_class2',
+        docName: '消毒产品卫生安全评价报告',
+        docNameSub: '（二类消毒产品）',
+        validityNote: '',
+        longTerm: true,
+        docNoLabel: '报告编号'
       })
     ]
   },
@@ -157,52 +192,6 @@ export const PARTNER_LICENSE_SECTIONS: LicenseSection[] = [
         docName: '医疗器械经营许可证',
         validityNote: '有效期 5 年',
         docNoLabel: '许可证编号'
-      })
-    ]
-  },
-  {
-    code: '3.1',
-    title: '医疗器械产品上市资质',
-    items: [
-      buildTemplate('md_class1_product_filing', {
-        key: 'md_class1_product_filing',
-        docName: '第一类医疗器械产品备案凭证',
-        validityNote: '',
-        longTerm: true,
-        docNoLabel: '备案编号'
-      }),
-      buildTemplate('md_class2_registration_cert', {
-        key: 'md_class2_registration_cert',
-        docName: '第二类医疗器械注册证',
-        validityNote: '有效期 5 年',
-        docNoLabel: '注册证编号'
-      }),
-      buildTemplate('md_class3_registration_cert', {
-        key: 'md_class3_registration_cert',
-        docName: '第三类医疗器械注册证',
-        validityNote: '有效期 5 年',
-        docNoLabel: '注册证编号'
-      })
-    ]
-  },
-  {
-    code: '3.2',
-    title: '消字号产品备案资质',
-    items: [
-      buildTemplate('disinfection_safety_report_class1', {
-        key: 'disinfection_safety_report_class1',
-        docName: '消毒产品卫生安全评价报告',
-        docNameSub: '（一类消毒产品）',
-        validityNote: '有效期 4 年',
-        docNoLabel: '报告编号'
-      }),
-      buildTemplate('disinfection_safety_report_class2', {
-        key: 'disinfection_safety_report_class2',
-        docName: '消毒产品卫生安全评价报告',
-        docNameSub: '（二类消毒产品）',
-        validityNote: '',
-        longTerm: true,
-        docNoLabel: '报告编号'
       })
     ]
   },

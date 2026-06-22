@@ -15,6 +15,7 @@ export const PRODUCT_LIST_COLUMN_DEFINITIONS: ProductListColumnDef[] = [
   { key: 'code', label: '商品编码', prop: 'code', align: 'right', headerAlign: 'right', sortable: true, required: true },
   { key: 'name', label: '商品名称', prop: 'name', sortable: true },
   { key: 'spec', label: '规格型号', prop: 'spec', sortable: true },
+  { key: 'measureUnit', label: '单位', prop: 'measureUnit', align: 'center', headerAlign: 'center' },
   { key: 'manufacturer', label: '生产厂家', prop: 'manufacturer', sortable: true },
   { key: 'brand', label: '品牌', prop: 'brand' },
   { key: 'category', label: '商品分类', prop: 'category' },
@@ -24,7 +25,6 @@ export const PRODUCT_LIST_COLUMN_DEFINITIONS: ProductListColumnDef[] = [
   { key: 'udiCode', label: 'UDI码', prop: 'udiCode', align: 'right', headerAlign: 'right' },
   { key: 'medicalCode', label: '医保码', prop: 'medicalCode', align: 'right', headerAlign: 'right' },
   { key: 'medicalClass', label: '医保报销分类', prop: 'medicalClass' },
-  { key: 'measureUnit', label: '计量单位', prop: 'measureUnit' },
   { key: 'storageCondition', label: '储运条件', prop: 'storageCondition' },
   { key: 'medType', label: '医疗器械分类', prop: 'medType', align: 'center', headerAlign: 'center' },
   { key: 'source', label: '商品来源', prop: 'source', align: 'center', headerAlign: 'center' },
@@ -33,7 +33,9 @@ export const PRODUCT_LIST_COLUMN_DEFINITIONS: ProductListColumnDef[] = [
   { key: 'auditTime', label: '审核时间', prop: 'auditTime', align: 'right', headerAlign: 'right' }
 ]
 
-export const DEFAULT_PRODUCT_LIST_COLUMN_KEYS = PRODUCT_LIST_COLUMN_DEFINITIONS.map(col => col.key)
+export const DEFAULT_PRODUCT_LIST_COLUMN_KEYS = [
+  ...new Set(PRODUCT_LIST_COLUMN_DEFINITIONS.map(col => col.key))
+]
 
 export function useProductListColumnSettings(storagePrefix: string) {
   const CONFIG_KEY = `${storagePrefix}-column-config`
@@ -78,12 +80,21 @@ export function useProductListColumnSettings(storagePrefix: string) {
       }
     }
 
-    orderKeys = orderKeys.filter(key =>
+    orderKeys = [...new Set(orderKeys.filter(key =>
       PRODUCT_LIST_COLUMN_DEFINITIONS.some(col => col.key === key)
-    )
-    visibleKeys = visibleKeys.filter(key =>
+    ))]
+    visibleKeys = [...new Set(visibleKeys.filter(key =>
       PRODUCT_LIST_COLUMN_DEFINITIONS.some(col => col.key === key)
-    )
+    ))]
+
+    if (!visibleKeys.includes('measureUnit')) {
+      const specIndex = visibleKeys.indexOf('spec')
+      visibleKeys.splice(specIndex >= 0 ? specIndex + 1 : visibleKeys.length, 0, 'measureUnit')
+    }
+    if (!orderKeys.includes('measureUnit')) {
+      const specOrderIndex = orderKeys.indexOf('spec')
+      orderKeys.splice(specOrderIndex >= 0 ? specOrderIndex + 1 : orderKeys.length, 0, 'measureUnit')
+    }
 
     if (visibleKeys.length <= 1) {
       visibleKeys = [...DEFAULT_PRODUCT_LIST_COLUMN_KEYS]

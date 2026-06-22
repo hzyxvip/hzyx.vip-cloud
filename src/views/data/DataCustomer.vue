@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search, Plus, Refresh } from '@element-plus/icons-vue'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { usePartnerListBatchAudit } from '@/composables/usePartnerListBatchAudit'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getTradingPartners,
@@ -10,6 +11,7 @@ import {
   type TradingPartner
 } from '@/utils/platformCollaborationService'
 import {
+  batchSetCustomerAuditStatus,
   deleteCustomer,
   loadAndEnsureCustomerList,
   setCustomerAuditStatus,
@@ -17,8 +19,12 @@ import {
 } from '@/utils/customerStore'
 
 const router = useRouter()
+const tableRef = ref()
+const selectedRows = ref<CustomerMaster[]>([])
 
 const showAdvancedFilter = ref(false)
+const currentPage = ref(1)
+const pageSize = ref(20)
 
 const timePresets = [
   { label: '当月', value: 'thisMonth' },
@@ -166,6 +172,8 @@ const statusLabels: Record<string, { text: string; color: string }> = {
 }
 
 const { columnWidths, handleHeaderDragend } = useTableStyle('customer-list', [
+  { key: 'index', label: '序号', defaultWidth: 56 },
+  { key: 'select', label: '', defaultWidth: 42 },
   { key: 'id', label: '客户编号', defaultWidth: 120 },
   { key: 'name', label: '客户名称', defaultWidth: 180 },
   { key: 'contact', label: '联系人', defaultWidth: 100 },
@@ -281,6 +289,20 @@ const filteredData = computed(() => {
   })
 })
 
+const pagedData = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredData.value.slice(start, start + pageSize.value)
+})
+
+const indexMethod = (index: number) => (currentPage.value - 1) * pageSize.value + index + 1
+
+watch(filteredData, list => {
+  const maxPage = Math.max(1, Math.ceil(list.length / pageSize.value) || 1)
+  if (currentPage.value > maxPage) {
+    currentPage.value = maxPage
+  }
+})
+
 const handleCreate = () => {
   router.push('/data/customer/create')
 }
@@ -344,6 +366,7 @@ const handleCodeClick = (row: any) => {
 
 const handleSearch = () => {
   saveSearchForm()
+  currentPage.value = 1
   ElMessage.success(`筛选条件已应用，共找到 ${filteredData.value.length} 条记录`)
 }
 
@@ -369,8 +392,33 @@ const handleRefresh = () => {
   ElMessage.success('数据已刷新')
 }
 
-const handleSizeChange = () => {}
-const handleCurrentChange = () => {}
+const handleSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+}
+
+const handleCurrentChange = (page: number) => {
+  currentPage.value = page
+}
+
+const handleSelectionChange = (rows: CustomerMaster[]) => {
+  selectedRows.value = rows
+}
+
+const clearTableSelection = () => {
+  selectedRows.value = []
+  tableRef.value?.clearSelection?.()
+}
+
+const {
+  canAudit,
+  canBatchAudit,
+  canBatchUnaudit,
+  handleBatchAudit
+} = usePartnerListBatchAudit(tableData, selectedRows, clearTableSelection, {
+  entityLabel: '客户',
+  batchSetAudit: batchSetCustomerAuditStatus
+})
 </script>
 
 <template>
@@ -394,6 +442,20 @@ const handleCurrentChange = () => {}
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleRefresh">刷新</el-button>
           <el-button type="primary" @click="handleCreate">新增</el-button>
+          <el-button
+            v-if="canAudit"
+            type="success"
+            plain
+            :disabled="!canBatchAudit"
+            @click="handleBatchAudit('audit')"
+          >审核</el-button>
+          <el-button
+            v-if="canAudit"
+            class="btn-unaudit-pink"
+            plain
+            :disabled="!canBatchUnaudit"
+            @click="handleBatchAudit('unaudit')"
+          >反审核</el-button>
           <el-button 
             :type="showAdvancedFilter ? 'success' : 'default'" 
             @click="showAdvancedFilter = !showAdvancedFilter; saveSearchForm()"
@@ -448,7 +510,19 @@ const handleCurrentChange = () => {}
     </div>
 
     <div class="table-card">
-      <el-table :data="filteredData" class="common-table" border :fit="true" @row-dblclick="handleRowDoubleClick" @header-dragend="handleHeaderDragend">
+      <el-table
+        ref="tableRef"
+        :data="pagedData"
+        row-key="id"
+        class="common-table"
+        border
+        :fit="true"
+        @row-dblclick="handleRowDoubleClick"
+        @header-dragend="handleHeaderDragend"
+        @selection-change="handleSelectionChange"
+      >
+        <el-table-column type="index" label="序号" :index="indexMethod" :width="columnWidths.index" align="center" fixed="left" />
+        <el-table-column type="selection" :width="columnWidths.select" fixed="left" />
         <el-table-column prop="id" label="客户编号" :width="columnWidths.id">
           <template #default="{ row }">
             <span class="code-link" @click="handleCodeClick(row)">
@@ -516,9 +590,9 @@ const handleCurrentChange = () => {}
         <el-pagination
           @size-change="handleSizeChange"
           @current-change="handleCurrentChange"
-          :current-page="1"
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
           :page-sizes="[10, 20, 50, 100]"
-          :page-size="10"
           layout="total, sizes, prev, pager, next, jumper"
           :total="filteredData.length"
         />
@@ -614,6 +688,20 @@ const handleCurrentChange = () => {}
   .button-group {
     display: flex;
     gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .btn-unaudit-pink {
+    --el-button-text-color: #db2777;
+    --el-button-border-color: #f9a8d4;
+    --el-button-bg-color: #fdf2f8;
+    --el-button-hover-text-color: #be185d;
+    --el-button-hover-border-color: #f472b6;
+    --el-button-hover-bg-color: #fce7f3;
+    --el-button-disabled-text-color: #f9a8d4;
+    --el-button-disabled-border-color: #fce7f3;
+    --el-button-disabled-bg-color: #fff;
   }
 
   .search-advanced {

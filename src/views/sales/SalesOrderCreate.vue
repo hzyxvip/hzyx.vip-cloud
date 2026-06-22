@@ -21,6 +21,22 @@ import {
   isNormalCustomerCompany
 } from '@/utils/customerProductService'
 import { onSalesOrderAudited } from '@/utils/platformCollaborationService'
+import {
+  arrowKeyToDirection,
+  findFieldKeyFromElement,
+  focusCellControl,
+  focusFieldByKey,
+  handleFormGridSelectKeyboard,
+  handleItemSelectKeyboard,
+  isDatePickerPanelOpen,
+  isItemDatePickerTarget,
+  isItemSelectTarget,
+  isSelectDropdownOpen,
+  navigateSequentialFields,
+  scheduleAfterDatePickerClose,
+  scheduleAfterSelectClose,
+  shouldNavigateOnArrow as shouldNavigateOnArrowBase
+} from '@/utils/erpFormKeyboard'
 
 const router = useRouter()
 const route = useRoute()
@@ -826,12 +842,129 @@ const confirmBatchAdd = () => {
 
 
 const handleItemDateKeydown = (e: KeyboardEvent, row: OrderItem, colKey: string) => {
+  const rowIndex = form.value.items.indexOf(row)
+  if (rowIndex < 0) return
+
+  if (e.key === 'Enter') {
+    const advance = () => {
+      e.preventDefault()
+      e.stopPropagation()
+      focusNextItemCell(rowIndex, colKey)
+    }
+    if (isDatePickerPanelOpen()) {
+      scheduleAfterDatePickerClose(advance)
+      return
+    }
+    advance()
+    return
+  }
+
+  const direction = arrowKeyToDirection(e.key)
+  if (!direction) return
+  if ((e.target as HTMLElement).closest('.el-date-picker-panel, .el-picker-panel')) return
+  if (isDatePickerPanelOpen()) return
+  if (!shouldNavigateOnArrow(e)) return
+
+  e.preventDefault()
+  e.stopPropagation()
+  navigateItemsTableFrom(rowIndex, colKey, direction)
+}
+
+const shouldNavigateOnArrow = (e: KeyboardEvent) =>
+  shouldNavigateOnArrowBase(e, { isItemDatePickerTarget })
+
+const getFocusableHeaderFields = () =>
+  sortedVisibleFields.value.filter(field => !field.disabled)
+
+const focusNextHeaderField = (currentKey: string) => {
+  const fields = getFocusableHeaderFields()
+  const currentIndex = fields.findIndex(field => field.key === currentKey)
+  for (let i = currentIndex + 1; i < fields.length; i++) {
+    focusFieldByKey(fields[i].key)
+    return
+  }
+  jumpToItems()
+}
+
+const focusPrevHeaderField = (currentKey: string) => {
+  const fields = getFocusableHeaderFields()
+  const currentIndex = fields.findIndex(field => field.key === currentKey)
+  for (let i = currentIndex - 1; i >= 0; i--) {
+    focusFieldByKey(fields[i].key)
+    return
+  }
+}
+
+const jumpToItems = () => {
+  nextTick(() => {
+    const cols = focusableItemColumnKeys.value
+    if (cols.length) focusItemCell(0, cols[0])
+  })
+}
+
+const handleBasicInfoArrowKeydown = (e: KeyboardEvent) => {
+  if (handleFormGridSelectKeyboard(e)) return
+
+  const direction = arrowKeyToDirection(e.key)
+  if (!direction) return
+  if (!shouldNavigateOnArrow(e)) return
+
+  const fieldKey = findFieldKeyFromElement(e.target as HTMLElement)
+  if (!fieldKey) return
+
+  e.preventDefault()
+  e.stopPropagation()
+  navigateSequentialFields(fieldKey, direction, getFocusableHeaderFields(), {
+    onAfterLastDown: jumpToItems
+  })
+}
+
+const handleHeaderEnter = (field: HeaderFieldOption, e: KeyboardEvent) => {
   if (e.key !== 'Enter') return
   e.preventDefault()
   e.stopPropagation()
-  const rowIndex = form.value.items.indexOf(row)
-  if (rowIndex < 0) return
-  focusNextItemCell(rowIndex, colKey)
+  focusNextHeaderField(field.key)
+}
+
+const handleSelectFieldEnter = (field: HeaderFieldOption, e: KeyboardEvent) => {
+  if (e.key !== 'Enter') return
+  if (isSelectDropdownOpen()) {
+    scheduleAfterSelectClose(() => focusNextHeaderField(field.key))
+    return
+  }
+  e.preventDefault()
+  e.stopPropagation()
+  focusNextHeaderField(field.key)
+}
+
+const handleDateFieldEnter = (field: HeaderFieldOption, e: KeyboardEvent) => {
+  if (e.key !== 'Enter') return
+  const target = e.target as HTMLElement
+  if (target.closest('.el-date-picker-panel, .el-picker-panel')) return
+  const advance = () => {
+    e.preventDefault()
+    e.stopPropagation()
+    focusNextHeaderField(field.key)
+  }
+  if (isDatePickerPanelOpen()) {
+    scheduleAfterDatePickerClose(advance)
+    return
+  }
+  advance()
+}
+
+const handleFieldEnterCapture = (field: HeaderFieldOption, e: KeyboardEvent) => {
+  if (e.key !== 'Enter') return
+  if (field.type === 'date' || field.type === 'datetime') {
+    handleDateFieldEnter(field, e)
+    return
+  }
+  if (field.type === 'select' || field.key === 'customer') {
+    handleSelectFieldEnter(field, e)
+    return
+  }
+  if (field.type === 'textarea' && e.shiftKey) return
+  handleHeaderEnter(field, e)
 }
 
 const itemTableColumnKeys = computed(() => [
@@ -853,21 +986,45 @@ const focusItemCell = (rowIndex: number, colKey: string) => {
     const colIndex = itemTableColumnKeys.value.indexOf(colKey)
     if (colIndex < 0) return
     const cell = row.querySelectorAll('td.el-table__cell')[colIndex] as HTMLElement | undefined
-    if (!cell) return
-    const focusable = cell.querySelector(
-      'input:not([disabled]), textarea:not([disabled]), .el-select__wrapper'
-    ) as HTMLElement | null
-    const dateInput = cell.querySelector('.el-date-editor input:not([disabled])') as HTMLInputElement | null
-    if (dateInput) {
-      dateInput.focus()
-      dateInput.select?.()
-      return
-    }
-    if (focusable instanceof HTMLInputElement || focusable instanceof HTMLTextAreaElement) {
-      focusable.focus()
-      focusable.select?.()
-    }
+    focusCellControl(cell)
   })
+}
+
+const navigateItemsTableFrom = (
+  rowIndex: number,
+  colKey: string,
+  direction: 'up' | 'down' | 'left' | 'right'
+) => {
+  const cols = focusableItemColumnKeys.value
+  const colIdx = cols.indexOf(colKey)
+  if (colIdx < 0) return
+
+  if (direction === 'left') {
+    if (colIdx > 0) focusItemCell(rowIndex, cols[colIdx - 1])
+    return
+  }
+  if (direction === 'right') {
+    if (colIdx < cols.length - 1) focusItemCell(rowIndex, cols[colIdx + 1])
+    return
+  }
+  if (direction === 'up') {
+    if (rowIndex > 0) {
+      focusItemCell(rowIndex - 1, colKey)
+    } else {
+      const fields = getFocusableHeaderFields()
+      if (fields.length) focusFieldByKey(fields[fields.length - 1].key)
+    }
+    return
+  }
+  if (direction === 'down' && rowIndex < form.value.items.length - 1) {
+    focusItemCell(rowIndex + 1, colKey)
+  }
+}
+
+const navigateItemsTable = (direction: 'up' | 'down' | 'left' | 'right') => {
+  const pos = findItemsTableFocus()
+  if (!pos) return
+  navigateItemsTableFrom(pos.row, pos.colKey, direction)
 }
 
 const focusNextItemCell = (rowIndex: number, currentColKey: string) => {
@@ -900,17 +1057,46 @@ const findItemsTableFocus = () => {
 }
 
 const handleItemsTableKeydown = (e: KeyboardEvent) => {
+  if (handleItemSelectKeyboard(e)) return
+  if (isItemDatePickerTarget(e.target)) return
+
   if (e.key === 'Enter') {
     const pos = findItemsTableFocus()
     if (!pos) return
     const row = form.value.items[pos.row]
-    if (row && ['productCode', 'productName', 'spec', 'manufacturer'].includes(pos.colKey)) {
-      handleItemProductSearch(row)
+    const advance = () => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (row && ['productCode', 'productName', 'spec', 'manufacturer'].includes(pos.colKey)) {
+        handleItemProductSearch(row)
+      }
+      focusNextItemCell(pos.row, pos.colKey)
     }
-    e.preventDefault()
-    e.stopPropagation()
-    focusNextItemCell(pos.row, pos.colKey)
+
+    if (isDatePickerPanelOpen() && isItemDatePickerTarget(e.target)) {
+      scheduleAfterDatePickerClose(advance)
+      return
+    }
+    if (isDatePickerPanelOpen()) return
+
+    if (isSelectDropdownOpen() && isItemSelectTarget(e.target)) {
+      scheduleAfterSelectClose(advance)
+      return
+    }
+    if (isSelectDropdownOpen()) return
+
+    advance()
+    return
   }
+
+  const direction = arrowKeyToDirection(e.key)
+  if (!direction) return
+  if (!shouldNavigateOnArrow(e)) return
+  if (!findItemsTableFocus() && !((e.target as HTMLElement).closest('.items-detail-table'))) return
+
+  e.preventDefault()
+  e.stopPropagation()
+  navigateItemsTable(direction)
 }
 
 const generateOrderNo = () => {
@@ -1364,11 +1550,12 @@ const handleMore = (command: string) => {
           </el-button>
         </div>
       </div>
-      <div class="section-body" v-show="!basicInfoCollapsed">
+      <div class="section-body" v-show="!basicInfoCollapsed" @keydown.capture="handleBasicInfoArrowKeydown">
         <div v-if="sortedVisibleFields.length === 0" class="header-empty-tip">请点击「表头设置」选择要显示的字段</div>
         <div v-else class="form-grid basic-info-grid">
           <template v-for="field in sortedVisibleFields" :key="field.key">
             <div
+              :data-field-key="field.key"
               :class="[
                 'form-field',
                 {
@@ -1378,6 +1565,7 @@ const handleMore = (command: string) => {
                   'span-2': field.span2
                 }
               ]"
+              @keydown.enter.capture="handleFieldEnterCapture(field, $event)"
             >
               <label>{{ field.label }}</label>
 
@@ -1385,6 +1573,7 @@ const handleMore = (command: string) => {
                 v-if="field.key === 'customer'"
                 v-model="form.customer"
                 filterable
+                default-first-option
                 placeholder="请选择客户"
                 size="small"
                 style="width: 100%;"
@@ -1404,6 +1593,7 @@ const handleMore = (command: string) => {
               <el-select
                 v-else-if="field.type === 'select'"
                 v-model="form[field.key as keyof typeof form]"
+                default-first-option
                 size="small"
                 style="width: 100%;"
                 clearable
@@ -1424,6 +1614,7 @@ const handleMore = (command: string) => {
                 size="small"
                 style="width: 100%;"
                 :disabled="field.disabled"
+                @keydown.enter="(e: KeyboardEvent) => handleDateFieldEnter(field, e)"
               />
 
               <el-date-picker

@@ -20,6 +20,7 @@ import {
 import { getPartnerLicenseWarningMonths } from '@/utils/partnerLicenseWarning'
 import { setLicenseSectionItemOrder } from '@/utils/partnerLicenseSettings'
 import PartnerLicenseDocName from '@/components/partner/PartnerLicenseDocName.vue'
+import { parseValidityYearsFromNote } from '@/constants/licenseValidityRules'
 import { isTenantLicenseDeletable } from '@/utils/tenantCompanyLicenseService'
 import type { PartnerDocument } from '@/types/partnerProfile'
 
@@ -159,6 +160,7 @@ const initSortable = () => {
     draggable: '.license-card',
     handle: '.drag-handle',
     ghostClass: 'sortable-ghost',
+    chosenClass: 'sortable-chosen',
     onEnd: evt => {
       const { oldIndex, newIndex } = evt
       if (oldIndex === undefined || newIndex === undefined || oldIndex === newIndex) return
@@ -197,16 +199,22 @@ onBeforeUnmount(() => destroySortable())
         v-for="doc in documents"
         :key="doc.docKey || doc.id"
         class="license-card"
-        :class="[cardStatusClass(doc), cardOrientationClass(doc)]"
+        :class="[
+          cardStatusClass(doc),
+          cardOrientationClass(doc),
+          { 'is-sortable': !readonly && documents.length > 1 }
+        ]"
       >
         <button
           v-if="!readonly && documents.length > 1"
           type="button"
           class="drag-handle"
           aria-label="拖拽排序"
+          title="按住拖拽可调整同分类内证照顺序"
           @mousedown.stop
         >
-          <el-icon><Rank /></el-icon>
+          <el-icon class="drag-handle-icon"><Rank /></el-icon>
+          <span class="drag-handle-text">拖拽</span>
         </button>
         <div class="card-head">
           <PartnerLicenseDocName
@@ -217,7 +225,11 @@ onBeforeUnmount(() => destroySortable())
           />
           <div v-if="isProductLicenseDuplicateKey(doc.docKey)" class="duplicate-badge">副本</div>
           <div class="card-meta">
-            <div v-if="doc.validityNote && !isLongTermDocument(doc)" class="validity-note">{{ doc.validityNote }}</div>
+            <div v-if="doc.validityNote && !isLongTermDocument(doc)" class="validity-note">
+              <span class="validity-note-prefix">有效期</span>
+              <span class="validity-blank">{{ parseValidityYearsFromNote(doc.validityNote) || '\u00a0' }}</span>
+              <span class="validity-note-suffix">年</span>
+            </div>
             <el-tag v-else-if="isLongTermDocument(doc)" size="small" type="info" class="long-term-tag">长期有效</el-tag>
             <div v-else-if="daysLeftText(doc)" class="days-left-tip">{{ daysLeftText(doc) }}</div>
           </div>
@@ -257,7 +269,7 @@ onBeforeUnmount(() => destroySortable())
             >再添加</el-button>
             <el-button
               v-if="!readonly"
-              class="license-action-btn"
+              class="license-action-btn license-action-btn--sky"
               type="primary"
               plain
               size="small"
@@ -272,7 +284,7 @@ onBeforeUnmount(() => destroySortable())
               :auto-upload="false"
               :on-change="file => handleImageChange(file, doc)"
             >
-              <el-button class="license-action-btn" type="primary" plain size="small">{{ hasLicenseUploadedImage(doc) ? '更换' : '上传' }}</el-button>
+              <el-button class="license-action-btn license-action-btn--sky" type="primary" plain size="small">{{ hasLicenseUploadedImage(doc) ? '更换' : '上传' }}</el-button>
             </el-upload>
             <el-button
               v-if="hasLicenseUploadedImage(doc)"
@@ -419,10 +431,19 @@ onBeforeUnmount(() => destroySortable())
     }
   }
 
+  &.is-sortable {
+    padding-top: 30px;
+  }
+
   &.sortable-ghost {
     opacity: 0.45;
     border-style: dashed;
     border-color: #00bfa5;
+  }
+
+  &.sortable-chosen {
+    border-color: #00bfa5;
+    box-shadow: 0 0 0 2px rgba(0, 191, 165, 0.22);
   }
 
   &.is-warning {
@@ -485,11 +506,24 @@ onBeforeUnmount(() => destroySortable())
 }
 
 .validity-note {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2px;
   text-align: center;
   font-size: 10px;
   color: #667085;
   line-height: 1.2;
   width: 100%;
+}
+
+.validity-blank {
+  display: inline-block;
+  min-width: 1.4em;
+  border-bottom: 1px solid currentColor;
+  line-height: 1.1;
+  padding: 0 2px;
+  text-align: center;
 }
 
 .days-left-tip {
@@ -618,6 +652,26 @@ onBeforeUnmount(() => destroySortable())
     }
   }
 
+  :deep(.license-action-btn--sky.el-button--primary.is-plain) {
+    color: #1677ff !important;
+    border: none !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+    --el-button-text-color: #1677ff;
+    --el-button-border-color: transparent;
+    --el-button-bg-color: transparent;
+    --el-button-hover-text-color: #0958d9;
+    --el-button-hover-border-color: transparent;
+    --el-button-hover-bg-color: transparent;
+
+    &:hover,
+    &:focus {
+      color: #0958d9 !important;
+      border: none !important;
+      background-color: transparent !important;
+    }
+  }
+
   :deep(.license-action-btn--danger.el-button--danger.is-plain) {
     color: #d92d20 !important;
     border-color: #fecdca !important;
@@ -714,29 +768,43 @@ onBeforeUnmount(() => destroySortable())
 
 .drag-handle {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 6px;
+  right: 6px;
   z-index: 2;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.92);
-  color: #98a2b3;
+  gap: 3px;
+  height: 24px;
+  padding: 0 8px 0 6px;
+  border: 1px solid #7fdcc8;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #f6fffd 0%, #ecfdf8 100%);
+  color: #007a6a;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
   cursor: grab;
-  box-shadow: 0 0 0 1px #e4e7ed;
+  box-shadow: 0 1px 4px rgba(0, 122, 106, 0.16);
+
+  .drag-handle-icon {
+    font-size: 14px;
+  }
+
+  .drag-handle-text {
+    letter-spacing: 0.02em;
+  }
 
   &:hover {
-    color: #00bfa5;
-    box-shadow: 0 0 0 1px #b2f0e3;
+    color: #005f52;
+    border-color: #00bfa5;
+    background: #d4ede6;
+    box-shadow: 0 2px 6px rgba(0, 122, 106, 0.22);
   }
 
   &:active {
     cursor: grabbing;
+    transform: scale(0.98);
   }
 }
 

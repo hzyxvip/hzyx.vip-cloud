@@ -1,19 +1,35 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
+import { Setting } from '@element-plus/icons-vue'
 import { useTableStyle } from '@/composables/useTableStyle'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { usePlatformCustomerListColumnSettings } from '@/composables/usePlatformCustomerListColumnSettings'
+import { ElMessage, ElMessageBox, ElLoading } from 'element-plus'
 import {
   companyTypeOptions as platformCompanyTypeOptions,
+  deletePlatformCustomersByIds,
   getCompanyTypeLabel,
+  getPlatformCustomerStatusLabel,
+  getPlatformCustomerStatusTagType,
   loadPlatformCustomerList,
+  platformCustomerStatusOptions,
   savePlatformCustomerList,
   type PlatformCustomer
 } from '@/utils/platformCustomerStore'
+import { usePlatformCustomerListBatchActions } from '@/composables/usePlatformCustomerListBatchActions'
+import { isPlatformProductAdmin } from '@/utils/userPermission'
+import {
+  downloadPlatformCustomerImportTemplate,
+  mergeImportedPlatformCustomers,
+  parsePlatformCustomerImportFile,
+  type PlatformCustomerImportRow
+} from '@/utils/platformCustomerImportExport'
 
 const router = useRouter()
 const tableRef = ref()
+const importInputRef = ref<HTMLInputElement>()
 const selectedRows = ref<PlatformCustomer[]>([])
+const canAudit = computed(() => isPlatformProductAdmin())
 
 const showAdvancedFilter = ref(false)
 
@@ -28,10 +44,7 @@ const timePresets = [
   { label: '近一年', value: 'lastYear' }
 ]
 
-const statusOptions = [
-  { label: '已审核', value: 'audited' },
-  { label: '未审核', value: 'notAudited' }
-]
+const statusOptions = platformCustomerStatusOptions
 
 const companyTypeOptions = platformCompanyTypeOptions
 
@@ -121,9 +134,27 @@ const cloneSearchForm = (form: SearchFormState): SearchFormState => ({
 const searchForm = ref<SearchFormState>(createEmptySearchForm())
 const appliedSearch = ref<SearchFormState>(createEmptySearchForm())
 
-onMounted(() => {
+const PLATFORM_CUSTOMER_SEED_IMPORTED_KEY = 'platformCustomerSeedImported'
+
+onMounted(async () => {
   localStorage.removeItem('platform-customer-search-form')
   tableData.value = loadPlatformCustomerList()
+
+  if (localStorage.getItem(PLATFORM_CUSTOMER_SEED_IMPORTED_KEY)) return
+  if (tableData.value.length > 20) return
+
+  try {
+    const response = await fetch('/data/platform-customer-seed.json')
+    if (!response.ok) return
+    const imported = (await response.json()) as PlatformCustomerImportRow[]
+    const { list, added, updated } = mergeImportedPlatformCustomers(tableData.value, imported)
+    savePlatformCustomerList(list)
+    tableData.value = list
+    localStorage.setItem(PLATFORM_CUSTOMER_SEED_IMPORTED_KEY, '1')
+    ElMessage.success(`已导入供应商汇总表：新增 ${added} 条，更新 ${updated} 条`)
+  } catch {
+    // 首次自动导入失败时不打断页面使用，可手动点击「导入汇总表」
+  }
 })
 
 const handlePresetChange = (val: string) => {
@@ -186,6 +217,10 @@ const matchBySearchForm = (item: ReturnType<typeof loadPlatformCustomerList>[num
     return false
   }
 
+  if (form.status.length > 0 && !form.status.includes(item.status)) {
+    return false
+  }
+
   if (form.companyType.length > 0 && !form.companyType.includes(item.companyType)) {
     return false
   }
@@ -212,9 +247,10 @@ watch(filteredData, list => {
 })
 
 const { columnWidths, handleHeaderDragend } = useTableStyle('platform-customer', [
-  { key: 'index', label: '', defaultWidth: 50 },
+  { key: 'index', label: '序号', defaultWidth: 56 },
   { key: 'select', label: '', defaultWidth: 40 },
   { key: 'platformStatus', label: '平台状态', defaultWidth: 80 },
+  { key: 'status', label: '状态', defaultWidth: 80 },
   { key: 'companyCode', label: '公司代码', defaultWidth: 100 },
   { key: 'companyName', label: '公司名称', defaultWidth: 200 },
   { key: 'companyShortName', label: '公司简称', defaultWidth: 100 },
@@ -238,9 +274,31 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('platform-customer',
   { key: 'editDate', label: '编辑日期', defaultWidth: 100 },
   { key: 'remark', label: '备注', defaultWidth: 100 },
   { key: 'recordStatus', label: '平台备案', defaultWidth: 80 },
-  { key: 'recordDate', label: '备案日期', defaultWidth: 100 },
-  { key: 'action', label: '操作', defaultWidth: 100 }
+  { key: 'recordDate', label: '备案日期', defaultWidth: 100 }
 ])
+
+const {
+  showColumnSelector,
+  columnOptions,
+  selectedColumns,
+  sortedVisibleColumns,
+  tableColumnRenderKey,
+  openColumnSettings,
+  handleColumnDragStart,
+  handleColumnDragOver,
+  handleColumnDrop,
+  confirmColumnSelection
+} = usePlatformCustomerListColumnSettings('platform-customer-list')
+
+const layoutCustomerTable = () => {
+  nextTick(() => {
+    tableRef.value?.doLayout?.()
+  })
+}
+
+watch(tableColumnRenderKey, () => {
+  layoutCustomerTable()
+})
 
 const handleCreate = () => {
   router.push('/platform/customer/create')
@@ -249,6 +307,24 @@ const handleCreate = () => {
 const handleSelectionChange = (rows: PlatformCustomer[]) => {
   selectedRows.value = rows
 }
+
+const clearTableSelection = () => {
+  selectedRows.value = []
+  tableRef.value?.clearSelection?.()
+}
+
+const {
+  showBatchModifyDialog,
+  batchModifyColumn,
+  batchModifyValue,
+  batchModifiableColumns,
+  batchModifyColumnDef,
+  canBatchAudit,
+  canBatchUnaudit,
+  handleBatchAudit,
+  openBatchModifyDialog,
+  confirmBatchModify
+} = usePlatformCustomerListBatchActions(tableData, selectedRows, clearTableSelection)
 
 const handleToolbarEdit = () => {
   if (selectedRows.value.length !== 1) {
@@ -276,10 +352,8 @@ const handleToolbarDelete = async () => {
         type: 'warning'
       }
     )
-    const ids = new Set(selectedRows.value.map(item => item.id))
-    const list = loadPlatformCustomerList().filter(item => !ids.has(item.id))
-    savePlatformCustomerList(list)
-    tableData.value = list
+    const ids = selectedRows.value.map(item => item.id)
+    tableData.value = deletePlatformCustomersByIds(ids)
     selectedRows.value = []
     tableRef.value?.clearSelection?.()
     ElMessage.success('删除成功')
@@ -294,22 +368,6 @@ const handleView = (id: number) => {
 
 const handleEdit = (id: number) => {
   router.push(`/platform/customer/edit/${id}`)
-}
-
-const handleDelete = async (id: number) => {
-  try {
-    await ElMessageBox.confirm('请谨慎删除！确定删除该客户资料吗？此操作不可恢复。', '删除确认', {
-      confirmButtonText: '确定删除',
-      cancelButtonText: '取消',
-      type: 'warning'
-    })
-    const list = loadPlatformCustomerList().filter(item => item.id !== id)
-    savePlatformCustomerList(list)
-    tableData.value = list
-    ElMessage.success('删除成功')
-  } catch {
-    // 用户取消
-  }
 }
 
 const handleRowDoubleClick = (row: any) => {
@@ -336,6 +394,76 @@ const handleRefresh = () => {
   ElMessage.success('数据已刷新')
 }
 
+const applyImportedCustomers = (imported: PlatformCustomerImportRow[], sourceLabel: string) => {
+  if (imported.length === 0) {
+    ElMessage.warning('未识别到有效客户：请确认含「供应商名称/公司名称」列')
+    return
+  }
+
+  const { list, added, updated, skipped } = mergeImportedPlatformCustomers(tableData.value, imported)
+  savePlatformCustomerList(list)
+  tableData.value = list
+  selectedRows.value = []
+  tableRef.value?.clearSelection?.()
+  currentPage.value = 1
+  ElMessage.success(
+    `${sourceLabel}完成：共识别 ${imported.length} 条，新增 ${added} 条，更新 ${updated} 条${skipped ? `，跳过 ${skipped} 条` : ''}`
+  )
+}
+
+const handleImportClick = () => {
+  importInputRef.value?.click()
+}
+
+const handleImportFile = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  const loading = ElLoading.service({
+    lock: true,
+    text: `正在导入 ${file.name}，请稍候…`,
+    background: 'rgba(255, 255, 255, 0.7)'
+  })
+
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const imported = await parsePlatformCustomerImportFile(file)
+    applyImportedCustomers(imported, '导入')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '导入失败，请检查文件格式')
+  } finally {
+    loading.close()
+  }
+}
+
+const handleDownloadImportTemplate = () => {
+  downloadPlatformCustomerImportTemplate('平台客户导入模板')
+  ElMessage.success('导入模板已下载，必填：供应商名称/公司名称')
+}
+
+const handleImportSeedData = async () => {
+  const loading = ElLoading.service({
+    lock: true,
+    text: '正在导入供应商汇总表数据，请稍候…',
+    background: 'rgba(255, 255, 255, 0.7)'
+  })
+
+  try {
+    const response = await fetch('/data/platform-customer-seed.json')
+    if (!response.ok) {
+      throw new Error('内置汇总表数据不可用')
+    }
+    const imported = (await response.json()) as PlatformCustomerImportRow[]
+    applyImportedCustomers(imported, '汇总表导入')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '汇总表导入失败')
+  } finally {
+    loading.close()
+  }
+}
+
 const handleSizeChange = (size: number) => {
   pageSize.value = size
   currentPage.value = 1
@@ -348,6 +476,13 @@ const handleCurrentChange = (page: number) => {
 
 <template>
   <div class="page-container">
+    <div class="page-header">
+      <div class="page-info">
+        <h1>平台客户列表</h1>
+        <div class="breadcrumb">首页 / 平台管理 / 平台配置 / 平台客户列表</div>
+      </div>
+    </div>
+
     <div class="search-card">
       <div class="search-row">
         <el-form :model="searchForm" inline class="search-form">
@@ -390,7 +525,32 @@ const handleCurrentChange = (page: number) => {
           <el-button @click="handleRefresh">刷新</el-button>
           <el-button type="primary" @click="handleCreate">新增</el-button>
           <el-button :disabled="selectedRows.length !== 1" @click="handleToolbarEdit">修改</el-button>
+          <el-button :disabled="selectedRows.length === 0" @click="openBatchModifyDialog">批量修改</el-button>
+          <el-button
+            v-if="canAudit"
+            type="success"
+            plain
+            :disabled="!canBatchAudit"
+            @click="handleBatchAudit('audit')"
+          >审核</el-button>
+          <el-button
+            v-if="canAudit"
+            class="btn-unaudit-pink"
+            plain
+            :disabled="!canBatchUnaudit"
+            @click="handleBatchAudit('unaudit')"
+          >反审核</el-button>
           <el-button type="danger" plain :disabled="selectedRows.length === 0" @click="handleToolbarDelete">删除</el-button>
+          <el-button type="primary" @click="handleImportClick">导入 Excel</el-button>
+          <el-button type="success" @click="handleImportSeedData">导入汇总表</el-button>
+          <el-button @click="handleDownloadImportTemplate">下载模板</el-button>
+          <input
+            ref="importInputRef"
+            type="file"
+            accept=".xlsx,.xls"
+            class="hidden-import-input"
+            @change="handleImportFile"
+          />
           <el-button 
             :type="showAdvancedFilter ? 'success' : 'default'" 
             @click="showAdvancedFilter = !showAdvancedFilter"
@@ -409,6 +569,12 @@ const handleCurrentChange = (page: number) => {
             </el-checkbox-group>
           </div>
           <div class="filter-item">
+            <span class="filter-label">状态：</span>
+            <el-checkbox-group v-model="searchForm.status">
+              <el-checkbox-button v-for="opt in statusOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</el-checkbox-button>
+            </el-checkbox-group>
+          </div>
+          <div class="filter-item">
             <span class="filter-label">公司类型：</span>
             <el-checkbox-group v-model="searchForm.companyType">
               <el-checkbox-button v-for="opt in companyTypeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</el-checkbox-button>
@@ -419,10 +585,20 @@ const handleCurrentChange = (page: number) => {
     </div>
 
     <div class="table-card">
-      <div class="table-summary">共 {{ filteredData.length }} 条，当前第 {{ currentPage }} / {{ Math.max(1, Math.ceil(filteredData.length / pageSize) || 1) }} 页</div>
+      <div class="table-toolbar">
+        <div class="table-summary">共 {{ filteredData.length }} 条，当前第 {{ currentPage }} / {{ Math.max(1, Math.ceil(filteredData.length / pageSize) || 1) }} 页</div>
+        <el-button size="small" @click="openColumnSettings">
+          <el-icon><Setting /></el-icon>
+          列表设置
+        </el-button>
+      </div>
+      <div v-if="sortedVisibleColumns.length === 0" class="header-empty-tip">请点击「列表设置」选择要显示的列</div>
       <el-table
+        v-else
         ref="tableRef"
+        :key="tableColumnRenderKey"
         :data="pagedData"
+        row-key="id"
         class="common-table"
         border
         :fit="true"
@@ -430,61 +606,45 @@ const handleCurrentChange = (page: number) => {
         @row-dblclick="handleRowDoubleClick"
         @selection-change="handleSelectionChange"
       >
-        <el-table-column type="index" :index="indexMethod" :width="columnWidths.index" align="center" />
+        <el-table-column type="index" label="序号" :index="indexMethod" :width="columnWidths.index" align="center" fixed="left" />
         <el-table-column type="selection" :width="columnWidths.select" />
-        <el-table-column label="平台状态" :width="columnWidths.platformStatus" align="center">
+        <el-table-column
+          v-for="col in sortedVisibleColumns"
+          :key="col.key"
+          :prop="col.prop"
+          :label="col.label"
+          :width="columnWidths[col.key]"
+          :align="col.align"
+          :header-align="col.headerAlign || col.align || 'center'"
+          show-overflow-tooltip
+        >
           <template #default="{ row }">
-            <el-tag size="small" :type="row.platformStatus === 'platformAudited' ? 'success' : 'warning'">
-              {{ row.platformStatus === 'platformAudited' ? '已审核' : '未审核' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="companyCode" label="公司代码" :width="columnWidths.companyCode" />
-        <el-table-column prop="companyName" label="公司名称" :width="columnWidths.companyName">
-          <template #default="{ row }">
-            <span class="code-link" @click="handleView(row.id)">{{ row.companyName }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="companyShortName" label="公司简称" :width="columnWidths.companyShortName" />
-        <el-table-column prop="companyType" label="三方类型" :width="columnWidths.companyType">
-          <template #default="{ row }">
-            <el-tag size="small" type="info">
+            <template v-if="col.key === 'platformStatus'">
+              <el-tag size="small" :type="row.platformStatus === 'platformAudited' ? 'success' : 'warning'">
+                {{ row.platformStatus === 'platformAudited' ? '已审核' : '未审核' }}
+              </el-tag>
+            </template>
+            <span
+              v-else-if="col.key === 'companyName'"
+              class="code-link"
+              @click="handleView(row.id)"
+            >{{ row.companyName }}</span>
+            <el-tag v-else-if="col.key === 'companyType'" size="small" type="info">
               {{ getCompanyTypeLabel(row.companyType) || '—' }}
             </el-tag>
+            <el-tag
+              v-else-if="col.key === 'status'"
+              size="small"
+              :type="getPlatformCustomerStatusTagType(row.status)"
+            >{{ getPlatformCustomerStatusLabel(row.status) }}</el-tag>
+            <el-tag
+              v-else-if="col.key === 'recordStatus'"
+              size="small"
+              :type="row.recordStatus === '是' ? 'success' : 'info'"
+            >{{ row.recordStatus }}</el-tag>
+            <span v-else>{{ row[col.prop] ?? '' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="pinyin" label="拼音缩写" :width="columnWidths.pinyin" />
-        <el-table-column prop="contact" label="联系人" :width="columnWidths.contact" />
-        <el-table-column prop="phone" label="公司电话" :width="columnWidths.phone" />
-        <el-table-column prop="email" label="公司邮箱" :width="columnWidths.email" />
-        <el-table-column prop="province" label="省" :width="columnWidths.province" />
-        <el-table-column prop="city" label="市" :width="columnWidths.city" />
-        <el-table-column prop="address" label="地址" :width="columnWidths.address" />
-        <el-table-column prop="license" label="营业执照" :width="columnWidths.license" />
-        <el-table-column prop="licenseExpire" label="证件到期" :width="columnWidths.licenseExpire" />
-        <el-table-column prop="taxId" label="税号" :width="columnWidths.taxId" />
-        <el-table-column prop="bank" label="开户银行" :width="columnWidths.bank" />
-        <el-table-column prop="bankAccount" label="银行账号" :width="columnWidths.bankAccount" />
-        <el-table-column prop="platformUser" label="平台用户" :width="columnWidths.platformUser" />
-        <el-table-column prop="createDate" label="创建日期" :width="columnWidths.createDate" />
-        <el-table-column prop="creator" label="创建人" :width="columnWidths.creator" />
-        <el-table-column prop="editor" label="编辑人员" :width="columnWidths.editor" />
-        <el-table-column prop="editDate" label="编辑日期" :width="columnWidths.editDate" />
-        <el-table-column prop="remark" label="备注" :width="columnWidths.remark" />
-        <el-table-column label="平台备案" :width="columnWidths.recordStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.recordStatus === '是' ? 'success' : 'info'">{{ row.recordStatus }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="recordDate" label="备案日期" :width="columnWidths.recordDate" />
-        <el-table-column label="操作" :width="columnWidths.action" align="center">
-          <template #default="{ row }">
-            <el-button type="text" size="small" @click="handleView(row.id)">查看</el-button>
-            <el-button type="text" size="small" @click="handleEdit(row.id)">编辑</el-button>
-            <el-button type="text" size="small" @click="handleDelete(row.id)">删除</el-button>
-          </template>
-        </el-table-column>
-        <el-table-column label="" />
       </el-table>
 
       <div class="pagination">
@@ -500,10 +660,115 @@ const handleCurrentChange = (page: number) => {
       </div>
     </div>
   </div>
+
+  <el-dialog v-model="showBatchModifyDialog" title="批量修改客户资料" width="480px" draggable>
+    <el-form label-width="72px">
+      <el-form-item label="修改列">
+        <el-select v-model="batchModifyColumn" placeholder="选择列" style="width: 100%">
+          <el-option
+            v-for="col in batchModifiableColumns"
+            :key="col.key"
+            :label="col.label"
+            :value="col.key"
+          />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="新值">
+        <el-select
+          v-if="batchModifyColumnDef?.key === 'companyType'"
+          v-model="batchModifyValue"
+          placeholder="请选择三方类型"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="opt in companyTypeOptions.filter(item => item.value !== 'all')"
+            :key="opt.value"
+            :label="opt.label"
+            :value="opt.value"
+          />
+        </el-select>
+        <el-select
+          v-else-if="batchModifyColumnDef?.key === 'status'"
+          v-model="batchModifyValue"
+          placeholder="请选择状态"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="opt in statusOptions"
+            :key="opt.value"
+            :label="opt.label"
+            :value="opt.value"
+          />
+        </el-select>
+        <el-select
+          v-else-if="batchModifyColumnDef?.key === 'recordStatus'"
+          v-model="batchModifyValue"
+          placeholder="请选择"
+          style="width: 100%"
+        >
+          <el-option label="是" value="是" />
+          <el-option label="否" value="否" />
+        </el-select>
+        <el-input v-else v-model="batchModifyValue" placeholder="请输入新值" clearable />
+      </el-form-item>
+      <p class="batch-modify-tip">将修改已选 {{ selectedRows.length }} 条客户资料的对应字段</p>
+    </el-form>
+    <template #footer>
+      <el-button @click="showBatchModifyDialog = false">取消</el-button>
+      <el-button type="primary" @click="confirmBatchModify">确定</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="showColumnSelector" title="客户列表设置" width="720px" draggable>
+    <div class="field-selector">
+      <p class="sort-tip">勾选需要在列表中显示的列，拖拽可调整顺序</p>
+      <el-checkbox-group v-model="selectedColumns">
+        <el-row :gutter="10">
+          <el-col :span="8" v-for="(col, index) in columnOptions" :key="col.key">
+            <div
+              class="field-item"
+              draggable="true"
+              @dragstart="(event) => handleColumnDragStart(event, index)"
+              @dragover="handleColumnDragOver"
+              @drop="(event) => handleColumnDrop(event, index)"
+            >
+              <span class="field-order">{{ index + 1 }}.</span>
+              <el-checkbox :label="col.key" :disabled="col.required">{{ col.label }}</el-checkbox>
+            </div>
+          </el-col>
+        </el-row>
+      </el-checkbox-group>
+    </div>
+    <template #footer>
+      <el-button @click="showColumnSelector = false">取消</el-button>
+      <el-button type="primary" @click="confirmColumnSelection">确定</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style lang="scss" scoped>
 .page-container { padding: 20px; background-color: #F5F7FA; min-height: calc(100vh - 60px); }
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+
+  .page-info {
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0 0 6px;
+      color: #101828;
+    }
+  }
+
+  .breadcrumb {
+    font-size: 14px;
+    color: #667085;
+  }
+}
 
 .search-card { 
   background: transparent; 
@@ -681,8 +946,15 @@ const handleCurrentChange = (page: number) => {
   box-shadow: 0 1px 4px rgba(0,0,0,0.04); 
   border: 1px solid #ebeef5;
 
-  .table-summary {
+  .table-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     margin-bottom: 12px;
+  }
+
+  .table-summary {
     font-size: 13px;
     color: #667085;
   }
@@ -725,6 +997,72 @@ const handleCurrentChange = (page: number) => {
   display: flex;
   justify-content: flex-end;
   margin-top: 20px;
+}
+
+.hidden-import-input {
+  display: none;
+}
+
+.header-empty-tip {
+  padding: 40px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 14px;
+}
+
+.batch-modify-tip {
+  margin: 0;
+  font-size: 13px;
+  color: #667085;
+}
+
+.audit-dropdown-icon {
+  margin-left: 4px;
+}
+
+.btn-unaudit-pink {
+  --el-button-text-color: #db2777;
+  --el-button-border-color: #f9a8d4;
+  --el-button-bg-color: #fdf2f8;
+  --el-button-hover-text-color: #be185d;
+  --el-button-hover-border-color: #f472b6;
+  --el-button-hover-bg-color: #fce7f3;
+  --el-button-disabled-text-color: #f9a8d4;
+  --el-button-disabled-border-color: #fce7f3;
+  --el-button-disabled-bg-color: #fff;
+}
+
+.field-selector {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 10px 0;
+
+  .sort-tip {
+    color: #909399;
+    font-size: 12px;
+    margin-bottom: 10px;
+    padding: 0 10px;
+  }
+
+  .field-item {
+    cursor: move;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    &:hover {
+      background: #f5f7fa;
+    }
+
+    .field-order {
+      color: #909399;
+      font-size: 12px;
+      min-width: 20px;
+    }
+  }
 }
 
 .code-link {

@@ -312,3 +312,25 @@ export function setCustomerAuditStatus(
   saveCustomerList(list)
   return list[index]
 }
+
+export function batchSetCustomerAuditStatus(
+  ids: string[],
+  audited: boolean
+): CustomerMaster[] {
+  const idSet = new Set(ids.map(String).filter(Boolean))
+  if (idSet.size === 0) return loadCustomerList()
+
+  const now = new Date().toLocaleString('zh-CN')
+  const auditor = getCurrentUserName()
+  const next = loadCustomerList().map(item => {
+    if (!idSet.has(item.id)) return item
+    return {
+      ...item,
+      auditStatus: audited ? 'audited' as const : 'notAudited' as const,
+      auditTime: audited ? now : '',
+      auditor: audited ? auditor : ''
+    }
+  })
+  saveCustomerList(next)
+  return next
+}

@@ -578,9 +578,29 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/platform/PlatformCustomerCreate.vue')
       },
       {
+        path: 'platform/customer/create/investment',
+        name: 'PlatformCustomerCreateInvestment',
+        component: () => import('@/views/platform/PlatformCustomerInvestment.vue')
+      },
+      {
+        path: 'platform/customer/create/license',
+        name: 'PlatformCustomerCreateLicense',
+        component: () => import('@/views/platform/PlatformCustomerLicense.vue')
+      },
+      {
         path: 'platform/customer/edit/:id',
         name: 'PlatformCustomerEdit',
         component: () => import('@/views/platform/PlatformCustomerCreate.vue')
+      },
+      {
+        path: 'platform/customer/edit/:id/investment',
+        name: 'PlatformCustomerEditInvestment',
+        component: () => import('@/views/platform/PlatformCustomerInvestment.vue')
+      },
+      {
+        path: 'platform/customer/edit/:id/license',
+        name: 'PlatformCustomerEditLicense',
+        component: () => import('@/views/platform/PlatformCustomerLicense.vue')
       },
       {
         path: 'platform/field',

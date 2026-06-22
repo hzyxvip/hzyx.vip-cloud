@@ -6,7 +6,7 @@ export const ROLE_PERMISSIONS: Record<string, string[]> = {
   ],
   company_admin: [
     'unit_view', 'unit_add', 'unit_edit',
-    'product_view', 'product_add', 'product_edit',
+    'product_view', 'product_add', 'product_edit', 'product_audit',
     'purchase_view', 'purchase_add', 'purchase_edit',
     'sales_view', 'sales_add', 'sales_edit',
     'warehouse_view', 'finance_view', 'system_user'

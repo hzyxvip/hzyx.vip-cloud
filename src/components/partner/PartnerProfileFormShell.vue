@@ -1,13 +1,17 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { PARTNER_PROFILE_TABS } from '@/constants/partnerProfileTabs'
 
-defineProps<{
+const props = defineProps<{
   modelValue: string
+  tabs?: ReadonlyArray<{ label: string; value: string }>
 }>()
 
 defineEmits<{
   'update:modelValue': [value: string]
 }>()
+
+const resolvedTabs = computed(() => props.tabs ?? PARTNER_PROFILE_TABS)
 </script>
 
 <template>
@@ -18,7 +22,7 @@ defineEmits<{
     @update:model-value="$emit('update:modelValue', $event)"
   >
     <el-tab-pane
-      v-for="tab in PARTNER_PROFILE_TABS"
+      v-for="tab in resolvedTabs"
       :key="tab.value"
       :label="tab.label"
       :name="tab.value"

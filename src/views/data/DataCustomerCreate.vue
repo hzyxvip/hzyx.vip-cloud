@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import PartnerProfileFormShell from '@/components/partner/PartnerProfileFormShell.vue'
+import { ArrowLeft } from '@element-plus/icons-vue'
 import PartnerLicenseSections from '@/components/partner/PartnerLicenseSections.vue'
-import { DEFAULT_PARTNER_PROFILE_TAB } from '@/constants/partnerProfileTabs'
+import { usePartnerProfileQuickEntry } from '@/composables/usePartnerProfileQuickEntry'
 import {
   createDefaultPartnerDocuments,
   findExpiredPartnerDocuments,
@@ -24,7 +24,6 @@ const route = useRoute()
 
 const isEdit = ref(false)
 const customerId = ref('')
-const activeTab = ref(DEFAULT_PARTNER_PROFILE_TAB)
 
 const customerTypeOptions = [
   { label: '医院', value: 'hospital' },
@@ -33,6 +32,10 @@ const customerTypeOptions = [
   { label: '医疗器械公司', value: 'deviceCompany' },
   { label: '其他', value: 'other' }
 ]
+
+const customerTypeLabels = Object.fromEntries(
+  customerTypeOptions.map(item => [item.value, item.label])
+)
 
 const form = reactive({
   id: '',
@@ -79,6 +82,17 @@ const form = reactive({
 })
 
 const documents = ref<CustomerDocument[]>(createDefaultPartnerDocuments())
+const basicSectionRef = ref<HTMLElement | null>(null)
+
+const {
+  PARTNER_PROFILE_QUICK_ENTRY_ITEMS,
+  introSectionRef,
+  investmentSectionRef,
+  licenseSectionRef,
+  scrollToSection
+} = usePartnerProfileQuickEntry()
+
+const profileLabel = computed(() => customerTypeLabels[form.type] || '未选择')
 
 onMounted(() => {
   const id = route.params.id
@@ -215,24 +229,28 @@ const syncDocumentStatus = () => {
 }
 
 const handleSave = () => {
+  const scrollToBasic = () => {
+    basicSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   if (!form.name) {
     ElMessage.warning('请输入客户名称')
-    activeTab.value = 'basic'
+    scrollToBasic()
     return
   }
   if (!form.type) {
     ElMessage.warning('请选择客户类型')
-    activeTab.value = 'basic'
+    scrollToBasic()
     return
   }
   if (!form.contact) {
     ElMessage.warning('请输入联系人')
-    activeTab.value = 'basic'
+    scrollToBasic()
     return
   }
   if (!form.phone && !form.mobile) {
     ElMessage.warning('请输入联系电话或手机')
-    activeTab.value = 'basic'
+    scrollToBasic()
     return
   }
 
@@ -240,7 +258,7 @@ const handleSave = () => {
   const expiredDocs = findExpiredPartnerDocuments(documents.value)
   if (expiredDocs.length > 0) {
     ElMessage.error(`存在 ${expiredDocs.length} 项已过期证照，请更新后再保存`)
-    activeTab.value = 'license'
+    scrollToSection('license')
     return
   }
 
@@ -255,142 +273,255 @@ const handleBack = () => {
 </script>
 
 <template>
-  <div class="page-container">
+  <div class="page-container profile-page-primary-btn">
     <div class="page-header">
-      <div class="header-left">
-        <el-button icon="ArrowLeft" @click="handleBack">返回</el-button>
+      <div class="page-info">
         <h1>{{ isEdit ? '编辑客户' : '新增客户' }}</h1>
+        <div class="breadcrumb">首页 / 资料管理 / 基础资料 / 客户管理 / {{ isEdit ? '编辑' : '新增' }}</div>
+        <div class="format-tip">界面布局与「公司资料设定」保持一致，便于统一维护资料</div>
       </div>
-      <div class="header-right">
+      <div class="page-actions">
+        <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
         <el-button @click="handleBack">取消</el-button>
         <el-button type="primary" @click="handleSave">{{ isEdit ? '保存修改' : '保存' }}</el-button>
       </div>
     </div>
 
-    <div class="form-card">
-      <PartnerProfileFormShell v-model="activeTab">
-        <template #intro>
-          <div class="partner-form-grid">
-            <el-form-item label="企业介绍" class="span-full">
-              <el-input v-model="form.companyIntro" type="textarea" :rows="3" placeholder="请输入企业介绍" />
-            </el-form-item>
-            <el-form-item label="法定代表人">
-              <el-input v-model="form.legalPerson" placeholder="请输入法定代表人" />
-            </el-form-item>
-            <el-form-item label="注册资本">
-              <el-input v-model="form.registerCapital" placeholder="请输入注册资本" />
-            </el-form-item>
-            <el-form-item label="成立日期">
-              <el-date-picker v-model="form.establishDate" type="date" value-format="YYYY-MM-DD" placeholder="选择成立日期" style="width: 100%;" />
-            </el-form-item>
-            <el-form-item label="经营范围" class="span-full">
-              <el-input v-model="form.businessScope" type="textarea" :rows="2" placeholder="请输入经营范围" />
-            </el-form-item>
-            <el-form-item label="备注" class="span-full">
-              <el-input v-model="form.remark" type="textarea" :rows="2" placeholder="请输入备注" />
-            </el-form-item>
-          </div>
-        </template>
+    <div class="summary-card">
+      <div class="summary-item">
+        <span class="label">客户名称</span>
+        <span class="value">{{ form.name.trim() || '未填写' }}</span>
+      </div>
+      <div class="summary-item summary-item-status">
+        <span class="label">客户类型</span>
+        <el-tag type="info" size="small">{{ profileLabel }}</el-tag>
+      </div>
+    </div>
 
-        <template #basic>
-          <div class="partner-form-grid">
+    <div class="quick-entry-card">
+      <div class="card-title">快捷入口</div>
+      <div class="quick-entry-row">
+        <div
+          v-for="item in PARTNER_PROFILE_QUICK_ENTRY_ITEMS"
+          :key="item.key"
+          class="quick-entry-item"
+          @click="scrollToSection(item.key)"
+        >
+          <div class="quick-entry-icon" :class="item.tone">
+            <el-icon><component :is="item.icon" /></el-icon>
+          </div>
+          <div class="quick-entry-text">
+            <div class="quick-entry-label">{{ item.label }}</div>
+            <div class="quick-entry-desc">{{ item.desc }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div ref="basicSectionRef" class="form-card">
+      <div class="card-title">客户资料</div>
+      <el-form :model="form" label-width="140px" class="company-form">
+        <el-row :gutter="16">
+          <el-col :span="12">
             <el-form-item label="客户编号" required>
               <el-input v-model="form.id" disabled />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="客户名称" required>
               <el-input v-model="form.name" placeholder="请输入客户名称" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="公司简称">
               <el-input v-model="form.shortName" placeholder="请输入公司简称" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="拼音缩写">
               <el-input v-model="form.pinyin" placeholder="请输入拼音缩写" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="客户类型" required>
               <el-select v-model="form.type" placeholder="请选择客户类型" style="width: 100%;">
                 <el-option v-for="opt in customerTypeOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
               </el-select>
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="税率(%)">
               <el-input-number v-model="form.taxRate" :min="0" :max="100" :precision="2" style="width: 100%;" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="公司税号">
               <el-input v-model="form.creditCode" placeholder="请输入统一社会信用代码" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="纳税人识别号">
               <el-input v-model="form.taxNo" placeholder="请输入纳税人识别号" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="开户银行">
               <el-input v-model="form.bankName" placeholder="请输入开户银行" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="银行行号">
               <el-input v-model="form.bankBranchNo" placeholder="请输入银行行号" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="银行账号">
               <el-input v-model="form.bankAccount" placeholder="请输入银行账号" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="国家">
               <el-input v-model="form.country" placeholder="请输入国家" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="省">
               <el-input v-model="form.province" placeholder="请输入省份" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="市">
               <el-input v-model="form.city" placeholder="请输入城市" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="区">
               <el-input v-model="form.district" placeholder="请输入区县" />
             </el-form-item>
-            <el-form-item label="详细地址" class="span-full">
+          </el-col>
+          <el-col :span="24">
+            <el-form-item label="详细地址">
               <el-input v-model="form.address" placeholder="请输入详细地址" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="邮政编码">
               <el-input v-model="form.postalCode" placeholder="请输入邮政编码" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="联系人" required>
               <el-input v-model="form.contact" placeholder="请输入联系人" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="手机号码">
               <el-input v-model="form.mobile" placeholder="请输入手机号码" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="电子邮箱">
               <el-input v-model="form.email" placeholder="请输入邮箱地址" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="固定电话">
               <el-input v-model="form.phone" placeholder="请输入固定电话" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="企业负责人">
               <el-input v-model="form.enterpriseLeader" placeholder="请输入企业负责人" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="身份证号">
               <el-input v-model="form.idCard" placeholder="请输入身份证号" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="负责人电话">
               <el-input v-model="form.leaderPhone" placeholder="请输入负责人电话" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="企业网址">
               <el-input v-model="form.website" placeholder="请输入企业网址" />
             </el-form-item>
-          </div>
-        </template>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="法定代表人">
+              <el-input v-model="form.legalPerson" placeholder="请输入法定代表人" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="注册资本">
+              <el-input v-model="form.registerCapital" placeholder="请输入注册资本" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="成立日期">
+              <el-date-picker
+                v-model="form.establishDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                placeholder="选择成立日期"
+                style="width: 100%;"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="24">
+            <el-form-item label="经营范围">
+              <el-input v-model="form.businessScope" type="textarea" :rows="2" placeholder="请输入经营范围" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="24">
+            <el-form-item label="备注">
+              <el-input v-model="form.remark" type="textarea" :rows="2" placeholder="请输入备注" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+    </div>
 
-        <template #investment>
-          <div class="partner-form-grid">
+    <div ref="introSectionRef" class="intro-card">
+      <div class="card-title">企业介绍</div>
+      <el-input
+        v-model="form.companyIntro"
+        type="textarea"
+        :rows="6"
+        maxlength="2000"
+        show-word-limit
+        placeholder="请填写企业简介、主营业务、服务优势等信息，便于合作方了解该客户"
+      />
+    </div>
+
+    <div ref="investmentSectionRef" class="form-card">
+      <div class="card-title">招商信息</div>
+      <el-form :model="form" label-width="140px" class="company-form">
+        <el-row :gutter="16">
+          <el-col :span="12">
             <el-form-item label="平台用户">
               <el-select v-model="form.platformUser" style="width: 100%;">
                 <el-option label="是" value="是" />
                 <el-option label="否" value="否" />
               </el-select>
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="结算期限(天)">
               <el-input-number v-model="form.settlementPeriod" :min="0" style="width: 100%;" />
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="平台备案">
               <el-select v-model="form.recordStatus" style="width: 100%;">
                 <el-option label="是" value="是" />
                 <el-option label="否" value="否" />
               </el-select>
             </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="备案日期">
               <el-date-picker
                 v-model="form.recordDate"
@@ -401,67 +532,41 @@ const handleBack = () => {
                 :disabled="form.recordStatus !== '是'"
               />
             </el-form-item>
-            <el-form-item label="备注2" class="span-full">
-              <el-input v-model="form.remark2" type="textarea" :rows="1" placeholder="备注2" />
+          </el-col>
+          <el-col :span="24">
+            <el-form-item label="备注2">
+              <el-input v-model="form.remark2" type="textarea" :rows="2" placeholder="备注2" />
             </el-form-item>
-            <el-form-item label="备注3" class="span-full">
-              <el-input v-model="form.remark3" type="textarea" :rows="1" placeholder="备注3" />
+          </el-col>
+          <el-col :span="24">
+            <el-form-item label="备注3">
+              <el-input v-model="form.remark3" type="textarea" :rows="2" placeholder="备注3" />
             </el-form-item>
-            <el-form-item label="备注4" class="span-full">
-              <el-input v-model="form.remark4" type="textarea" :rows="1" placeholder="备注4" />
+          </el-col>
+          <el-col :span="24">
+            <el-form-item label="备注4">
+              <el-input v-model="form.remark4" type="textarea" :rows="2" placeholder="备注4" />
             </el-form-item>
-            <el-form-item label="备注5" class="span-full">
-              <el-input v-model="form.remark5" type="textarea" :rows="1" placeholder="备注5" />
+          </el-col>
+          <el-col :span="24">
+            <el-form-item label="备注5">
+              <el-input v-model="form.remark5" type="textarea" :rows="2" placeholder="备注5" />
             </el-form-item>
-          </div>
-        </template>
+          </el-col>
+        </el-row>
+      </el-form>
+    </div>
 
-        <template #license>
-          <PartnerLicenseSections :documents="documents" :company-type="form.type" />
-        </template>
-      </PartnerProfileFormShell>
+    <div ref="licenseSectionRef" class="form-card">
+      <div class="card-title">企业证照</div>
+      <PartnerLicenseSections
+        v-model:company-type="form.type"
+        :documents="documents"
+      />
     </div>
   </div>
 </template>
 
 <style lang="scss" scoped>
-.page-container {
-  padding: 12px 16px;
-  background-color: #f5f7fa;
-  min-height: calc(100vh - 60px);
-}
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-
-  .header-left,
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-
-  h1 {
-    font-size: 20px;
-    font-weight: 600;
-    margin: 0;
-  }
-}
-
-.form-card {
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  padding: 12px 16px;
-  overflow: hidden;
-}
-
-:deep(.el-button--primary) {
-  background-color: #00bfa5 !important;
-  border-color: #00bfa5 !important;
-  color: #fff !important;
-}
+@use '@/styles/company-profile-page.scss';
 </style>

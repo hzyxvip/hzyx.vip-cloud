@@ -5,7 +5,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance } from 'element-plus'
 import { useTableStyle } from '@/composables/useTableStyle'
 import {
+  loadProductList,
   getPurchaseableProducts,
+  findProductInList,
   findProductsByCompositeQuery,
   findProductByCompositeQuery,
   applyProductToOrderItem,
@@ -14,6 +16,8 @@ import {
   getProductLastPrice,
   getProductStockQty,
   getProductAuxUnit,
+  getProductDisplayName,
+  isProductAvailableForPurchase,
   checkPurchaseOrderProductsAudited,
   formatUnapprovedProductsMessage,
   type ProductMaster
@@ -36,6 +40,27 @@ import {
   isValidOrderLine,
   type PurchaseOrderLine
 } from '@/utils/purchaseOrderAmount'
+import {
+  loadSupplierSelectOptions,
+  type SupplierSelectOption
+} from '@/utils/supplierStore'
+import {
+  arrowKeyToDirection,
+  findFieldKeyFromElement,
+  focusCellControl,
+  focusFieldByKey,
+  handleFormGridSelectKeyboard,
+  handleItemSelectEnter,
+  handleItemSelectKeyboard,
+  isDatePickerPanelOpen,
+  isItemDatePickerTarget,
+  isItemSelectTarget,
+  isSelectDropdownOpen,
+  navigateSequentialFields,
+  scheduleAfterDatePickerClose,
+  scheduleAfterSelectClose,
+  shouldNavigateOnArrow as shouldNavigateOnArrowBase
+} from '@/utils/erpFormKeyboard'
 
 const router = useRouter()
 const route = useRoute()
@@ -196,6 +221,52 @@ const warehouseOptions = [
   { label: '深圳仓库', value: 'shenzhen' }
 ]
 
+const COMPANY_WAREHOUSE_LABEL = '公司库'
+
+const resolveWarehouseLabel = (warehouseVal?: string) => {
+  const raw = String(warehouseVal || '').trim()
+  if (!raw) return ''
+  if (raw === COMPANY_WAREHOUSE_LABEL) return COMPANY_WAREHOUSE_LABEL
+  const byValue = warehouseOptions.find(opt => opt.value === raw)
+  if (byValue) return byValue.label
+  const byLabel = warehouseOptions.find(opt => opt.label === raw)
+  if (byLabel) return byLabel.label
+  return raw
+}
+
+const getDefaultItemWarehouse = () => resolveWarehouseLabel(form.warehouse) || COMPANY_WAREHOUSE_LABEL
+
+const syncedHeaderWarehouseLabel = ref('')
+
+const shouldSyncItemWarehouse = (current: string, previousHeaderLabel: string) => {
+  const trimmed = current.trim()
+  if (!trimmed) return true
+  if (trimmed === COMPANY_WAREHOUSE_LABEL) return true
+  if (previousHeaderLabel && trimmed === previousHeaderLabel) return true
+  return false
+}
+
+const syncItemsWarehouseFromHeader = (previousHeaderLabel = '') => {
+  const nextLabel = getDefaultItemWarehouse()
+  form.items.forEach(row => {
+    const current = String(row.warehouse || '')
+    if (shouldSyncItemWarehouse(current, previousHeaderLabel)) {
+      row.warehouse = nextLabel
+    }
+  })
+  syncedHeaderWarehouseLabel.value = nextLabel
+}
+
+const handleHeaderWarehouseChange = () => {
+  syncItemsWarehouseFromHeader(syncedHeaderWarehouseLabel.value)
+}
+
+const ensureItemWarehouseDefault = (item: Record<string, any>) => {
+  if (shouldSyncItemWarehouse(String(item.warehouse || ''), syncedHeaderWarehouseLabel.value)) {
+    item.warehouse = getDefaultItemWarehouse()
+  }
+}
+
 // 从 localStorage 加载已保存的表头配置
 initHeaderFieldConfig()
 
@@ -341,7 +412,7 @@ const createEmptyItemRow = (): Record<string, any> => ({
   batchNo: '',
   productionDate: '',
   expiryDate: '',
-  warehouse: form.warehouse || '公司库',
+  warehouse: getDefaultItemWarehouse(),
   taxRate: 13,
   taxIncludedUnitPrice: 0,
   taxAmount: 0,
@@ -385,18 +456,29 @@ const orderAmounts = computed(() =>
 
 const validItems = computed(() => form.items.filter(isValidOrderLine))
 
-// 供应商原始数据
-const allSuppliers = [
-  { label: '北京医疗器械有限公司', value: '北京医疗器械有限公司', code: 'BJ001', address: '北京市朝阳区医疗器械产业园A栋' },
-  { label: '上海医疗科技有限公司', value: '上海医疗科技有限公司', code: 'SH001', address: '上海市浦东新区医疗科技园B座' },
-  { label: '广州医疗器械厂', value: '广州医疗器械厂', code: 'GZ001', address: '广州市天河区医疗器械工业园' },
-  { label: '深圳医疗设备公司', value: '深圳医疗设备公司', code: 'SZ001', address: '深圳市南山区科技园C栋' },
-  { label: '杭州医疗器械有限公司', value: '杭州医疗器械有限公司', code: 'HZ001', address: '杭州市西湖区医疗器械产业园' },
-  { label: '成都医疗器械集团', value: '成都医疗器械集团', code: 'CD001', address: '成都市高新区医疗器械产业园D座' }
-]
+// 供应商选项（来自供应商资料）
+const allSuppliers = ref<SupplierSelectOption[]>([])
+const supplierOptions = ref<SupplierSelectOption[]>([])
 
-// 供应商选项（筛选后的结果）
-const supplierOptions = ref([...allSuppliers])
+const refreshSupplierList = () => {
+  allSuppliers.value = loadSupplierSelectOptions()
+  supplierOptions.value = [...allSuppliers.value]
+}
+
+/** 编辑旧单时，若供应商已从资料中删除，仍保留在下拉中以便回显 */
+const ensureCurrentSupplierOption = () => {
+  const name = String(form.supplier || '').trim()
+  if (!name || allSuppliers.value.some(item => item.value === name)) return
+  const fallback: SupplierSelectOption = {
+    label: name,
+    value: name,
+    code: String(form.supplierCode || ''),
+    address: String(form.supplierAddress || ''),
+    id: name
+  }
+  allSuppliers.value = [fallback, ...allSuppliers.value]
+  supplierOptions.value = [...allSuppliers.value]
+}
 
 // 商品资料（来自商品资料列表 localStorage productList）
 const productList = ref<ProductMaster[]>([])
@@ -407,13 +489,15 @@ const refreshProductList = () => {
 
 // 供应商远程搜索
 const filterSuppliers = (query: string) => {
-  if (query) {
-    supplierOptions.value = allSuppliers.filter(item => 
-      item.label.toLowerCase().includes(query.toLowerCase()) ||
-      item.code.toLowerCase().includes(query.toLowerCase())
+  const q = query.trim().toLowerCase()
+  if (q) {
+    supplierOptions.value = allSuppliers.value.filter(item =>
+      item.label.toLowerCase().includes(q) ||
+      item.code.toLowerCase().includes(q) ||
+      item.id.toLowerCase().includes(q)
     )
   } else {
-    supplierOptions.value = [...allSuppliers]
+    supplierOptions.value = [...allSuppliers.value]
   }
 }
 
@@ -670,6 +754,9 @@ const normalizeItemRow = (row: Record<string, any>, priceIncludesTax = form.unit
   if (merged.productLocked === undefined) {
     merged.productLocked = Boolean(merged.productCode && merged.productName)
   }
+  if (merged.warehouse) {
+    merged.warehouse = resolveWarehouseLabel(merged.warehouse)
+  }
   calcLineAmounts(merged, priceIncludesTax)
   return merged
 }
@@ -899,11 +986,13 @@ const itemSummaryMethod = ({ columns, data }: { columns: any[]; data: any[] }) =
 onMounted(() => {
   nextTick(() => clampItemDateColumnWidths())
   refreshProductList()
+  refreshSupplierList()
   const id = route.params.id
   if (id) {
     isEdit.value = true
     orderId.value = id as string
     loadOrderData(id as string)
+    ensureCurrentSupplierOption()
   } else {
     const date = new Date()
     const dateStr = formatLocalDateCompact(date)
@@ -982,6 +1071,7 @@ const loadOrderData = (id: string) => {
     if (!form.items.length) {
       form.items.push(createEmptyItemRow())
     }
+    syncedHeaderWarehouseLabel.value = getDefaultItemWarehouse()
   }
 }
 
@@ -1049,13 +1139,14 @@ const upsertOrderToStorage = () => {
 
 // 选择供应商时自动填充
 const handleSupplierChange = (val: string) => {
-  const supplier = allSuppliers.find(s => s.value === val)
+  const supplier = allSuppliers.value.find(s => s.value === val)
   if (supplier) {
     form.supplierCode = supplier.code
     form.supplierAddress = supplier.address
   }
 }
 
+// 表头仓库变更时，同步到仍使用默认仓库的明细行（已手工修改的行保留）
 // 添加商品
 const addItem = () => {
   form.items.push(createEmptyItemRow())
@@ -1090,24 +1181,23 @@ const showBatchAdd = ref(false)
 const batchSearchQuery = ref('')
 const batchSelectedProducts = ref<any[]>([])
 
-// 批量添加商品列表（来自商品资料）
-const batchProductList = ref<any[]>([])
+// 批量添加商品列表（与商品资料列表同源，每次读取最新 localStorage）
+const batchProductList = computed(() => loadProductList().map(toBatchProductRow))
 
 // 批量搜索过滤
 const filteredBatchProducts = computed(() => {
-  if (!batchSearchQuery.value) return batchProductList.value
+  const list = batchProductList.value
+  if (!batchSearchQuery.value) return list
   const query = batchSearchQuery.value.toLowerCase()
-  return batchProductList.value.filter(p =>
+  return list.filter(p =>
     (p.code || '').toLowerCase().includes(query) ||
-    (p.name || '').toLowerCase().includes(query) ||
+    (getProductDisplayName(p) || '').toLowerCase().includes(query) ||
     (p.spec || '').toLowerCase().includes(query)
   )
 })
 
 // 打开批量添加弹窗
 const openBatchAdd = () => {
-  refreshProductList()
-  batchProductList.value = productList.value.map(toBatchProductRow)
   batchSearchQuery.value = ''
   batchSelectedProducts.value = []
   showBatchAdd.value = true
@@ -1120,9 +1210,19 @@ const confirmBatchAdd = () => {
     ElMessage.warning('请选择至少一个商品')
     return
   }
+
+  const unavailable = selected.filter(p => !isProductAvailableForPurchase(p))
+  if (unavailable.length > 0) {
+    ElMessage.warning(
+      `以下商品未审核或已停用，无法添加：${unavailable.map(p => `${p.code} ${getProductDisplayName(p)}`).join('；')}`
+    )
+    return
+  }
+
   selected.forEach(p => {
+    const master = findProductInList(p.code) || p
     const newRow = createEmptyItemRow()
-    applyProductToOrderItem(newRow, p, form.warehouse)
+    applyProductToOrderItem(newRow, master, getDefaultItemWarehouse())
     newRow.productLocked = true
     calcRowAmount(newRow)
     form.items.push(newRow)
@@ -1145,15 +1245,14 @@ const filteredStockList = computed(() => {
   const query = stockSearchQuery.value.toLowerCase()
   return stockList.value.filter(s =>
     (s.code || '').toLowerCase().includes(query) ||
-    (s.name || '').toLowerCase().includes(query) ||
+    (getProductDisplayName(s) || '').toLowerCase().includes(query) ||
     (s.spec || '').toLowerCase().includes(query)
   )
 })
 
 // 打开库存明细弹窗
 const openStockSelect = () => {
-  refreshProductList()
-  stockList.value = productList.value.map(toStockProductRow)
+  stockList.value = getPurchaseableProducts().map(toStockProductRow)
   stockSearchQuery.value = ''
   stockSelectedItems.value = []
   showStockSelect.value = true
@@ -1167,8 +1266,9 @@ const confirmStockAdd = () => {
     return
   }
   selected.forEach(s => {
+    const master = findProductInList(s.code) || s
     const newRow = createEmptyItemRow()
-    applyProductToOrderItem(newRow, s, form.warehouse)
+    applyProductToOrderItem(newRow, master, getDefaultItemWarehouse())
     newRow.productLocked = true
     newRow.warehouse = s.warehouse
     newRow.location = s.location
@@ -1280,26 +1380,32 @@ const handleProductSuggestKeyboard = (e: KeyboardEvent): boolean => {
   return false
 }
 
-const toProductSuggestion = (product: ProductMaster): ProductSuggestion => ({
-  value: product.code,
-  label: `${product.code} | ${product.name} | ${product.spec || '-'} | ${product.manufacturer || '-'}`,
-  product,
-  lastPrice: getProductLastPrice(product),
-  stockQty: getProductStockQty(product),
-  auxUnit: getProductAuxUnit(product)
-})
+const resolveProductMaster = (product: ProductMaster): ProductMaster =>
+  findProductInList(product.code) || product
+
+const toProductSuggestion = (product: ProductMaster): ProductSuggestion => {
+  const master = resolveProductMaster(product)
+  const name = getProductDisplayName(master)
+  return {
+    value: master.code,
+    label: `${master.code} | ${name} | ${master.spec || '-'} | ${master.manufacturer || '-'}`,
+    product: master,
+    lastPrice: getProductLastPrice(master),
+    stockQty: getProductStockQty(master),
+    auxUnit: getProductAuxUnit(master)
+  }
+}
 
 const fetchProductSuggestions = (
   row: Record<string, any>,
   cb: (results: ProductSuggestion[]) => void
 ) => {
-  refreshProductList()
   const searchText = buildItemProductSearchQuery(row)
   if (!searchText.trim()) {
     cb([])
     return
   }
-  const matches = findProductsByCompositeQuery(searchText, productList.value)
+  const matches = findProductsByCompositeQuery(searchText, loadProductList())
     .slice(0, PRODUCT_SUGGEST_LIMIT)
     .map(toProductSuggestion)
   cb(matches)
@@ -1368,23 +1474,9 @@ const focusAfterProductLocked = (rowIndex: number) => {
 
 const findItemRowIndex = (row: Record<string, any>) => form.items.indexOf(row)
 
-const isItemSelectTarget = (target: EventTarget | null) =>
-  !!(target as HTMLElement)?.closest('.items-detail-table .el-select')
+const isItemSelectTargetLocal = (target: EventTarget | null) => isItemSelectTarget(target)
 
-const isItemDatePickerTarget = (target: EventTarget | null) =>
-  !!(target as HTMLElement)?.closest('.items-detail-table .cell-date-wrap')
-
-const handleItemSelectKeyboard = (e: KeyboardEvent): boolean => {
-  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return false
-  const selectEl = (e.target as HTMLElement)?.closest('.items-detail-table .el-select') as HTMLElement | null
-  if (!selectEl) return false
-  if (isSelectDropdownOpen()) return false
-  const wrapper = selectEl.querySelector('.el-select__wrapper') as HTMLElement | null
-  wrapper?.click()
-  e.preventDefault()
-  e.stopPropagation()
-  return true
-}
+const isItemDatePickerTargetLocal = (target: EventTarget | null) => isItemDatePickerTarget(target)
 
 const isProductAutocompleteTarget = (target: EventTarget | null) =>
   !!(target as HTMLElement)?.closest('.items-detail-table .el-autocomplete')
@@ -1396,18 +1488,19 @@ const isProductSuggestOpen = () => {
   return style.display !== 'none' && style.visibility !== 'hidden'
 }
 
+const shouldNavigateOnArrow = (e: KeyboardEvent) =>
+  shouldNavigateOnArrowBase(e, {
+    isProductAutocompleteTarget,
+    productSuggestOpen: isProductSuggestOpen,
+    isItemDatePickerTarget: isItemDatePickerTargetLocal
+  })
+
+const handleItemSelectEnterKeydown = (e: KeyboardEvent, rowIndex: number, colKey: string) => {
+  handleItemSelectEnter(e, () => focusNextItemCell(rowIndex, colKey))
+}
+
 const handleItemWarehouseEnter = (e: KeyboardEvent, rowIndex: number) => {
-  if (e.key !== 'Enter') return
-  const advance = () => {
-    e.preventDefault()
-    e.stopPropagation()
-    focusNextItemCell(rowIndex, 'warehouse')
-  }
-  if (isSelectDropdownOpen()) {
-    scheduleAfterSelectClose(advance)
-    return
-  }
-  advance()
+  handleItemSelectEnterKeydown(e, rowIndex, 'warehouse')
 }
 
 const handleItemDateKeydown = (e: KeyboardEvent, row: Record<string, any>, colKey: string) => {
@@ -1479,8 +1572,16 @@ const handleProductSuggestionSelect = (
   row: Record<string, any>,
   suggestion: ProductSuggestion
 ) => {
+  const master = resolveProductMaster(suggestion.product)
+  if (!isProductAvailableForPurchase(master)) {
+    ElMessage.warning(
+      `商品 ${master.code} ${getProductDisplayName(master)} 尚未审核或已停用，无法采购`
+    )
+    return
+  }
   row._skipProductBlurSearch = true
-  applyProductToOrderItem(row, suggestion.product, form.warehouse)
+  applyProductToOrderItem(row, master, getDefaultItemWarehouse())
+  ensureItemWarehouseDefault(row)
   row.productLocked = true
   calcRowAmount(row)
   const ctx = findSuggestContextFromTarget(document.activeElement as HTMLElement)
@@ -1500,18 +1601,38 @@ const handleItemProductSearch = (
   const searchText = buildItemProductSearchQuery(item)
   if (!searchText) return 'noop'
 
-  refreshProductList()
-  const matches = findProductsByCompositeQuery(searchText, productList.value)
+  const masterList = loadProductList()
+  const matches = findProductsByCompositeQuery(searchText, masterList)
   if (matches.length === 1) {
-    applyProductToOrderItem(item, matches[0], form.warehouse)
+    const master = resolveProductMaster(matches[0])
+    if (!isProductAvailableForPurchase(master)) {
+      if (!options.silent) {
+        ElMessage.warning(
+          `商品 ${master.code} ${getProductDisplayName(master)} 尚未审核或已停用，无法采购`
+        )
+      }
+      return 'not_found'
+    }
+    applyProductToOrderItem(item, master, getDefaultItemWarehouse())
+    ensureItemWarehouseDefault(item)
     item.productLocked = true
     calcRowAmount(item)
     return 'locked'
   }
   if (matches.length > 1) {
-    const product = findProductByCompositeQuery(searchText, productList.value)
+    const product = findProductByCompositeQuery(searchText, masterList)
     if (product) {
-      applyProductToOrderItem(item, product, form.warehouse)
+      const master = resolveProductMaster(product)
+      if (!isProductAvailableForPurchase(master)) {
+        if (!options.silent) {
+          ElMessage.warning(
+            `商品 ${master.code} ${getProductDisplayName(master)} 尚未审核或已停用，无法采购`
+          )
+        }
+        return 'not_found'
+      }
+      applyProductToOrderItem(item, master, getDefaultItemWarehouse())
+      ensureItemWarehouseDefault(item)
       item.productLocked = true
       calcRowAmount(item)
       return 'locked'
@@ -1752,6 +1873,7 @@ const handleSaveAndNew = () => {
   form.orderNo = `CGDD-${formatLocalDateCompact(newDate)}-${Math.floor(Math.random() * 900 + 100)}`
   form.date = formatLocalDate(newDate)
   form.creator = '系统管理员'
+  syncedHeaderWarehouseLabel.value = ''
   form.items.push(createEmptyItemRow())
   isEdit.value = false
 }
@@ -1907,29 +2029,6 @@ const handleKeyDown = (e: KeyboardEvent) => {
 }
 
 // 跳到下一个基本信息字段
-const focusFieldByKey = (key: string) => {
-  nextTick(() => {
-    const container = document.querySelector(`.basic-info-grid [data-field-key="${key}"]`)
-    if (!container) return
-    const dateInput = container.querySelector('.el-date-editor input:not([disabled])') as HTMLInputElement | null
-    if (dateInput) {
-      dateInput.focus()
-      dateInput.select?.()
-      return
-    }
-    const input = container.querySelector('input:not([disabled]), textarea:not([disabled])') as HTMLInputElement | null
-    if (input) {
-      input.focus()
-      input.select?.()
-      return
-    }
-    const selectWrapper = container.querySelector('.el-select__wrapper') as HTMLElement | null
-    selectWrapper?.click()
-    const selectInput = container.querySelector('.el-select__wrapper input') as HTMLInputElement | null
-    selectInput?.focus()
-  })
-}
-
 const focusNextHeaderField = (currentKey: string) => {
   const fields = getFocusableHeaderFields()
   const currentIndex = fields.findIndex(f => f.key === currentKey)
@@ -1952,136 +2051,25 @@ const focusPrevHeaderField = (currentKey: string) => {
 const getFocusableHeaderFields = () =>
   sortedVisibleFields.value.filter(f => !f.disabled && f.type !== 'switch')
 
-const getElementCenter = (el: HTMLElement) => {
-  const rect = el.getBoundingClientRect()
-  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+const handleFormGridSelectOnlyKeydown = (e: KeyboardEvent) => {
+  handleFormGridSelectKeyboard(e)
 }
 
-const findFieldKeyFromElement = (el: HTMLElement | null): string | null => {
-  const container = el?.closest('[data-field-key]') as HTMLElement | null
-  return container?.dataset.fieldKey || null
-}
+const handleBasicInfoArrowKeydown = (e: KeyboardEvent) => {
+  if (handleFormGridSelectKeyboard(e)) return
 
-const isSelectDropdownOpen = () => {
-  const poppers = document.querySelectorAll('.el-select-dropdown')
-  for (const popper of poppers) {
-    const style = window.getComputedStyle(popper)
-    if (style.display === 'none' || style.visibility === 'hidden') continue
-    if (popper.getAttribute('aria-hidden') === 'true') continue
-    const rect = popper.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) continue
-    return true
-  }
-  return false
-}
+  const direction = arrowKeyToDirection(e.key)
+  if (!direction) return
+  if (!shouldNavigateOnArrow(e)) return
 
-/** 下拉关闭后再执行（选完选项按 Enter 时） */
-const scheduleAfterSelectClose = (callback: () => void) => {
-  let attempts = 0
-  const tick = () => {
-    if (!isSelectDropdownOpen() || attempts >= 12) {
-      callback()
-      return
-    }
-    attempts += 1
-    setTimeout(tick, 30)
-  }
-  setTimeout(tick, 0)
-}
+  const fieldKey = findFieldKeyFromElement(e.target as HTMLElement)
+  if (!fieldKey) return
 
-/** 日期面板关闭后再执行 */
-const scheduleAfterDatePickerClose = (callback: () => void) => {
-  let attempts = 0
-  const tick = () => {
-    if (!isDatePickerPanelOpen() || attempts >= 12) {
-      callback()
-      return
-    }
-    attempts += 1
-    setTimeout(tick, 30)
-  }
-  setTimeout(tick, 0)
-}
-
-const shouldNavigateOnArrow = (e: KeyboardEvent) => {
-  const target = e.target as HTMLElement
-  if (target.closest('.el-date-picker-panel, .el-picker-panel')) return false
-  if (isProductSuggestOpen() || isSelectDropdownOpen()) return false
-  // 日期面板打开时交给日历组件；明细日期列在面板关闭后可方向键跳转
-  if (isDatePickerPanelOpen()) return false
-  if (isItemDatePickerTarget(e.target)) {
-    return e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'ArrowLeft' || e.key === 'ArrowRight'
-  }
-  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && isProductAutocompleteTarget(e.target)) return false
-  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && isItemSelectTarget(e.target)) return false
-  const inputEl = target as HTMLInputElement | HTMLTextAreaElement
-  if (inputEl.tagName === 'TEXTAREA') return true
-  if (inputEl.tagName !== 'INPUT') return true
-  if (inputEl.type === 'number' || inputEl.closest('.el-input-number')) return true
-  const len = inputEl.value?.length ?? 0
-  const start = inputEl.selectionStart ?? 0
-  const end = inputEl.selectionEnd ?? 0
-  if (e.key === 'ArrowLeft' && start === 0 && end === 0) return true
-  if (e.key === 'ArrowRight' && start === len && end === len) return true
-  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') return true
-  return false
-}
-
-const arrowKeyToDirection = (key: string): 'up' | 'down' | 'left' | 'right' | null => {
-  if (key === 'ArrowUp') return 'up'
-  if (key === 'ArrowDown') return 'down'
-  if (key === 'ArrowLeft') return 'left'
-  if (key === 'ArrowRight') return 'right'
-  return null
-}
-
-const navigateBasicInfoField = (currentKey: string, direction: 'up' | 'down' | 'left' | 'right') => {
-  const fields = getFocusableHeaderFields()
-  const currentIndex = fields.findIndex(f => f.key === currentKey)
-  if (currentIndex === -1) return
-
-  if (direction === 'left') {
-    focusPrevHeaderField(currentKey)
-    return
-  }
-  if (direction === 'right') {
-    focusNextHeaderField(currentKey)
-    return
-  }
-
-  const elements = fields
-    .map(f => document.querySelector(`.basic-info-grid [data-field-key="${f.key}"]`) as HTMLElement | null)
-    .filter(Boolean) as HTMLElement[]
-  const currentEl = elements[currentIndex]
-  if (!currentEl) return
-
-  const currentCenter = getElementCenter(currentEl)
-  let bestIndex = -1
-  let bestScore = Infinity
-
-  elements.forEach((el, i) => {
-    if (i === currentIndex) return
-    const center = getElementCenter(el)
-    const dy = center.y - currentCenter.y
-    const dx = center.x - currentCenter.x
-    if (direction === 'down' && dy < 8) return
-    if (direction === 'up' && dy > -8) return
-    const score = direction === 'down' || direction === 'up'
-      ? Math.abs(dy) * 1000 + Math.abs(dx)
-      : Math.abs(dx) * 1000 + Math.abs(dy)
-    if (score < bestScore) {
-      bestScore = score
-      bestIndex = i
-    }
+  e.preventDefault()
+  e.stopPropagation()
+  navigateSequentialFields(fieldKey, direction, getFocusableHeaderFields(), {
+    onAfterLastDown: jumpToItems
   })
-
-  if (bestIndex >= 0) {
-    focusFieldByKey(fields[bestIndex].key)
-    return
-  }
-  if (direction === 'down') {
-    jumpToItems()
-  }
 }
 
 const itemTableColumnKeys = computed(() => [
@@ -2121,30 +2109,7 @@ const focusItemCell = (rowIndex: number, colKey: string) => {
     const colIndex = itemTableColumnKeys.value.indexOf(colKey)
     if (colIndex < 0) return
     const cell = row.querySelectorAll('td.el-table__cell')[colIndex] as HTMLElement | undefined
-    if (!cell) return
-
-    const focusable = cell.querySelector(
-      'input:not([disabled]), textarea:not([disabled]), .el-select__wrapper'
-    ) as HTMLElement | null
-
-    const dateInput = cell.querySelector('.el-date-editor input:not([disabled])') as HTMLInputElement | null
-    if (dateInput) {
-      dateInput.focus()
-      dateInput.select?.()
-      return
-    }
-
-    if (focusable?.classList.contains('el-select__wrapper')) {
-      focusable.click()
-      const input = focusable.querySelector('input') as HTMLInputElement | null
-      input?.focus()
-      input?.select?.()
-      return
-    }
-    if (focusable instanceof HTMLInputElement || focusable instanceof HTMLTextAreaElement) {
-      focusable.focus()
-      focusable.select?.()
-    }
+    focusCellControl(cell)
   })
 }
 
@@ -2189,19 +2154,6 @@ const navigateItemsTable = (direction: 'up' | 'down' | 'left' | 'right') => {
   navigateItemsTableFrom(pos.row, pos.colKey, direction)
 }
 
-const handleBasicInfoArrowKeydown = (e: KeyboardEvent) => {
-  const direction = arrowKeyToDirection(e.key)
-  if (!direction) return
-  if (!shouldNavigateOnArrow(e)) return
-
-  const fieldKey = findFieldKeyFromElement(e.target as HTMLElement)
-  if (!fieldKey) return
-
-  e.preventDefault()
-  e.stopPropagation()
-  navigateBasicInfoField(fieldKey, direction)
-}
-
 const handleItemsTableKeydown = (e: KeyboardEvent) => {
   if (isProductAutocompleteTarget(e.target) && handleProductSuggestKeyboard(e)) {
     e.preventDefault()
@@ -2212,7 +2164,7 @@ const handleItemsTableKeydown = (e: KeyboardEvent) => {
   if (handleItemSelectKeyboard(e)) return
 
   // 明细日期列由 handleItemDateKeydown 单独处理（避免与日历面板冲突）
-  if (isItemDatePickerTarget(e.target)) return
+  if (isItemDatePickerTargetLocal(e.target)) return
 
   if (e.key === 'Enter') {
     if (isProductSuggestOpen()) return
@@ -2240,7 +2192,7 @@ const handleItemsTableKeydown = (e: KeyboardEvent) => {
       focusNextItemCell(pos.row, pos.colKey)
     }
 
-    if (isDatePickerPanelOpen() && isItemDatePickerTarget(e.target)) {
+    if (isDatePickerPanelOpen() && isItemDatePickerTargetLocal(e.target)) {
       scheduleAfterDatePickerClose(advanceItemCell)
       return
     }
@@ -2284,26 +2236,6 @@ const handleSelectFieldEnter = (field: HeaderFieldOption, e: KeyboardEvent) => {
   focusNextHeaderField(field.key)
 }
 
-const isDatePickerPanelOpen = () => {
-  const panels = document.querySelectorAll('.el-picker__popper')
-  for (const panel of panels) {
-    const style = window.getComputedStyle(panel)
-    if (style.display === 'none' || style.visibility === 'hidden') continue
-    if (panel.getAttribute('aria-hidden') === 'true') continue
-    const rect = panel.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) continue
-    const datePanel = panel.querySelector('.el-date-picker-panel, .el-picker-panel') as HTMLElement | null
-    if (datePanel) {
-      const panelStyle = window.getComputedStyle(datePanel)
-      if (panelStyle.display === 'none' || panelStyle.visibility === 'hidden') continue
-      const panelRect = datePanel.getBoundingClientRect()
-      if (panelRect.width <= 0 || panelRect.height <= 0) continue
-    }
-    return true
-  }
-  return false
-}
-
 const handleDateFieldEnter = (field: HeaderFieldOption, e: KeyboardEvent) => {
   if (e.key !== 'Enter') return
   const target = e.target as HTMLElement
@@ -2326,7 +2258,7 @@ const handleFieldEnterCapture = (field: HeaderFieldOption, e: KeyboardEvent) => 
     handleDateFieldEnter(field, e)
     return
   }
-  if (field.type === 'select' || field.key === 'supplier') {
+  if (field.type === 'select' || field.key === 'supplier' || field.key === 'warehouse') {
     handleSelectFieldEnter(field, e)
     return
   }
@@ -2489,12 +2421,13 @@ const focusNextInput = (e: KeyboardEvent) => {
                 v-model="form.supplier"
                 filterable
                 remote
+                default-first-option
                 :remote-method="filterSuppliers"
                 @change="handleSupplierChange"
                 size="small"
                 style="width: 100%;"
               >
-                <el-option v-for="opt in supplierOptions" :key="opt.value" :label="opt.label" :value="opt.value">
+                <el-option v-for="opt in supplierOptions" :key="opt.id" :label="opt.label" :value="opt.value">
                   <span>{{ opt.label }}</span>
                   <span class="option-sub">{{ opt.code }}</span>
                 </el-option>
@@ -2509,8 +2442,27 @@ const focusNextInput = (e: KeyboardEvent) => {
               />
 
               <el-select
+                v-else-if="field.key === 'warehouse'"
+                v-model="form.warehouse"
+                default-first-option
+                placeholder="请选择仓库"
+                size="small"
+                style="width: 100%;"
+                clearable
+                @change="handleHeaderWarehouseChange"
+              >
+                <el-option
+                  v-for="opt in warehouseOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+
+              <el-select
                 v-else-if="field.type === 'select'"
                 v-model="form[field.key as keyof typeof form]"
+                default-first-option
                 size="small"
                 style="width: 100%;"
                 clearable
@@ -2653,7 +2605,6 @@ const focusNextInput = (e: KeyboardEvent) => {
                     :ref="(el: any) => setProductAutocompleteRef(row, 'productCode', el)"
                     size="small"
                     class="product-code-autocomplete"
-                    placeholder="编码 名称 规格 厂家"
                     popper-class="product-suggest-popper"
                     :debounce="150"
                     :trigger-on-focus="false"
@@ -2677,7 +2628,7 @@ const focusNextInput = (e: KeyboardEvent) => {
                     <template #default="{ item: suggestion }">
                       <div class="product-suggest-item">
                         <span class="col-code s-code">{{ suggestion.product.code }}</span>
-                        <span class="col-name s-name" :title="suggestion.product.name">{{ suggestion.product.name }}</span>
+                        <span class="col-name s-name" :title="getProductDisplayName(suggestion.product)">{{ getProductDisplayName(suggestion.product) }}</span>
                         <span class="col-spec s-spec" :title="suggestion.product.spec">{{ suggestion.product.spec || '-' }}</span>
                         <span class="col-mfr s-mfr" :title="suggestion.product.manufacturer">{{ suggestion.product.manufacturer || '-' }}</span>
                         <span class="col-price s-last-price is-num">{{ formatMoney(suggestion.lastPrice) }}</span>
@@ -2686,7 +2637,6 @@ const focusNextInput = (e: KeyboardEvent) => {
                       </div>
                     </template>
                   </el-autocomplete>
-                  <el-button link type="primary" size="small" class="select-btn" @click="openBatchAdd">选择</el-button>
                 </div>
                 <el-autocomplete
                   v-else-if="col.key === 'productName'"
@@ -2717,7 +2667,7 @@ const focusNextInput = (e: KeyboardEvent) => {
                   <template #default="{ item: suggestion }">
                     <div class="product-suggest-item">
                       <span class="col-code s-code">{{ suggestion.product.code }}</span>
-                      <span class="col-name s-name" :title="suggestion.product.name">{{ suggestion.product.name }}</span>
+                      <span class="col-name s-name" :title="getProductDisplayName(suggestion.product)">{{ getProductDisplayName(suggestion.product) }}</span>
                       <span class="col-spec s-spec" :title="suggestion.product.spec">{{ suggestion.product.spec || '-' }}</span>
                       <span class="col-mfr s-mfr" :title="suggestion.product.manufacturer">{{ suggestion.product.manufacturer || '-' }}</span>
                       <span class="col-price s-last-price is-num">{{ formatMoney(suggestion.lastPrice) }}</span>
@@ -2755,7 +2705,7 @@ const focusNextInput = (e: KeyboardEvent) => {
                   <template #default="{ item: suggestion }">
                     <div class="product-suggest-item">
                       <span class="col-code s-code">{{ suggestion.product.code }}</span>
-                      <span class="col-name s-name" :title="suggestion.product.name">{{ suggestion.product.name }}</span>
+                      <span class="col-name s-name" :title="getProductDisplayName(suggestion.product)">{{ getProductDisplayName(suggestion.product) }}</span>
                       <span class="col-spec s-spec" :title="suggestion.product.spec">{{ suggestion.product.spec || '-' }}</span>
                       <span class="col-mfr s-mfr" :title="suggestion.product.manufacturer">{{ suggestion.product.manufacturer || '-' }}</span>
                       <span class="col-price s-last-price is-num">{{ formatMoney(suggestion.lastPrice) }}</span>
@@ -2793,7 +2743,7 @@ const focusNextInput = (e: KeyboardEvent) => {
                   <template #default="{ item: suggestion }">
                     <div class="product-suggest-item">
                       <span class="col-code s-code">{{ suggestion.product.code }}</span>
-                      <span class="col-name s-name" :title="suggestion.product.name">{{ suggestion.product.name }}</span>
+                      <span class="col-name s-name" :title="getProductDisplayName(suggestion.product)">{{ getProductDisplayName(suggestion.product) }}</span>
                       <span class="col-spec s-spec" :title="suggestion.product.spec">{{ suggestion.product.spec || '-' }}</span>
                       <span class="col-mfr s-mfr" :title="suggestion.product.manufacturer">{{ suggestion.product.manufacturer || '-' }}</span>
                       <span class="col-price s-last-price is-num">{{ formatMoney(suggestion.lastPrice) }}</span>
@@ -2808,6 +2758,7 @@ const focusNextInput = (e: KeyboardEvent) => {
                 <el-select
                   v-else-if="col.key === 'warehouse'"
                   v-model="row.warehouse"
+                  default-first-option
                   size="small"
                   style="width: 100%;"
                   @keydown.enter.capture="(e: KeyboardEvent) => handleItemWarehouseEnter(e, $index)"
@@ -2898,7 +2849,7 @@ const focusNextInput = (e: KeyboardEvent) => {
         <span class="section-icon" :class="{ collapsed: amountInfoCollapsed }">▼</span>
         <h3>金额信息</h3>
       </div>
-      <div class="section-body amount-section" v-show="!amountInfoCollapsed">
+      <div class="section-body amount-section" v-show="!amountInfoCollapsed" @keydown.capture="handleFormGridSelectOnlyKeydown">
         <div class="form-grid amount-grid">
           <div class="form-field form-field-span">
             <el-checkbox v-model="form.unitPriceIncludesTax" size="small">
@@ -2940,13 +2891,13 @@ const focusNextInput = (e: KeyboardEvent) => {
               付款账户
               <button type="button" class="inline-link">读取账户余额</button>
             </label>
-            <el-select v-model="form.paymentAccount" size="small" placeholder="请选择" style="width: 100%;">
+            <el-select v-model="form.paymentAccount" default-first-option size="small" placeholder="请选择" style="width: 100%;">
               <el-option v-for="opt in paymentAccountOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-select>
           </div>
           <div class="form-field">
             <label>付款方式</label>
-            <el-select v-model="form.paymentMethod" size="small" placeholder="请选择" style="width: 100%;">
+            <el-select v-model="form.paymentMethod" default-first-option size="small" placeholder="请选择" style="width: 100%;">
               <el-option v-for="opt in paymentMethodOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-select>
           </div>
@@ -2977,17 +2928,17 @@ const focusNextInput = (e: KeyboardEvent) => {
         <span class="section-icon" :class="{ collapsed: deliveryCollapsed }">▼</span>
         <h3>交货信息</h3>
       </div>
-      <div class="section-body" v-show="!deliveryCollapsed">
+      <div class="section-body" v-show="!deliveryCollapsed" @keydown.capture="handleFormGridSelectOnlyKeydown">
         <div class="form-grid delivery-grid">
           <div class="form-field">
             <label>交货方式</label>
-            <el-select v-model="form.deliveryMethod" size="small" placeholder="请选择交货方式" style="width: 100%;">
+            <el-select v-model="form.deliveryMethod" default-first-option size="small" placeholder="请选择交货方式" style="width: 100%;">
               <el-option v-for="opt in deliveryMethodOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-select>
           </div>
           <div class="form-field">
             <label>运送方式</label>
-            <el-select v-model="form.shippingMethod" size="small" placeholder="请选择运送方式" style="width: 100%;">
+            <el-select v-model="form.shippingMethod" default-first-option size="small" placeholder="请选择运送方式" style="width: 100%;">
               <el-option v-for="opt in shippingMethodOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-select>
           </div>
@@ -3059,7 +3010,12 @@ const focusNextInput = (e: KeyboardEvent) => {
       <el-table :data="filteredBatchProducts" height="400" @selection-change="(val: any[]) => batchSelectedProducts = val">
         <el-table-column type="selection" width="55" />
         <el-table-column prop="code" label="商品编码" width="100" />
-        <el-table-column prop="name" label="商品名称" min-width="150" />
+        <el-table-column label="商品名称" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ getProductDisplayName(row) }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="auditStatus" label="审核状态" width="90" align="center" />
         <el-table-column prop="spec" label="规格" width="120" />
         <el-table-column prop="manufacturer" label="生产厂家" min-width="150" />
         <el-table-column prop="unitPrice" label="单价" width="100" align="right">
@@ -3086,7 +3042,11 @@ const focusNextInput = (e: KeyboardEvent) => {
       <el-table :data="filteredStockList" height="400" @selection-change="(val: any[]) => stockSelectedItems = val">
         <el-table-column type="selection" width="55" />
         <el-table-column prop="code" label="商品编码" width="100" />
-        <el-table-column prop="name" label="商品名称" min-width="150" />
+        <el-table-column label="商品名称" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ getProductDisplayName(row) }}
+          </template>
+        </el-table-column>
         <el-table-column prop="spec" label="规格" width="120" />
         <el-table-column prop="manufacturer" label="生产厂家" min-width="150" />
         <el-table-column prop="stockQty" label="库存数量" width="100" align="right" />
@@ -3957,21 +3917,25 @@ const focusNextInput = (e: KeyboardEvent) => {
       .product-code-autocomplete {
         flex: 1;
         min-width: 0;
+
+        :deep(.el-input__inner) {
+          color: #1d2939 !important;
+          -webkit-text-fill-color: #1d2939 !important;
+        }
       }
 
       .el-input {
         flex: 1;
       }
-
-      .select-btn {
-        flex-shrink: 0;
-        padding: 0 4px;
-        font-size: 12px;
-      }
     }
 
     .product-field-autocomplete {
       width: 100%;
+
+      :deep(.el-input__inner) {
+        color: #1d2939 !important;
+        -webkit-text-fill-color: #1d2939 !important;
+      }
     }
 
     .cell-number {
@@ -4127,9 +4091,15 @@ const focusNextInput = (e: KeyboardEvent) => {
   .el-autocomplete-suggestion li {
     padding: 0;
     line-height: 1.4;
+    overflow: visible !important;
+    white-space: normal !important;
+    text-overflow: clip !important;
+    color: #1d2939 !important;
 
-    &.highlighted {
+    &.highlighted,
+    &:hover {
       background-color: #e6f4ff !important;
+      color: #1d2939 !important;
     }
   }
 
@@ -4157,8 +4127,13 @@ const focusNextInput = (e: KeyboardEvent) => {
 
     .col-code,
     .s-code {
-      color: #165dff;
+      color: #0e42d2 !important;
       font-weight: 600;
+    }
+
+    .col-name,
+    .s-name {
+      color: #1d2939 !important;
     }
 
     &.is-header .col-code {
