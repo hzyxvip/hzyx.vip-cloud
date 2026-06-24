@@ -6,15 +6,92 @@ import {
   isFullWidthField,
   syncCompanyFieldFormatFromPlatform
 } from '@/utils/companyDataService'
+import { loadPlatformCustomerList } from '@/utils/platformCustomerStore'
 import type { SupplierMaster } from '@/utils/supplierStore'
 import { mapSupplierTypeToPlatformCompanyType } from '@/utils/partnerPlatformSync'
+
+/** 供应商资料区块字段顺序（仅展示以下项） */
+export const SUPPLIER_PROFILE_FIELD_CODES = [
+  'companyCode',
+  'companyName',
+  'shortName',
+  'pinyin',
+  'creditCode',
+  'companyType',
+  'onlineCustomer',
+  'taxNo',
+  'bankName',
+  'bankAccount',
+  'province',
+  'city',
+  'district',
+  'address',
+  'contact',
+  'companyPhone',
+  'email',
+  'fax',
+  'website',
+  'legalPerson',
+  'establishDate',
+  'businessScope',
+  'remark'
+] as const
+
+const createSupplierSyntheticField = (
+  fieldCode: string,
+  fieldName: string,
+  fieldType = 'string',
+  extra: Partial<PlatformFieldDef> = {}
+): PlatformFieldDef => ({
+  id: `sup-${fieldCode}`,
+  module: 'company',
+  fieldName,
+  fieldCode,
+  fieldType,
+  length: extra.length ?? '',
+  isRequired: false,
+  isUnique: false,
+  defaultValue: '',
+  remark: '',
+  status: '正常',
+  ...extra
+})
+
+const SUPPLIER_SYNTHETIC_FIELD_DEFS: Record<string, PlatformFieldDef> = {
+  shortName: createSupplierSyntheticField('shortName', '公司简称', 'string', { length: '100' }),
+  pinyin: createSupplierSyntheticField('pinyin', '拼音缩写', 'string', { length: '50' }),
+  taxNo: createSupplierSyntheticField('taxNo', '纳税人识别号', 'string', { length: '50' }),
+  province: createSupplierSyntheticField('province', '省', 'string', { length: '50' }),
+  city: createSupplierSyntheticField('city', '市', 'string', { length: '50' }),
+  district: createSupplierSyntheticField('district', '区', 'string', { length: '50' }),
+  address: createSupplierSyntheticField('address', '详细地址', 'string', { length: '500' }),
+  contact: createSupplierSyntheticField('contact', '联系人', 'string', { length: '50' }),
+  onlineCustomer: createSupplierSyntheticField('onlineCustomer', '线上客户', 'string', {
+    remark: '系统自带'
+  }),
+  establishDate: createSupplierSyntheticField('establishDate', '成立日期', 'date'),
+  businessScope: createSupplierSyntheticField('businessScope', '经营范围', 'textarea', { length: '2000' }),
+  remark: createSupplierSyntheticField('remark', '备注', 'textarea', { length: '500' })
+}
+
+const SUPPLIER_FIELD_NAME_OVERRIDES: Partial<Record<string, string>> = {
+  companyType: '客户类型',
+  companyPhone: '电话',
+  fax: '固定电话',
+  website: '企业网址',
+  legalPerson: '法人'
+}
 
 /** 平台公司资料字段 → 供应商表单属性（与公司资料设定 COMPANY_FIELD_PROP_MAP 对齐） */
 export const SUPPLIER_FIELD_PROP_MAP: Record<string, string> = {
   companyCode: 'id',
   companyName: 'name',
+  shortName: 'shortName',
+  pinyin: 'pinyin',
   creditCode: 'creditCode',
+  taxNo: 'taxNo',
   companyAddress: 'address',
+  address: 'address',
   companyPhone: 'phone',
   fax: 'fax',
   email: 'email',
@@ -26,7 +103,14 @@ export const SUPPLIER_FIELD_PROP_MAP: Record<string, string> = {
   bankAccount: 'bankAccount',
   companyType: 'type',
   legalPerson: 'legalPerson',
-  status: 'companyStatus'
+  province: 'province',
+  city: 'city',
+  district: 'district',
+  establishDate: 'establishDate',
+  businessScope: 'businessScope',
+  remark: 'remark',
+  status: 'companyStatus',
+  contact: 'contact'
 }
 
 export function getSupplierFormKey(fieldCode: string): string {
@@ -47,9 +131,15 @@ export function createEmptySupplierForm(): Record<string, unknown> {
   return {
     id: '',
     name: empty.name,
+    shortName: '',
+    pinyin: '',
     type: empty.companyType,
     creditCode: empty.taxNo,
+    taxNo: '',
     address: empty.address,
+    province: '',
+    city: '',
+    district: '',
     phone: empty.phone,
     fax: empty.fax,
     email: empty.email,
@@ -60,6 +150,9 @@ export function createEmptySupplierForm(): Record<string, unknown> {
     bankName: empty.bankName,
     bankAccount: empty.bankAccount,
     legalPerson: empty.legalPerson,
+    establishDate: '',
+    businessScope: '',
+    remark: '',
     companyStatus: empty.status,
     companyIntro: empty.companyIntro,
     platformUser: empty.platformUser,
@@ -82,11 +175,18 @@ export function supplierMasterToForm(supplier: SupplierMaster): Record<string, u
   const base = createEmptySupplierForm()
   return {
     ...base,
-    id: supplier.id,
+    id: supplier.code || supplier.id,
+    platformCustomerId: supplier.platformCustomerId,
     name: supplier.name,
+    shortName: supplier.shortName || '',
+    pinyin: supplier.pinyin || '',
     type: mapSupplierTypeToPlatformCompanyType(supplier.type),
-    creditCode: supplier.creditCode || supplier.taxNo || '',
+    creditCode: supplier.creditCode || '',
+    taxNo: supplier.taxNo || supplier.creditCode || '',
     address: supplier.address || '',
+    province: supplier.province || '',
+    city: supplier.city || '',
+    district: supplier.district || '',
     phone: supplier.phone || supplier.mobile || '',
     fax: String(supplier.fax || ''),
     email: supplier.email || '',
@@ -97,6 +197,9 @@ export function supplierMasterToForm(supplier: SupplierMaster): Record<string, u
     bankName: supplier.bankName || '',
     bankAccount: supplier.bankAccount || '',
     legalPerson: supplier.legalPerson || supplier.enterpriseLeader || '',
+    establishDate: supplier.establishDate || '',
+    businessScope: supplier.businessScope || '',
+    remark: supplier.remark || '',
     companyStatus: supplierStatusToCompanyStatus(supplier.status),
     companyIntro: supplier.companyIntro || '',
     platformUser: supplier.platformUser || '否',
@@ -132,7 +235,44 @@ export function validateSupplierByFieldDefs(
 }
 
 export function isSupplierReadOnlyField(fieldCode: string): boolean {
-  return fieldCode === 'companyCode'
+  return fieldCode === 'onlineCustomer' || fieldCode === 'companyCode'
+}
+
+/** 无输入框、纯文本展示（公司编码单独处理为可编辑纯文本） */
+export function isSupplierPlainDisplayField(fieldCode: string): boolean {
+  return fieldCode === 'onlineCustomer'
+}
+
+export function isSupplierRegionField(fieldCode: string): boolean {
+  return fieldCode === 'province' || fieldCode === 'city' || fieldCode === 'district'
+}
+
+/** 供应商资料：仅 textarea 占整行，其余三列排布 */
+export function isSupplierProfileFullWidthField(field: PlatformFieldDef): boolean {
+  return field.fieldType === 'textarea'
+}
+
+export function isSupplierOnlineCustomer(form: Record<string, unknown>): boolean {
+  const platformUser = String(form.platformUser ?? '否').trim()
+  if (platformUser && platformUser !== '否') return true
+  if (String(form.recordStatus ?? '否').trim() === '是') return true
+  const code = String(form.id ?? '').trim()
+  if (!code) return false
+  return loadPlatformCustomerList().some(item => item.companyCode === code)
+}
+
+export function getSupplierProfileFieldDefs(): PlatformFieldDef[] {
+  const catalog = getTenantEditableFieldDefs()
+  const byCode = new Map(catalog.map(field => [field.fieldCode, field]))
+
+  return SUPPLIER_PROFILE_FIELD_CODES.map(code => {
+    const synthetic = SUPPLIER_SYNTHETIC_FIELD_DEFS[code]
+    if (synthetic) return synthetic
+    const field = byCode.get(code)
+    if (!field) return undefined
+    const overrideName = SUPPLIER_FIELD_NAME_OVERRIDES[code]
+    return overrideName ? { ...field, fieldName: overrideName } : field
+  }).filter((field): field is PlatformFieldDef => Boolean(field))
 }
 
 export function getSupplierFieldSelectOptions(field: PlatformFieldDef) {

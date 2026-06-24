@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { setCurrentCompany } from '@/utils/dataStore'
-import { authApi } from '@/utils/api'
-import { LOGIN_DEMO_ACCOUNTS, REMEMBER_USERNAME_KEY } from '@/constants/loginAccounts'
+import { authApi, checkBackendHealth } from '@/utils/api'
+import { LOGIN_DEMO_ACCOUNTS, REMEMBER_USERNAME_KEY, type LoginDemoAccount } from '@/constants/loginAccounts'
 import { getRolePermissions } from '@/constants/rolePermissions'
+import {
+  clearAuthSession,
+  getAuthUser,
+  isLoggedIn,
+  saveAuthSession
+} from '@/utils/authSession'
 
 const router = useRouter()
 
@@ -15,13 +21,71 @@ const loginForm = ref({
   rememberMe: false
 })
 
-onMounted(() => {
+const loggingIn = ref(false)
+const backendOnline = ref<boolean | null>(null)
+const demoAccounts = ref<LoginDemoAccount[]>([...LOGIN_DEMO_ACCOUNTS])
+const loadingDemoAccounts = ref(false)
+
+const loggedInUser = computed(() => getAuthUser<{
+  username?: string
+  realName?: string
+  companyName?: string
+}>())
+
+const showLoggedInHint = computed(() => isLoggedIn() && !!loggedInUser.value)
+
+const handleSwitchAccount = () => {
+  clearAuthSession()
+  loginForm.value.password = ''
+  ElMessage.info('已退出当前标签页登录，请重新输入账号')
+}
+
+const navigateToDashboard = () => {
+  router.push('/dashboard').catch(err => {
+    console.error('路由跳转失败:', err)
+    window.location.href = '/dashboard'
+  })
+}
+
+const handleEnterSystem = () => {
+  if (!isLoggedIn()) {
+    ElMessage.warning('登录已失效，请重新登录')
+    return
+  }
+  navigateToDashboard()
+}
+
+onMounted(async () => {
   const remembered = localStorage.getItem(REMEMBER_USERNAME_KEY)
   if (remembered) {
     loginForm.value.username = remembered
     loginForm.value.rememberMe = true
   }
+
+  backendOnline.value = await checkBackendHealth()
+  await loadDemoAccounts()
+
+  if (isLoggedIn()) {
+    navigateToDashboard()
+  }
 })
+
+const loadDemoAccounts = async () => {
+  if (backendOnline.value === false) {
+    demoAccounts.value = [...LOGIN_DEMO_ACCOUNTS]
+    return
+  }
+
+  loadingDemoAccounts.value = true
+  try {
+    const accounts = await authApi.getLoginAccounts()
+    demoAccounts.value = accounts.length > 0 ? accounts : [...LOGIN_DEMO_ACCOUNTS]
+  } catch {
+    demoAccounts.value = [...LOGIN_DEMO_ACCOUNTS]
+  } finally {
+    loadingDemoAccounts.value = false
+  }
+}
 
 const persistRememberUsername = () => {
   if (loginForm.value.rememberMe) {
@@ -44,35 +108,39 @@ const handleLogin = async () => {
     return
   }
 
+  if (backendOnline.value === false) {
+    backendOnline.value = await checkBackendHealth()
+    if (!backendOnline.value) {
+      ElMessage.error('后端服务未启动，请在项目根目录运行 npm run dev:all')
+      return
+    }
+  }
+
+  loggingIn.value = true
   try {
     const response = await authApi.login({ username, password })
 
     if (response.success) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('user')
-      localStorage.removeItem('userRole')
-      localStorage.removeItem('userPermissions')
-      localStorage.removeItem('currentCompanyId')
+      clearAuthSession()
 
-      localStorage.setItem('token', response.token)
-      localStorage.setItem('userRole', response.user.role)
-      localStorage.setItem('userPermissions', JSON.stringify(getRolePermissions(response.user.role)))
-      localStorage.setItem('user', JSON.stringify(response.user))
+      saveAuthSession({
+        token: response.token,
+        user: response.user,
+        role: response.user.role,
+        permissions: getRolePermissions(response.user.role),
+        companyId: response.user.companyId
+      })
 
       setCurrentCompany(response.user.companyId)
       persistRememberUsername()
 
       ElMessage.success(`欢迎回来，${response.user.realName || response.user.username}（${response.user.companyName}）`)
-
-      setTimeout(() => {
-        router.push('/dashboard').catch(err => {
-          console.error('路由跳转失败:', err)
-          window.location.href = '/dashboard'
-        })
-      }, 500)
+      navigateToDashboard()
     }
   } catch (error: any) {
     ElMessage.error(error.message || '登录失败')
+  } finally {
+    loggingIn.value = false
   }
 }
 
@@ -84,9 +152,9 @@ const handleRegister = () => {
   router.push('/register')
 }
 
-const fillDemoAccount = (account: (typeof LOGIN_DEMO_ACCOUNTS)[number]) => {
+const fillDemoAccount = (account: LoginDemoAccount) => {
   loginForm.value.username = account.username
-  loginForm.value.password = account.password
+  loginForm.value.password = account.password || ''
   ElMessage.info(`已填入${account.label}：${account.hint}`)
 }
 </script>
@@ -111,6 +179,37 @@ const fillDemoAccount = (account: (typeof LOGIN_DEMO_ACCOUNTS)[number]) => {
       </div>
       <div class="login-form">
         <h2>用户登录</h2>
+        <el-alert
+          v-if="backendOnline === false"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="logged-in-alert"
+          title="后端服务未启动"
+          description="请在项目根目录打开终端，运行 npm run dev:all 后再登录。"
+        />
+        <el-alert
+          v-else-if="backendOnline === true"
+          type="success"
+          :closable="false"
+          show-icon
+          class="logged-in-alert"
+          title="服务已就绪"
+          description="前端 http://localhost:5174 · 后端 http://localhost:3006"
+        />
+        <el-alert
+          v-if="showLoggedInHint"
+          type="info"
+          :closable="false"
+          show-icon
+          class="logged-in-alert"
+          :title="`当前标签页已登录：${loggedInUser?.realName || loggedInUser?.username}（${loggedInUser?.companyName || ''}）`"
+          description="每个浏览器标签页可登录不同账号。要换账号请先点「切换账号」，或直接新开一个标签页登录另一个演示账号。"
+        />
+        <div v-if="showLoggedInHint" class="logged-in-actions">
+          <el-button type="primary" @click="handleEnterSystem">进入系统</el-button>
+          <el-button @click="handleSwitchAccount">切换账号</el-button>
+        </div>
         <el-form :model="loginForm" class="form" @submit.prevent="handleLogin">
           <el-form-item label="用户名">
             <el-input v-model="loginForm.username" placeholder="请输入用户名" class="input-full" />
@@ -129,7 +228,9 @@ const fillDemoAccount = (account: (typeof LOGIN_DEMO_ACCOUNTS)[number]) => {
             <el-checkbox v-model="loginForm.rememberMe">记住我</el-checkbox>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" class="login-btn" @click="handleLogin">登录</el-button>
+            <el-button type="primary" class="login-btn" :loading="loggingIn" @click="handleLogin">
+              {{ loggingIn ? '登录中...' : '登录' }}
+            </el-button>
           </el-form-item>
           <div class="form-footer">
             <span class="link-text" @click="handleForgotPassword">忘记密码？</span>
@@ -137,11 +238,15 @@ const fillDemoAccount = (account: (typeof LOGIN_DEMO_ACCOUNTS)[number]) => {
             <span class="link-text" @click="handleRegister">注册新账号</span>
           </div>
           <div class="demo-accounts">
-            <p class="demo-title">演示账号（点击快速填入，仅需用户名+密码登录）</p>
-            <div v-for="account in LOGIN_DEMO_ACCOUNTS" :key="account.key" class="demo-item">
+            <p class="demo-title">
+              快捷登录账号（来自后台「登录账号设定」，点击快速填入）
+            </p>
+            <div v-if="loadingDemoAccounts" class="demo-loading">正在加载账号列表...</div>
+            <div v-else-if="demoAccounts.length === 0" class="demo-loading">暂无可用登录账号</div>
+            <div v-for="account in demoAccounts" :key="account.key" class="demo-item">
               <span class="demo-label">{{ account.label }}</span>
               <el-button link type="primary" @click="fillDemoAccount(account)">
-                {{ account.username }} / {{ account.password }} · {{ account.hint }}
+                {{ account.username }}<template v-if="account.password"> / {{ account.password }}</template> · {{ account.hint }}
               </el-button>
             </div>
           </div>
@@ -239,6 +344,20 @@ const fillDemoAccount = (account: (typeof LOGIN_DEMO_ACCOUNTS)[number]) => {
 }
 
 .demo-accounts {
+  margin-top: 8px;
+}
+
+.logged-in-alert {
+  margin-bottom: 12px;
+}
+
+.logged-in-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.demo-accounts {
   margin-top: 20px;
   padding: 14px 16px;
   background: #f5fafa;
@@ -268,6 +387,11 @@ const fillDemoAccount = (account: (typeof LOGIN_DEMO_ACCOUNTS)[number]) => {
     width: 56px;
     font-size: 12px;
     color: #666;
+  }
+
+  .demo-loading {
+    font-size: 12px;
+    color: #888;
   }
 }
 

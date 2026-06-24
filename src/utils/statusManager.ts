@@ -118,13 +118,8 @@ export const logisticsCompanyOptions = Object.entries(logisticsCompanyMap).map((
   value
 }))
 
-// 仓库列表
-export const warehouseOptions = [
-  { label: '北京仓库', value: 'beijing', code: 'WH001' },
-  { label: '上海仓库', value: 'shanghai', code: 'WH002' },
-  { label: '广州仓库', value: 'guangzhou', code: 'WH003' },
-  { label: '深圳仓库', value: 'shenzhen', code: 'WH004' }
-]
+// 仓库列表（请通过「资料管理 → 仓库管理」或「系统参数 → 仓库配置」维护）
+export const warehouseOptions: Array<{ label: string; value: string; code?: string }> = []
 
 // 状态格式化函数
 export const formatStatus = (status: string, options: Array<{ label: string; value: string; type: string }>) => {

@@ -1,8 +1,16 @@
 export const SUPPLIERS_KEY = 'suppliers'
 export const SUPPLIER_DELETED_CODES_KEY = 'supplierDeletedCodes'
+export const SUPPLIER_CODE_PREFIX = 'YY'
 
 import type { PartnerDocument, PartnerProfileExtension } from '@/types/partnerProfile'
 import { getCurrentUserName } from '@/utils/customerStore'
+import {
+  ensureStablePlatformPartnerCodes,
+  formatPlatformPartnerCode,
+  getNextPlatformPartnerCode,
+  buildUsedPlatformPartnerCodeSet,
+  rememberRetiredPlatformPartnerCodes
+} from '@/utils/partnerPlatformCode'
 
 export type SupplierDocument = PartnerDocument
 
@@ -137,11 +145,29 @@ export function loadSupplierList(): SupplierMaster[] {
 }
 
 export function saveSupplierList(list: SupplierMaster[]): void {
-  localStorage.setItem(SUPPLIERS_KEY, JSON.stringify(list))
+  localStorage.setItem(SUPPLIERS_KEY, JSON.stringify(ensureSupplierPlatformCodes(list)))
+}
+
+export function ensureSupplierPlatformCodes(list: SupplierMaster[]): SupplierMaster[] {
+  return ensureStablePlatformPartnerCodes(list, {
+    getStableId: item => normalizeSupplierId(item.id),
+    getCode: item => supplierCodeOf(item),
+    setCode: (item, code) => ({ ...item, code })
+  })
+}
+
+export function formatSupplierCode(sequence: number): string {
+  return formatPlatformPartnerCode(sequence)
+}
+
+export function getNextSupplierCode(list: SupplierMaster[] = loadSupplierList()): string {
+  const used = buildUsedPlatformPartnerCodeSet(list.map(item => supplierCodeOf(item)))
+  return getNextPlatformPartnerCode(used)
 }
 
 export function loadAndEnsureSupplierList(): SupplierMaster[] {
   const stored = readSupplierListRaw()
+  const hasStoredList = localStorage.getItem(SUPPLIERS_KEY) !== null
   const deletedCodes = readDeletedSupplierCodes()
   const idSet = new Set(stored.map(item => normalizeSupplierId(item.id)))
   const codeSet = new Set(stored.map(item => supplierCodeOf(item)).filter(Boolean))
@@ -149,9 +175,15 @@ export function loadAndEnsureSupplierList(): SupplierMaster[] {
     const code = supplierCodeOf(item)
     return !idSet.has(normalizeSupplierId(item.id)) && !codeSet.has(code) && !deletedCodes.has(code)
   })
-  const merged = missing.length ? [...missing, ...stored] : stored.length ? stored : [...defaultSuppliers]
+  const merged = missing.length
+    ? [...missing, ...stored]
+    : stored.length
+      ? stored
+      : hasStoredList
+        ? stored
+        : [...defaultSuppliers]
 
-  if (stored.length === 0 || missing.length > 0) {
+  if (!hasStoredList || missing.length > 0) {
     saveSupplierList(merged)
   }
 
@@ -160,12 +192,19 @@ export function loadAndEnsureSupplierList(): SupplierMaster[] {
 
 export function getSupplierById(id: string): SupplierMaster | undefined {
   const normalizedId = normalizeSupplierId(id)
-  return loadSupplierList().find(item => normalizeSupplierId(item.id) === normalizedId)
+  return loadSupplierList().find(item => {
+    const itemId = normalizeSupplierId(item.id)
+    const itemCode = supplierCodeOf(item)
+    return itemId === normalizedId || itemCode === normalizedId
+  })
 }
 
 export function upsertSupplier(supplier: SupplierMaster): void {
   const list = loadSupplierList()
-  const index = list.findIndex(item => item.id === supplier.id)
+  const code = supplierCodeOf(supplier)
+  const index = list.findIndex(
+    item => item.id === supplier.id || (code && supplierCodeOf(item) === code)
+  )
   const record: SupplierMaster = {
     ...supplier,
     code: supplier.code || supplier.id
@@ -185,6 +224,7 @@ export function deleteSupplier(id: string | number): boolean {
   if (!target) return false
 
   rememberDeletedSupplierCodes([supplierCodeOf(target)])
+  rememberRetiredPlatformPartnerCodes([supplierCodeOf(target)])
   const next = list.filter(item => normalizeSupplierId(item.id) !== normalizedId)
   saveSupplierList(next)
   return true
@@ -192,7 +232,7 @@ export function deleteSupplier(id: string | number): boolean {
 
 export function batchDeleteSuppliers(ids: Array<string | number>): SupplierMaster[] {
   const idSet = new Set(ids.map(normalizeSupplierId).filter(Boolean))
-  if (idSet.size === 0) return loadAndEnsureSupplierList()
+  if (idSet.size === 0) return loadSupplierList()
 
   const list = loadSupplierList()
   const removedCodes = list
@@ -200,10 +240,11 @@ export function batchDeleteSuppliers(ids: Array<string | number>): SupplierMaste
     .map(item => supplierCodeOf(item))
     .filter(Boolean)
   rememberDeletedSupplierCodes(removedCodes)
+  rememberRetiredPlatformPartnerCodes(removedCodes)
 
   const next = list.filter(item => !idSet.has(normalizeSupplierId(item.id)))
   saveSupplierList(next)
-  return loadAndEnsureSupplierList()
+  return next
 }
 
 export function setSupplierAuditStatus(

@@ -1,13 +1,23 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElLoading } from 'element-plus'
-import { Setting } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Setting, ArrowLeft, Plus, Close } from '@element-plus/icons-vue'
 import { useTableStyle } from '@/composables/useTableStyle'
-import { useProductListColumnSettings } from '@/composables/useProductListColumnSettings'
+import { useElTableLayout } from '@/composables/useElTableLayout'
+import '@/styles/product-list-table.scss'
+import { useProductListColumnSettings, getCategorySortColumnLabel } from '@/composables/useProductListColumnSettings'
 import { useProductListBatchActions } from '@/composables/useProductListBatchActions'
-import { productSourceLabel } from '@/utils/customerProductService'
-import { saveProductList, loadAndEnsureProductList, clearProductList, getProductUnit } from '@/utils/productStore'
+import { usePlatformProductListSearchKeyboard } from '@/composables/useListSearchKeyboard'
+import {
+  approveCustomerProductAsPlatform,
+  getCustomerProductsPendingPlatformReview,
+  productSourceLabel,
+  rejectCustomerProductPlatformReview
+} from '@/utils/customerProductService'
+import { saveProductList, clearProductListFully, getProductUnit, getProductListBackupInfo, restoreProductListFromBackup, tryAutoRecoverProductListFromBackup, acknowledgeRestoredProductCodes } from '@/utils/productStore'
+import { hydratePlatformAdminProductList, loadPlatformAdminProductList } from '@/utils/platformProductStore'
+import { LOADING_RESULT_MESSAGE_DURATION, runWithLoading } from '@/utils/loadingFeedback'
 import {
   PRODUCT_EXPORT_LIMIT,
   exportProductsToExcel,
@@ -24,18 +34,30 @@ import {
 import {
   applyProductListFilters,
   CATEGORY_ALL_ID,
+  clearProductListCategoryFilter,
   createEmptyProductSearchForm,
+  findCategoryNameBySelection,
   isAllCategorySelected,
-  isValidCategorySelection,
+  loadProductListCategoryFilter,
+  resolveSelectedCategoryAfterRebuild,
+  saveProductListCategoryFilter,
   sortProductsByColumn,
   type ProductColumnSortOrder
 } from '@/utils/productListFilter'
+import { useLayoutNavigateBack } from '@/composables/useLayoutNavigateBack'
 
 const router = useRouter()
+const layoutNavigateBack = useLayoutNavigateBack()
+
+const handleBack = () => {
+  layoutNavigateBack()
+}
+
 const importInputRef = ref<HTMLInputElement | null>(null)
 const canProductAuditDelete = computed(() => isPlatformProductAdmin())
 const canProductAudit = computed(() => isProductAuditor())
 const LEGACY_CATEGORY_STORAGE_KEYS = ['defaultPlatformProductCategory', 'defaultProductCategory']
+const CATEGORY_FILTER_STORAGE_KEY = 'platformProductListCategoryFilter'
 
 const defaultCategories = [
   { id: 1, name: '手术器械', children: [
@@ -100,16 +122,34 @@ const filteredCategories = computed(() => {
 // 分类排序方式
 const storedSortType = localStorage.getItem('platformCategorySortType')
 const platformCategorySortType = ref<string>(storedSortType || 'all')
+const lastCategorySortType = ref(platformCategorySortType.value)
+
+const getSavedCategoryName = () => {
+  const saved = loadProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  if (!saved || saved.sortType !== platformCategorySortType.value) return null
+  return saved.categoryName ?? null
+}
+
+const persistCategoryFilter = () => {
+  saveProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY, {
+    sortType: platformCategorySortType.value,
+    categoryId: selectedCategory.value,
+    categoryName: findCategoryNameBySelection(selectedCategory.value, categories.value) ?? undefined
+  })
+}
+
+const syncSelectedCategory = () => {
+  selectedCategory.value = resolveSelectedCategoryAfterRebuild(
+    platformCategorySortType.value,
+    categories.value,
+    selectedCategory.value,
+    getSavedCategoryName()
+  )
+}
 
 // 搜索表单数据
 const searchForm = reactive({
-  codeName: '',
-  spec: '',
-  manufacturer: '',
-  brand: '',
-  type: '',
-  auditStatus: '',
-  status: ''
+  ...createEmptyProductSearchForm()
 })
 
 // 默认商品数据
@@ -225,7 +265,7 @@ const allProducts = ref<any[]>([])
 const filteredData = ref<any[]>([])
 const tableData = ref<any[]>([])
 
-const { columnWidths, handleHeaderDragend } = useTableStyle('platform-product-list', [
+const { columnWidths, getColumnWidth, handleHeaderDragend } = useTableStyle('platform-product-list', [
   { key: 'selection', label: '', defaultWidth: 50 },
   { key: 'index', label: '行号', defaultWidth: 56 },
   { key: 'code', label: '商品编码', defaultWidth: 120 },
@@ -233,6 +273,7 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('platform-product-li
   { key: 'spec', label: '规格型号', defaultWidth: 120 },
   { key: 'measureUnit', label: '单位', defaultWidth: 72, align: 'center' },
   { key: 'manufacturer', label: '生产厂家', defaultWidth: 150 },
+  { key: 'registrant', label: '注册人/备案人', defaultWidth: 150 },
   { key: 'brand', label: '品牌', defaultWidth: 80 },
   { key: 'category', label: '商品分类', defaultWidth: 100 },
   { key: 'type', label: '商品类型', defaultWidth: 100 },
@@ -253,27 +294,81 @@ const {
   showColumnSelector,
   columnOptions,
   selectedColumns,
+  selectedCategorySortTypes,
+  enabledCategorySortTypes,
+  availableCategorySortColumns,
+  selectedCategorySortColumnDefs,
   sortedVisibleColumns,
   tableColumnRenderKey,
   openColumnSettings,
+  addCategorySortColumn,
+  removeCategorySortColumn,
+  handleCategorySortDragStart,
+  handleCategorySortDragOver,
+  handleCategorySortDropOnSelected,
+  handleCategorySortDropOnSelectedList,
   handleColumnDragStart,
   handleColumnDragOver,
   handleColumnDrop,
   confirmColumnSelection
 } = useProductListColumnSettings('platform-product-list')
 
+const platformCategorySortOptions = computed(() => [
+  { label: '全部分类', value: 'all' },
+  ...enabledCategorySortTypes.value.map(key => ({
+    label: `按${getCategorySortColumnLabel(key)}`,
+    value: key
+  }))
+])
+
+const ensureActiveCategorySortType = () => {
+  if (
+    platformCategorySortType.value !== 'all' &&
+    !enabledCategorySortTypes.value.includes(platformCategorySortType.value)
+  ) {
+    platformCategorySortType.value = 'all'
+    lastCategorySortType.value = 'all'
+    selectedCategory.value = CATEGORY_ALL_ID
+    clearProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  }
+}
+
+const handleConfirmColumnSelection = () => {
+  if (!confirmColumnSelection()) return
+  ensureActiveCategorySortType()
+  handleCategorySort()
+}
+
 const initProductListData = () => {
-  allProducts.value = loadAndEnsureProductList(defaultProducts)
+  allProducts.value = loadPlatformAdminProductList(defaultProducts)
+}
+
+const bootstrapPlatformProducts = async () => {
+  tryAutoRecoverProductListFromBackup({ forceIfCurrentBelow: 20 })
+  if (localStorage.getItem('token')) {
+    allProducts.value = await hydratePlatformAdminProductList(defaultProducts)
+  } else {
+    initProductListData()
+  }
+  handleCategorySort()
 }
 
 // 初始化localStorage
-onMounted(() => {
-  initProductListData()
+onMounted(async () => {
+  await bootstrapPlatformProducts()
 
-  selectedCategory.value = CATEGORY_ALL_ID
   categorySearchKeyword.value = ''
   clearSavedCategoryFilters()
-  Object.assign(searchForm, createEmptyProductSearchForm())
+
+  const saved = loadProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  if (saved?.sortType === platformCategorySortType.value && saved.categoryId != null) {
+    selectedCategory.value = saved.categoryId
+  } else {
+    selectedCategory.value = CATEGORY_ALL_ID
+  }
+
+  resetSearchFormSilently(searchForm)
+  ensureActiveCategorySortType()
   handleCategorySort()
   layoutProductTable()
 })
@@ -295,12 +390,7 @@ const clearSavedCategoryFilters = () => {
 }
 
 const refreshProductList = (resetPage = true) => {
-  if (
-    !isAllCategorySelected(selectedCategory.value) &&
-    !isValidCategorySelection(selectedCategory.value, platformCategorySortType.value, categories.value)
-  ) {
-    selectedCategory.value = CATEGORY_ALL_ID
-  }
+  syncSelectedCategory()
 
   filteredData.value = applyProductListFilters(allProducts.value, searchForm, {
     sortType: platformCategorySortType.value,
@@ -354,24 +444,74 @@ const resetProductFilters = () => {
   selectedCategory.value = CATEGORY_ALL_ID
   categorySearchKeyword.value = ''
   clearSavedCategoryFilters()
-  Object.assign(searchForm, createEmptyProductSearchForm())
+  clearProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  resetSearchFormSilently(searchForm)
   selectedIds.value = []
   selectAll.value = false
   refreshProductList(true)
 }
 
-// 刷新数据
-const handleRefresh = () => {
-  initProductListData()
+const productBackupInfo = computed(() => getProductListBackupInfo())
 
-  currentPage.value = 1
-  handleCategorySort()
+const handleRestoreFromBackup = async () => {
+  const info = getProductListBackupInfo()
+  const restoreCount = Math.max(info.bestRecoveryCount, info.backupCount, info.snapshotCount, info.catalogCount)
+  if (!info.canRestore || restoreCount <= allProducts.value.length) {
+    ElMessage.warning('未找到比当前列表更多的商品备份。如有 Excel 文件，请使用「导入」。')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `检测到本地备份约 ${restoreCount} 条（当前 ${allProducts.value.length} 条）。确定恢复吗？`,
+      '恢复商品备份',
+      { type: 'warning', confirmButtonText: '恢复', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  await runWithLoading(async () => {
+    const result = await restoreProductListFromBackup()
+    if (!result.ok) {
+      ElMessage.warning({ message: result.message, duration: LOADING_RESULT_MESSAGE_DURATION })
+      return
+    }
+    allProducts.value = loadPlatformAdminProductList(defaultProducts)
+    handleCategorySort()
+    ElMessage.success({ message: result.message, duration: LOADING_RESULT_MESSAGE_DURATION })
+  }, { text: '正在恢复商品资料，请稍候…', minDurationMs: 1200 })
+}
+
+// 刷新数据：重新拉取并清空筛选，避免刷新后列表被旧条件隐藏
+const handleRefresh = async () => {
+  await runWithLoading(async () => {
+    if (localStorage.getItem('token')) {
+      allProducts.value = await hydratePlatformAdminProductList(defaultProducts)
+    } else {
+      initProductListData()
+    }
+    selectedCategory.value = CATEGORY_ALL_ID
+    categorySearchKeyword.value = ''
+    clearSavedCategoryFilters()
+    clearProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+    resetSearchFormSilently(searchForm)
+    selectedIds.value = []
+    selectAll.value = false
+    productTableRef.value?.clearSelection?.()
+    currentPage.value = 1
+    handleCategorySort()
+    ElMessage.success({ message: '数据已刷新', duration: LOADING_RESULT_MESSAGE_DURATION })
+  }, { text: '正在刷新商品资料，请稍候…', minDurationMs: 800 })
 }
 
 // 搜索商品（与分类筛选联合，排除不符合条件的记录）
 const handleSearch = () => {
   refreshProductList(true)
 }
+
+const {
+  onInputEnter: onSearchInputEnter,
+  resetSearchFormSilently
+} = usePlatformProductListSearchKeyboard(handleSearch)
 
 const selectedIds = ref<(number | string)[]>([])
 const selectAll = ref(false)
@@ -380,15 +520,20 @@ const productTableRef = ref<{
   clearSelection: () => void
   doLayout?: () => void
 }>()
+const tableScrollRef = ref<HTMLElement | null>(null)
 
 const layoutProductTable = () => {
-  nextTick(() => {
-    productTableRef.value?.doLayout?.()
-  })
+  relayoutTable()
 }
 
+const { relayoutTable, tableHeight } = useElTableLayout(productTableRef, tableScrollRef)
+
+watch(tableData, () => layoutProductTable())
+watch(tableColumnRenderKey, () => layoutProductTable())
+watch(pageSize, () => layoutProductTable())
+
 const handleSelectionChange = (val: any[]) => {
-  selectedIds.value = val.map(item => item.id)
+  selectedIds.value = val.map(item => getProductRowKey(item))
   selectAll.value = val.length > 0 && val.length === tableData.value.length
 }
 
@@ -404,12 +549,19 @@ const handleSelectAllChange = (checked: boolean) => {
 
 const handleCategoryClick = (id: number) => {
   selectedCategory.value = id
+  persistCategoryFilter()
   refreshProductList(true)
 }
 
 const handleCategorySortTypeChange = () => {
-  selectedCategory.value = CATEGORY_ALL_ID
-  clearSavedCategoryFilters()
+  const typeChanged = platformCategorySortType.value !== lastCategorySortType.value
+  lastCategorySortType.value = platformCategorySortType.value
+
+  if (typeChanged) {
+    selectedCategory.value = CATEGORY_ALL_ID
+    clearProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  }
+
   handleCategorySort()
 }
 
@@ -424,7 +576,7 @@ const handleCategorySort = (resetPage = true) => {
     categories.value = [...defaultCategories]
     expandedKeys.value = [1, 2]
   } else {
-    const categoryField = platformCategorySortType.value as 'manufacturer' | 'brand' | 'name'
+    const categoryField = platformCategorySortType.value
     const uniqueValues = [...new Set(allProducts.value.map(p => p[categoryField]).filter(Boolean))]
     
     let idCounter = 1
@@ -441,14 +593,17 @@ const handleCategorySort = (resetPage = true) => {
     expandedKeys.value = dynamicCategories.map(c => c.id)
   }
 
+  syncSelectedCategory()
+  persistCategoryFilter()
   refreshProductList(resetPage)
 }
 
-const sortOrders = reactive<Record<'code' | 'name' | 'spec' | 'manufacturer', ProductColumnSortOrder>>({
+const sortOrders = reactive<Record<'code' | 'name' | 'spec' | 'manufacturer' | 'registrant', ProductColumnSortOrder>>({
   code: '',
   name: '',
   spec: '',
-  manufacturer: ''
+  manufacturer: '',
+  registrant: ''
 })
 
 const getActiveColumnSort = () => {
@@ -483,19 +638,68 @@ const handleSort = (prop: keyof typeof sortOrders) => {
   paginateData()
 }
 
+const pendingPlatformReviewCount = computed(() => getCustomerProductsPendingPlatformReview().length)
+
+const selectedPendingPlatformReviewIds = computed(() =>
+  selectedIds.value.filter(id => {
+    const row = allProducts.value.find(item => item.id === id)
+    return row?.source === 'customerEntry' && row?.platformReviewStatus === '待平台审核'
+  })
+)
+
+const canApprovePlatformReview = computed(
+  () => canProductAudit.value && selectedPendingPlatformReviewIds.value.length > 0
+)
+
+const handleApprovePlatformReview = () => {
+  if (!canApprovePlatformReview.value) return
+  let count = 0
+  selectedPendingPlatformReviewIds.value.forEach(id => {
+    if (approveCustomerProductAsPlatform(id)) count += 1
+  })
+  handleCategorySort(false)
+  clearTableSelection()
+  ElMessage.success(`已纳入平台资料 ${count} 条`)
+}
+
+const handleRejectPlatformReview = async () => {
+  if (!canApprovePlatformReview.value) return
+  let count = 0
+  selectedPendingPlatformReviewIds.value.forEach(id => {
+    if (rejectCustomerProductPlatformReview(id)) count += 1
+  })
+  handleCategorySort(false)
+  clearTableSelection()
+  ElMessage.info(`已驳回 ${count} 条客户录入商品`)
+}
+
+const filterPendingPlatformReview = () => {
+  const pendingIds = new Set(getCustomerProductsPendingPlatformReview().map(item => item.id))
+  filteredData.value = allProducts.value.filter(item => pendingIds.has(item.id))
+  currentPage.value = 1
+  paginateData()
+  ElMessage.info(`已筛选待平台审核商品 ${filteredData.value.length} 条`)
+}
+
 const clearTableSelection = () => {
   selectedIds.value = []
   selectAll.value = false
   nextTick(() => productTableRef.value?.clearSelection())
 }
 
+const openProductEdit = (row: { code?: string }) => {
+  const code = String(row.code ?? '').trim()
+  if (!code) return
+  router.push(`/platform/product/edit/${encodeURIComponent(code)}`)
+}
+
 // 双击行跳转到编辑页面
 const handleRowDoubleClick = (row: any) => {
-  router.push(`/platform/product/edit/${row.id}`)
+  openProductEdit(row)
 }
 
 const handleCodeClick = (row: any) => {
-  router.push(`/platform/product/edit/${row.id}`)
+  openProductEdit(row)
 }
 
 const {
@@ -503,6 +707,8 @@ const {
   batchModifyColumn,
   batchModifyValue,
   batchModifiableColumns,
+  batchModifyColumnDef,
+  batchModifySelectOptions,
   canBatchAudit,
   canBatchUnaudit,
   handleBatchAudit,
@@ -512,7 +718,7 @@ const {
 } = useProductListBatchActions(allProducts, selectedIds, selectAll, () => {
   handleCategorySort(false)
   clearTableSelection()
-})
+}, { deleteGuard: 'platform', requireAdminForModify: true })
 
 const getExportProducts = () => {
   if (selectedIds.value.length > 0) {
@@ -554,12 +760,16 @@ const handleClearAllProducts = async () => {
   if (!confirmed) return
 
   allProducts.value = []
-  clearProductList()
+  const synced = await clearProductListFully()
   selectedIds.value = []
   selectAll.value = false
   currentPage.value = 1
   handleCategorySort()
-  ElMessage.success(`已清空全部 ${total} 条商品资料，请重新导入`)
+  ElMessage.success(
+    synced
+      ? `已清空全部 ${total} 条商品资料，请重新导入（以商品编码为唯一标识）`
+      : `本地已清空 ${total} 条，服务器同步失败，请检查网络后点「刷新」`
+  )
 }
 
 const handleImportClick = () => {
@@ -572,30 +782,34 @@ const handleImportFile = async (event: Event) => {
   input.value = ''
   if (!file) return
 
-  const loading = ElLoading.service({
-    lock: true,
-    text: `正在导入 ${file.name}，请稍候…`,
-    background: 'rgba(255, 255, 255, 0.7)'
-  })
-
-  try {
-    await new Promise(resolve => setTimeout(resolve, 0))
+  await runWithLoading(async () => {
     const imported = await parseProductImportFile(file)
     if (imported.length === 0) {
-      ElMessage.warning('未识别到有效商品：请确认含「商品编号/商品编码」和「商品名称」列（WPS 导出格式已支持）')
+      ElMessage.warning({
+        message: '未识别到有效商品：请确认含「商品编号/商品编码」和「商品名称」列（WPS 导出格式已支持）',
+        duration: LOADING_RESULT_MESSAGE_DURATION
+      })
       return
     }
 
     const { list, added, updated, skipped } = mergeImportedProducts(allProducts.value, imported)
     allProducts.value = list
+    acknowledgeRestoredProductCodes(imported.map(item => String(item.code ?? '')))
     saveProductList(list)
     handleCategorySort()
-    ElMessage.success(`导入完成：共识别 ${imported.length} 条，新增 ${added} 条，更新 ${updated} 条${skipped ? `，跳过 ${skipped} 条` : ''}`)
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导入失败，请检查文件格式')
-  } finally {
-    loading.close()
-  }
+    ElMessage.success({
+      message: `导入完成：共识别 ${imported.length} 条，新增 ${added} 条，更新 ${updated} 条${skipped ? `，跳过 ${skipped} 条（含名称+规格+厂家重复）` : ''}`,
+      duration: LOADING_RESULT_MESSAGE_DURATION
+    })
+  }, {
+    text: `正在导入 ${file.name}，请稍候…`,
+    minDurationMs: 1500
+  }).catch(error => {
+    ElMessage.error({
+      message: error instanceof Error ? error.message : '导入失败，请检查文件格式',
+      duration: LOADING_RESULT_MESSAGE_DURATION
+    })
+  })
 }
 </script>
 
@@ -603,21 +817,42 @@ const handleImportFile = async (event: Event) => {
   <div class="page-container">
     <div class="page-header">
       <div class="header-left">
+        <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
         <h1>平台商品基本资料</h1>
       </div>
     </div>
     
-    <div class="search-form">
-      <el-input v-model="searchForm.codeName" placeholder="商品编码/名称" style="width: 200px;" />
-      <el-input v-model="searchForm.spec" placeholder="规格型号" style="width: 150px;" />
-      <el-input v-model="searchForm.manufacturer" placeholder="生产厂家" style="width: 150px;" />
-      <el-input v-model="searchForm.brand" placeholder="品牌" style="width: 100px;" />
-      <el-input v-model="searchForm.type" placeholder="商品类型" style="width: 100px;" />
+    <div class="search-form list-search-form">
+      <div class="search-field" data-search-key="codeName">
+        <el-input
+          v-model="searchForm.codeName"
+          placeholder="商品编码/名称/拼音"
+          style="width: 200px;"
+          @keydown.enter="onSearchInputEnter('codeName', $event)"
+        />
+      </div>
+      <div class="search-field" data-search-key="spec">
+        <el-input
+          v-model="searchForm.spec"
+          placeholder="规格型号/拼音"
+          style="width: 150px;"
+          @keydown.enter="onSearchInputEnter('spec', $event)"
+        />
+      </div>
+      <div class="search-field" data-search-key="registrant">
+        <el-input
+          v-model="searchForm.registrant"
+          placeholder="注册人/备案人/拼音"
+          style="width: 160px;"
+          @keydown.enter="onSearchInputEnter('registrant', $event)"
+        />
+      </div>
       <el-button type="primary" @click="handleSearch">查询</el-button>
-      <el-button @click="resetProductFilters">重置</el-button>
+      <el-button type="danger" plain @click="resetProductFilters">重置</el-button>
       <el-button type="primary" @click="router.push('/platform/product/create')">新增</el-button>
       <el-button v-if="canProductAuditDelete" type="danger" plain @click="handleClearAllProducts">清空全部</el-button>
       <el-button type="primary" @click="handleRefresh">刷新</el-button>
+      <el-button v-if="productBackupInfo.canRestore" @click="handleRestoreFromBackup">恢复备份</el-button>
       <div class="search-form-io-group">
         <el-button type="primary" @click="handleImportClick">导入</el-button>
         <el-button type="primary" @click="handleExport">导出</el-button>
@@ -631,6 +866,28 @@ const handleImportFile = async (event: Event) => {
         />
       </div>
     </div>
+
+    <el-alert
+      v-if="allProducts.length <= 50 && productBackupInfo.canRestore && productBackupInfo.bestRecoveryCount > allProducts.length"
+      class="platform-review-alert"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="`当前仅 ${allProducts.length} 条商品，本地备份约 ${productBackupInfo.bestRecoveryCount} 条，可点「恢复备份」找回`"
+    >
+      <el-button type="primary" link @click="handleRestoreFromBackup">立即恢复</el-button>
+    </el-alert>
+
+    <el-alert
+      v-if="pendingPlatformReviewCount > 0"
+      class="platform-review-alert"
+      type="info"
+      :closable="false"
+      show-icon
+      :title="`有 ${pendingPlatformReviewCount} 条客户自行录入的商品待平台审核，审核通过后可纳入平台资料`"
+    >
+      <el-button type="primary" link @click="filterPendingPlatformReview">查看待审核</el-button>
+    </el-alert>
     
     <div class="product-layout">
       <div class="category-sidebar">
@@ -643,11 +900,12 @@ const handleImportFile = async (event: Event) => {
             @change="handleCategorySortTypeChange"
             style="width: 100%;"
           >
-            <el-option label="全部分类" value="all" />
-            <el-option label="按生产厂家" value="manufacturer" />
-            <el-option label="按品牌" value="brand" />
-            <el-option label="按商品名称" value="name" />
-            <el-option label="按商品类型" value="type" />
+            <el-option
+              v-for="option in platformCategorySortOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
           </el-select>
         </div>
         <div v-if="platformCategorySortType !== 'all'" class="category-search">
@@ -666,6 +924,13 @@ const handleImportFile = async (event: Event) => {
           </el-input>
         </div>
         <div v-if="platformCategorySortType !== 'all'" class="category-tree">
+          <div
+            class="category-title category-all-item"
+            :class="{ active: isAllCategorySelected(selectedCategory) }"
+            @click="handleCategoryClick(CATEGORY_ALL_ID)"
+          >
+            全部分类
+          </div>
             <div v-for="cat in filteredCategories" :key="cat.id" class="category-item">
             <div 
               class="category-title" 
@@ -707,6 +972,22 @@ const handleImportFile = async (event: Event) => {
           <div class="action-bar-controls">
             <el-button
               v-if="canProductAudit"
+              type="primary"
+              plain
+              size="small"
+              :disabled="!canApprovePlatformReview"
+              @click="handleApprovePlatformReview"
+            >纳入平台</el-button>
+            <el-button
+              v-if="canProductAudit"
+              type="warning"
+              plain
+              size="small"
+              :disabled="!canApprovePlatformReview"
+              @click="handleRejectPlatformReview"
+            >驳回客户商品</el-button>
+            <el-button
+              v-if="canProductAudit"
               type="success"
               plain
               size="small"
@@ -731,7 +1012,13 @@ const handleImportFile = async (event: Event) => {
             >
               删除
             </el-button>
-            <el-button type="primary" link size="small" @click="openBatchModifyDialog">批量修改</el-button>
+            <el-button
+              type="primary"
+              plain
+              size="small"
+              :disabled="selectedIds.length === 0"
+              @click="openBatchModifyDialog"
+            >批量修改</el-button>
           </div>
           <div class="action-bar-extra">
             <el-button size="small" @click="openColumnSettings">
@@ -740,28 +1027,29 @@ const handleImportFile = async (event: Event) => {
           </div>
         </div>
         
-        <div class="table-card">
-          <div class="table-scroll">
+        <div class="table-card product-list-table-card">
+          <div ref="tableScrollRef" class="table-scroll product-list-table-scroll">
           <div v-if="sortedVisibleColumns.length === 0" class="header-empty-tip">请点击「商品资料设置」选择要显示的列</div>
           <el-table
             v-else
             ref="productTableRef"
             :key="tableColumnRenderKey"
             :data="tableData"
+            :height="tableHeight"
             :row-key="getProductRowKey"
             class="common-table"
             border
-            :fit="false"
+            :fit="true"
             @selection-change="handleSelectionChange"
             @row-dblclick="handleRowDoubleClick"
             @header-dragend="handleHeaderDragend"
           >
-            <el-table-column type="selection" :width="columnWidths.selection" align="center" header-align="center" />
+            <el-table-column type="selection" :width="getColumnWidth('selection', 50)" align="center" header-align="center" />
             <el-table-column
               type="index"
               label="行号"
               :index="indexMethod"
-              :width="columnWidths.index"
+              :width="getColumnWidth('index', 56)"
               align="center"
               header-align="center"
             />
@@ -771,7 +1059,7 @@ const handleImportFile = async (event: Event) => {
               :key="col.key"
               :prop="col.prop"
               :label="col.label"
-              :width="columnWidths[col.key]"
+              :width="getColumnWidth(col.key)"
               :align="col.align"
               :header-align="col.headerAlign || col.align || 'center'"
               show-overflow-tooltip
@@ -847,52 +1135,146 @@ const handleImportFile = async (event: Event) => {
     </div>
   </div>
 
-  <el-dialog v-model="showBatchModifyDialog" title="批量修改列内容" width="480px" draggable>
-    <el-form label-width="72px">
-      <el-form-item label="修改列">
-        <el-select v-model="batchModifyColumn" placeholder="选择列" style="width: 100%">
-          <el-option
-            v-for="col in batchModifiableColumns"
-            :key="col.key"
-            :label="col.label"
-            :value="col.key"
-          />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="新值">
-        <el-input v-model="batchModifyValue" placeholder="请输入新值" clearable />
-      </el-form-item>
-      <p class="batch-modify-tip">将修改已选 {{ selectedIds.length }} 条商品的对应列内容</p>
-    </el-form>
+  <el-dialog
+    v-model="showBatchModifyDialog"
+    title="批量修改商品资料"
+    width="420px"
+    draggable
+    class="batch-modify-dialog-wrap"
+    :close-on-click-modal="false"
+  >
+    <div class="batch-modify-panel">
+      <el-form label-width="68px" class="batch-modify-form list-search-form">
+        <el-form-item label="修改列：">
+          <el-select v-model="batchModifyColumn" placeholder="选择列" style="width: 100%" filterable>
+            <el-option
+              v-for="col in batchModifiableColumns"
+              :key="col.key"
+              :label="col.label"
+              :value="col.key"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="新值：">
+          <el-select
+            v-if="batchModifySelectOptions"
+            v-model="batchModifyValue"
+            :placeholder="`请选择${batchModifyColumnDef?.label || ''}`"
+            style="width: 100%"
+            filterable
+          >
+            <el-option
+              v-for="opt in batchModifySelectOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+          <el-input v-else v-model="batchModifyValue" placeholder="请输入新值" clearable />
+        </el-form-item>
+        <p class="batch-modify-tip">
+          将修改已选 {{ selectedIds.length }} 条商品的「{{ batchModifyColumnDef?.label || '对应字段' }}」
+        </p>
+      </el-form>
+    </div>
     <template #footer>
       <el-button @click="showBatchModifyDialog = false">取消</el-button>
       <el-button type="primary" @click="confirmBatchModify">确定</el-button>
     </template>
   </el-dialog>
 
-  <el-dialog v-model="showColumnSelector" title="商品资料设置" width="720px" draggable>
-    <div class="field-selector">
-      <p class="sort-tip">勾选需要在列表中显示的列，拖拽可调整顺序</p>
-      <el-checkbox-group v-model="selectedColumns">
-        <el-row :gutter="10">
-          <el-col :span="8" v-for="(col, index) in columnOptions" :key="col.key">
+  <el-dialog
+    v-model="showColumnSelector"
+    title="商品资料设置"
+    width="680px"
+    draggable
+    class="product-settings-dialog-wrap"
+  >
+    <div class="product-settings-dialog">
+      <div class="settings-block">
+        <div class="settings-block-head">
+          <span class="settings-block-title">商品分类方式</span>
+          <span class="settings-block-hint">点击或拖入已选，× 删除</span>
+        </div>
+        <div class="category-sort-compact">
+          <div class="sort-zone">
+            <span class="zone-label">可选</span>
+            <div class="chip-wrap">
+              <button
+                v-for="(col, index) in availableCategorySortColumns"
+                :key="col.key"
+                type="button"
+                class="chip chip-add"
+                draggable="true"
+                @dragstart="(event) => handleCategorySortDragStart(event, 'available', index)"
+                @click="addCategorySortColumn(col.key)"
+              >
+                <span class="chip-text">{{ col.label }}</span>
+                <el-icon class="chip-icon"><Plus /></el-icon>
+              </button>
+              <span v-if="availableCategorySortColumns.length === 0" class="zone-empty">无</span>
+            </div>
+          </div>
+          <div
+            class="sort-zone sort-zone--selected"
+            @dragover="handleCategorySortDragOver"
+            @drop="handleCategorySortDropOnSelectedList"
+          >
+            <span class="zone-label">已选</span>
+            <div class="chip-wrap">
+              <button
+                v-for="(col, index) in selectedCategorySortColumnDefs"
+                :key="col.key"
+                type="button"
+                class="chip chip-selected"
+                draggable="true"
+                @dragstart="(event) => handleCategorySortDragStart(event, 'selected', index)"
+                @dragover="handleCategorySortDragOver"
+                @drop="(event) => handleCategorySortDropOnSelected(event, index)"
+              >
+                <span class="chip-order">{{ index + 1 }}</span>
+                <span class="chip-text">{{ col.label }}</span>
+                <el-icon
+                  class="chip-remove"
+                  @click.stop="removeCategorySortColumn(col.key)"
+                >
+                  <Close />
+                </el-icon>
+              </button>
+              <span v-if="selectedCategorySortColumnDefs.length === 0" class="zone-empty">拖入或点击上方添加</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-block">
+        <div class="settings-block-head">
+          <span class="settings-block-title">列表显示列</span>
+          <span class="settings-block-hint">勾选显示，拖拽排序</span>
+        </div>
+        <el-checkbox-group v-model="selectedColumns" class="column-grid-group">
+          <div class="column-grid">
             <div
-              class="field-item"
+              v-for="(col, index) in columnOptions"
+              :key="col.key"
+              class="column-grid-item"
               draggable="true"
               @dragstart="(event) => handleColumnDragStart(event, index)"
               @dragover="handleColumnDragOver"
               @drop="(event) => handleColumnDrop(event, index)"
             >
-              <span class="field-order">{{ index + 1 }}.</span>
-              <el-checkbox :label="col.key" :disabled="col.required">{{ col.label }}</el-checkbox>
+              <span class="col-idx">{{ index + 1 }}</span>
+              <el-checkbox :label="col.key" :disabled="col.required" size="small">
+                {{ col.label }}
+              </el-checkbox>
             </div>
-          </el-col>
-        </el-row>
-      </el-checkbox-group>
+          </div>
+        </el-checkbox-group>
+      </div>
     </div>
     <template #footer>
-      <el-button @click="showColumnSelector = false">取消</el-button>
-      <el-button type="primary" @click="confirmColumnSelection">确定</el-button>
+      <el-button size="small" @click="showColumnSelector = false">取消</el-button>
+      <el-button size="small" type="primary" @click="handleConfirmColumnSelection">确定</el-button>
     </template>
   </el-dialog>
 </template>
@@ -935,6 +1317,10 @@ const handleImportFile = async (event: Event) => {
     align-items: center;
     gap: 8px;
   }
+}
+
+.platform-review-alert {
+  margin-bottom: 12px;
 }
 
 .search-form { 
@@ -1205,11 +1591,46 @@ const handleImportFile = async (event: Event) => {
   }
 }
 
+.batch-modify-panel {
+  border-radius: 6px;
+  padding: 4px 0 0;
+  box-sizing: border-box;
+}
+
+.batch-modify-form {
+  :deep(.el-form-item) {
+    margin-bottom: 14px;
+    align-items: flex-end;
+  }
+
+  :deep(.el-form-item:last-of-type) {
+    margin-bottom: 0;
+  }
+
+  :deep(.el-form-item__label) {
+    line-height: 20px;
+    height: auto;
+    padding-bottom: 6px;
+    display: inline-flex;
+    align-items: flex-end;
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  :deep(.el-form-item__content) {
+    display: flex;
+    align-items: flex-end;
+    min-height: 32px;
+    line-height: 32px;
+  }
+}
+
 .batch-modify-tip {
-  margin: 0;
-  padding-left: 72px;
+  margin: 12px 0 0;
+  padding-left: 0;
   font-size: 12px;
   color: #909399;
+  line-height: 1.5;
 }
 
 .table-card {
@@ -1227,76 +1648,6 @@ const handleImportFile = async (event: Event) => {
 .table-scroll {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-
-  :deep(.common-table.el-table) {
-    --table-line-color: #d9d9d9;
-    --table-row-odd-bg: #f0f7ff;
-    --table-row-even-bg: #f5f5f5;
-    --table-row-hover-bg: #fff3cd;
-    --table-header-bg: #f5f5f5;
-
-    border: 1px solid var(--table-line-color);
-
-    .el-table__inner-wrapper::before,
-    .el-table__border-left-patch,
-    .el-table__border-right-patch {
-      background-color: var(--table-line-color);
-    }
-
-    th.el-table__cell,
-    td.el-table__cell {
-      border-color: var(--table-line-color) !important;
-      border-right: 1px solid var(--table-line-color);
-      border-bottom: 1px solid var(--table-line-color);
-    }
-
-    .el-table__header-wrapper th.el-table__cell {
-      background: var(--table-header-bg) !important;
-      color: #333;
-      font-weight: 600;
-    }
-
-    .el-table__header-wrapper th.el-table__cell .cell {
-      text-align: center;
-      justify-content: center;
-      white-space: nowrap;
-    }
-
-    .el-table__header-wrapper th.el-table__cell.is-right,
-    .el-table__body-wrapper td.el-table__cell.is-right {
-      text-align: right;
-    }
-
-    .el-table__header-wrapper th.el-table__cell.is-right .cell,
-    .el-table__body-wrapper td.el-table__cell.is-right .cell {
-      text-align: right;
-      justify-content: flex-end;
-    }
-
-    .el-table__header-wrapper th.el-table__cell.is-left .cell,
-    .el-table__body-wrapper td.el-table__cell.is-left .cell {
-      text-align: left;
-      justify-content: flex-start;
-    }
-
-    .el-table__body-wrapper td.el-table__cell.is-center .cell {
-      text-align: center !important;
-      justify-content: center;
-    }
-
-    .el-table__body-wrapper .el-table__row:nth-child(odd) > td.el-table__cell {
-      background-color: var(--table-row-odd-bg) !important;
-    }
-
-    .el-table__body-wrapper .el-table__row:nth-child(even) > td.el-table__cell {
-      background-color: var(--table-row-even-bg) !important;
-    }
-
-    .el-table__body-wrapper .el-table__row:hover > td.el-table__cell {
-      background-color: var(--table-row-hover-bg) !important;
-    }
-  }
 }
 
 .sort-header {
@@ -1374,7 +1725,7 @@ const handleImportFile = async (event: Event) => {
 }
 
 .field-selector {
-  max-height: 400px;
+  max-height: 320px;
   overflow-y: auto;
   padding: 10px 0;
 
@@ -1413,6 +1764,280 @@ const handleImportFile = async (event: Event) => {
   :deep(.el-checkbox) {
     margin-right: 0;
     margin-bottom: 8px;
+  }
+}
+
+:deep(.product-settings-dialog-wrap) {
+  .el-dialog__body {
+    padding: 10px 16px 6px;
+  }
+
+  .el-dialog__footer {
+    padding-top: 8px;
+  }
+}
+
+.product-settings-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-block {
+  padding: 8px 10px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.settings-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  min-height: 20px;
+}
+
+.settings-block-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  flex-shrink: 0;
+}
+
+.settings-block-hint {
+  font-size: 11px;
+  color: #909399;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.category-sort-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sort-zone {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.zone-label {
+  flex-shrink: 0;
+  width: 28px;
+  padding-top: 4px;
+  font-size: 11px;
+  color: #909399;
+  line-height: 20px;
+}
+
+.chip-wrap {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  min-height: 24px;
+}
+
+.sort-zone--selected {
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px dashed #dcdfe6;
+  background: #fff;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #fff;
+  font-size: 12px;
+  color: #606266;
+  cursor: pointer;
+  line-height: 1;
+  transition: border-color 0.15s, background 0.15s;
+
+  &:hover {
+    border-color: #b3d8ff;
+    background: #f5faff;
+  }
+}
+
+.chip-add {
+  padding-right: 4px;
+
+  .chip-icon {
+    font-size: 12px;
+    color: #409eff;
+  }
+}
+
+.chip-selected {
+  cursor: grab;
+  border-color: #c6e2ff;
+  background: #ecf5ff;
+  color: #303133;
+
+  .chip-order {
+    min-width: 14px;
+    font-size: 10px;
+    color: #909399;
+    text-align: center;
+  }
+
+  .chip-remove {
+    margin-left: 2px;
+    font-size: 11px;
+    color: #909399;
+    border-radius: 50%;
+    padding: 1px;
+
+    &:hover {
+      color: #f56c6c;
+      background: rgba(245, 108, 108, 0.12);
+    }
+  }
+}
+
+.chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+}
+
+.zone-empty {
+  font-size: 11px;
+  color: #c0c4cc;
+  line-height: 24px;
+}
+
+.column-grid-group {
+  width: 100%;
+}
+
+.column-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px 4px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 2px 0;
+}
+
+.column-grid-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 24px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  cursor: move;
+
+  &:hover {
+    background: rgba(64, 158, 255, 0.06);
+  }
+
+  .col-idx {
+    flex-shrink: 0;
+    width: 16px;
+    font-size: 10px;
+    color: #c0c4cc;
+    text-align: right;
+  }
+
+  :deep(.el-checkbox) {
+    height: 24px;
+    margin-right: 0;
+
+    .el-checkbox__label {
+      font-size: 12px;
+      padding-left: 6px;
+      line-height: 24px;
+    }
+  }
+}
+</style>
+
+<style lang="scss">
+/* 弹窗 teleport 到 body，scoped 无法作用在外壳，需全局样式 */
+.batch-modify-dialog-wrap.el-dialog {
+  width: 420px !important;
+  border: 1px solid #d0d5dd !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08) !important;
+  background: #fff;
+}
+
+.batch-modify-dialog-wrap .el-dialog__header {
+  margin-right: 0;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid #e4e7ec;
+  text-align: left;
+}
+
+.batch-modify-dialog-wrap .el-dialog__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1d2939;
+  text-align: left;
+}
+
+.batch-modify-dialog-wrap .el-dialog__body {
+  padding: 16px 20px 12px;
+}
+
+.batch-modify-dialog-wrap .el-dialog__footer {
+  padding: 12px 20px 16px;
+  border-top: 1px solid #e4e7ec;
+}
+
+/* 弹窗内表单：左对齐 + 单条下划线 */
+.batch-modify-dialog-wrap .batch-modify-form.list-search-form {
+  .el-form-item__label {
+    justify-content: flex-start !important;
+    text-align: left !important;
+  }
+
+  .el-input__inner,
+  .el-textarea__inner {
+    border: none !important;
+    border-bottom: none !important;
+    box-shadow: none !important;
+    background-color: transparent !important;
+  }
+
+  .el-input__wrapper,
+  .el-select__wrapper {
+    box-shadow: none !important;
+    border: none !important;
+    border-bottom: 1px solid #cbd5e1 !important;
+    border-radius: 0 !important;
+    background-color: transparent !important;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .el-input__wrapper.is-focus,
+  .el-select__wrapper.is-focused {
+    box-shadow: none !important;
+    border-bottom: 2px solid #00bfa5 !important;
+  }
+
+  .el-select .el-input__wrapper {
+    border-bottom: none !important;
+    box-shadow: none !important;
   }
 }
 </style>

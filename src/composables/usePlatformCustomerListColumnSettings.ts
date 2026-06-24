@@ -13,7 +13,7 @@ export type PlatformCustomerListColumnDef = {
 export const PLATFORM_CUSTOMER_LIST_COLUMN_DEFINITIONS: PlatformCustomerListColumnDef[] = [
   { key: 'platformStatus', label: '平台状态', prop: 'platformStatus', align: 'center', headerAlign: 'center' },
   { key: 'status', label: '状态', prop: 'status', align: 'center', headerAlign: 'center' },
-  { key: 'companyCode', label: '公司代码', prop: 'companyCode' },
+  { key: 'companyCode', label: '医享平台编号', prop: 'companyCode' },
   { key: 'companyName', label: '公司名称', prop: 'companyName', required: true },
   { key: 'companyShortName', label: '公司简称', prop: 'companyShortName' },
   { key: 'companyType', label: '三方类型', prop: 'companyType', align: 'center', headerAlign: 'center' },

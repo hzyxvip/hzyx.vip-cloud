@@ -1,11 +1,25 @@
 import type { PartnerDocument, PartnerProfileExtension } from '@/types/partnerProfile'
+import { TENANT_PLATFORM_CUSTOMER_SEED } from '@/constants/platformTenantCustomerSeed'
+import {
+  ensureStablePlatformPartnerCodes,
+  formatPlatformPartnerCode,
+  getNextPlatformPartnerCode,
+  buildUsedPlatformPartnerCodeSet,
+  rememberRetiredPlatformPartnerCodes
+} from '@/utils/partnerPlatformCode'
 
 export const PLATFORM_CUSTOMER_LIST_KEY = 'platformCustomerList'
 export const PLATFORM_CUSTOMER_DELETED_CODES_KEY = 'platformCustomerDeletedCodes'
+export const PLATFORM_CUSTOMER_DELETED_IDS_KEY = 'platformCustomerDeletedIds'
+export const PLATFORM_CUSTOMER_CODE_PREFIX = 'YY'
 
 export function normalizePlatformCustomerId(id: unknown): string {
   return String(id ?? '')
 }
+
+const TENANT_PLATFORM_CUSTOMER_IDS = TENANT_PLATFORM_CUSTOMER_SEED.map(item =>
+  normalizePlatformCustomerId(item.id)
+)
 
 export type PlatformCustomerDocument = PartnerDocument
 
@@ -48,6 +62,7 @@ export interface PlatformCustomer extends PartnerProfileExtension {
 
 export const companyTypeOptions = [
   { label: '全部', value: 'all', category: '', tripartite: '' },
+  { label: '平台运营', value: 'platform', category: '平', tripartite: '平' },
   { label: '生产企业', value: 'manufacturer', category: '产', tripartite: '产' },
   { label: '经营公司', value: 'distributor', category: '销', tripartite: '销' },
   { label: '医疗机构', value: 'hospital', category: '用', tripartite: '用' }
@@ -80,6 +95,7 @@ export function getPlatformCustomerStatusTagType(status: unknown): 'success' | '
 }
 
 export const defaultPlatformCustomers: PlatformCustomer[] = [
+  ...(TENANT_PLATFORM_CUSTOMER_SEED as PlatformCustomer[]),
   {
     id: 1,
     platformStatus: 'platformAudited',
@@ -300,6 +316,47 @@ function rememberDeletedCompanyCodes(codes: string[]): void {
   localStorage.setItem(PLATFORM_CUSTOMER_DELETED_CODES_KEY, JSON.stringify([...set]))
 }
 
+function readDeletedIds(): Set<string> {
+  const raw = localStorage.getItem(PLATFORM_CUSTOMER_DELETED_IDS_KEY)
+  if (!raw) return new Set()
+  try {
+    const parsed = JSON.parse(raw)
+    return new Set(Array.isArray(parsed) ? parsed.map(id => normalizePlatformCustomerId(id)).filter(Boolean) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function rememberDeletedIds(ids: Array<number | string>): void {
+  const normalized = ids.map(normalizePlatformCustomerId).filter(Boolean)
+  if (normalized.length === 0) return
+  const set = readDeletedIds()
+  normalized.forEach(id => set.add(id))
+  localStorage.setItem(PLATFORM_CUSTOMER_DELETED_IDS_KEY, JSON.stringify([...set]))
+}
+
+export function formatPlatformCustomerCode(sequence: number): string {
+  return formatPlatformPartnerCode(sequence)
+}
+
+export function ensurePlatformCustomerCodes(list: PlatformCustomer[]): PlatformCustomer[] {
+  return ensureStablePlatformPartnerCodes(list, {
+    getStableId: item => normalizePlatformCustomerId(item.id),
+    getCode: item => item.companyCode,
+    setCode: (item, code) => ({ ...item, companyCode: code })
+  })
+}
+
+/** @deprecated 使用 ensurePlatformCustomerCodes */
+export function assignSequentialPlatformCustomerCodes(list: PlatformCustomer[]): PlatformCustomer[] {
+  return ensurePlatformCustomerCodes(list)
+}
+
+export function getNextPlatformCustomerCode(list: PlatformCustomer[]): string {
+  const used = buildUsedPlatformPartnerCodeSet(list.map(item => item.companyCode))
+  return getNextPlatformPartnerCode(used)
+}
+
 function getOperatorName(): string {
   try {
     const user = JSON.parse(localStorage.getItem('user') || '{}')
@@ -322,27 +379,47 @@ function normalizeListItem(item: PlatformCustomer): PlatformCustomer {
   }
 }
 
+function restoreTenantSeedIfDeleted(): void {
+  const deleted = readDeletedIds()
+  let changed = false
+  TENANT_PLATFORM_CUSTOMER_IDS.forEach(id => {
+    if (deleted.delete(id)) changed = true
+  })
+  if (changed) {
+    localStorage.setItem(PLATFORM_CUSTOMER_DELETED_IDS_KEY, JSON.stringify([...deleted]))
+  }
+}
+
 export function loadPlatformCustomerList(): PlatformCustomer[] {
-  const stored = readList().map(normalizeListItem)
-  const deletedCodes = readDeletedCodes()
-  const codeSet = new Set(stored.map(item => item.companyCode).filter(Boolean))
-  const missing = defaultPlatformCustomers.filter(
-    item => item.companyCode && !codeSet.has(item.companyCode) && !deletedCodes.has(item.companyCode)
-  )
+  restoreTenantSeedIfDeleted()
+  const deletedIds = readDeletedIds()
+  const stored = readList()
+    .map(normalizeListItem)
+    .filter(item => !deletedIds.has(normalizePlatformCustomerId(item.id)))
+  const idSet = new Set(stored.map(item => normalizePlatformCustomerId(item.id)))
+  const missing = defaultPlatformCustomers.filter(item => {
+    const id = normalizePlatformCustomerId(item.id)
+    return !idSet.has(id) && !deletedIds.has(id)
+  })
   const source = stored.length > 0
     ? (missing.length ? [...missing.map(normalizeListItem), ...stored] : stored)
     : defaultPlatformCustomers.map(normalizeListItem)
 
   const normalized = source.map(normalizeListItem)
+  const withCodes = ensurePlatformCustomerCodes(normalized)
+  const shouldWrite =
+    stored.length === 0 ||
+    missing.length > 0 ||
+    withCodes.some((item, index) => item.companyCode !== normalized[index]?.companyCode)
 
-  if (stored.length === 0 || missing.length > 0) {
-    writeList(normalized)
+  if (shouldWrite) {
+    writeList(withCodes)
   }
-  return normalized
+  return withCodes
 }
 
 export function savePlatformCustomerList(list: PlatformCustomer[]): void {
-  writeList(list.map(normalizeListItem))
+  writeList(ensurePlatformCustomerCodes(list.map(normalizeListItem)))
 }
 
 export function deletePlatformCustomersByIds(ids: Array<number | string>): PlatformCustomer[] {
@@ -355,10 +432,12 @@ export function deletePlatformCustomersByIds(ids: Array<number | string>): Platf
     .map(item => item.companyCode)
     .filter(Boolean)
   rememberDeletedCompanyCodes(removedCodes)
+  rememberRetiredPlatformPartnerCodes(removedCodes)
+  rememberDeletedIds([...idSet])
 
   const next = current.filter(item => !idSet.has(normalizePlatformCustomerId(item.id)))
   savePlatformCustomerList(next)
-  return next
+  return loadPlatformCustomerList()
 }
 
 export function batchSetPlatformCustomerAuditStatus(
@@ -390,8 +469,9 @@ export function findPlatformCustomerById(id: number | string): PlatformCustomer 
 
 export function getCompanyCategory(type: string): string {
   const option = companyTypeOptions.find(item => item.value === type)
-  if (option) return option.category
+  if (option?.category) return option.category
   if (type === 'research') return '用'
+  if (type === 'platform') return '平'
   return ''
 }
 

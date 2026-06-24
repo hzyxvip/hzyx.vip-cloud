@@ -9,6 +9,14 @@ export default defineConfig({
       '@': resolve(__dirname, 'src')
     }
   },
+  css: {
+    preprocessorOptions: {
+      scss: {
+        // 使用 Sass 现代 API，消除 legacy-js-api 弃用警告
+        api: 'modern-compiler'
+      }
+    }
+  },
   server: {
     host: true,
     port: 5174,

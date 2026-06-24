@@ -2,6 +2,8 @@ import { hiprint } from 'vue-plugin-hiprint'
 import 'vue-plugin-hiprint/dist/print-lock.css'
 import { digitUppercase } from './currency'
 import { getCompanyInfo } from './companyConfig'
+import { loadPrintSettings } from './printSettings'
+import { printSalesOutboundList } from './salesOutboundListPrint'
 
 export interface PrintTemplate {
   templateId: string
@@ -16,15 +18,17 @@ export interface ProductItem {
   spec: string
   manufacturer: string
   unit: string
-  quantity: number
-  unitPrice: number
-  amount: number
+  quantity: number | string
+  unitPrice: number | string
+  amount: number | string
   batchNo: string
   productionDate: string
   expiryDate: string
   registrationNo: string
   productionLicenseNo: string
   storageCondition: string
+  sterilizationBatchNo?: string
+  auxiliaryQty?: string
 }
 
 export interface SalesOutboundData {
@@ -32,6 +36,7 @@ export interface SalesOutboundData {
   companyAddress: string
   companyPhone: string
   deliveryDate: string
+  salesDate?: string
   buyerName: string
   buyerAddress: string
   buyerPhone: string
@@ -39,6 +44,12 @@ export interface SalesOutboundData {
   warehouseName: string
   receiver: string
   receiverPhone: string
+  licenseNo?: string
+  salesperson?: string
+  shipAddress?: string
+  receiveAddress?: string
+  signPerson?: string
+  storageConditionText?: string
   items: ProductItem[]
   totalAmount: number
   qualityStatus: string
@@ -1504,6 +1515,40 @@ export const createSalesOrderTemplate = (): PrintTemplate => {
   }
 }
 
+export const printSalesOutbound = (data: SalesOutboundData, previewMode = false) => {
+  prepareSalesOutboundPrintData(data)
+  const settings = loadPrintSettings()
+  if (settings.salesOutboundPrintStyle === 'list') {
+    printSalesOutboundList(data, previewMode)
+    return
+  }
+  if (previewMode) {
+    preview('salesOutbound', data)
+    return
+  }
+  print('salesOutbound', data)
+}
+
+function prepareSalesOutboundPrintData(data: SalesOutboundData) {
+  const companyInfo = getCompanyInfo()
+  const printSettings = loadPrintSettings()
+  if (printSettings.showCompanyHeader) {
+    data.companyName = data.companyName || companyInfo.name
+    data.companyAddress = data.companyAddress || companyInfo.address
+    data.companyPhone = data.companyPhone || companyInfo.phone
+  }
+  data.licenseNo = data.licenseNo || companyInfo.medicalDeviceLicense
+  data.shipAddress = data.shipAddress || companyInfo.address
+  if (printSettings.footerRemark) {
+    data.storageConditionText = data.storageConditionText
+      ? `${data.storageConditionText}\n${printSettings.footerRemark}`
+      : printSettings.footerRemark
+  }
+  if (data.totalAmount) {
+    ;(data as Record<string, unknown>).totalAmountUppercase = digitUppercase(data.totalAmount)
+  }
+}
+
 export const print = (templateId: string, data: any) => {
   const printTemplate = getTemplate(templateId)
   if (!printTemplate) {
@@ -1512,9 +1557,18 @@ export const print = (templateId: string, data: any) => {
 
   // 使用全局配置填充公司信息
   const companyInfo = getCompanyInfo()
-  data.companyName = data.companyName || companyInfo.name
-  data.companyAddress = data.companyAddress || companyInfo.address
-  data.companyPhone = data.companyPhone || companyInfo.phone
+  const printSettings = loadPrintSettings()
+  if (printSettings.showCompanyHeader) {
+    data.companyName = data.companyName || companyInfo.name
+    data.companyAddress = data.companyAddress || companyInfo.address
+    data.companyPhone = data.companyPhone || companyInfo.phone
+  }
+  if (printSettings.footerRemark) {
+    data.footerRemark = printSettings.footerRemark
+  }
+  if (printSettings.showAuditSeal === false) {
+    data.hideAuditSeal = true
+  }
 
   if (data.totalAmount) {
     data.totalAmountUppercase = digitUppercase(data.totalAmount)
@@ -1542,9 +1596,18 @@ export const preview = (templateId: string, data: any) => {
 
   // 使用全局配置填充公司信息
   const companyInfo = getCompanyInfo()
-  data.companyName = data.companyName || companyInfo.name
-  data.companyAddress = data.companyAddress || companyInfo.address
-  data.companyPhone = data.companyPhone || companyInfo.phone
+  const printSettings = loadPrintSettings()
+  if (printSettings.showCompanyHeader) {
+    data.companyName = data.companyName || companyInfo.name
+    data.companyAddress = data.companyAddress || companyInfo.address
+    data.companyPhone = data.companyPhone || companyInfo.phone
+  }
+  if (printSettings.footerRemark) {
+    data.footerRemark = printSettings.footerRemark
+  }
+  if (printSettings.showAuditSeal === false) {
+    data.hideAuditSeal = true
+  }
 
   if (data.totalAmount) {
     data.totalAmountUppercase = digitUppercase(data.totalAmount)

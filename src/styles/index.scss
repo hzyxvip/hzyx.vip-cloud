@@ -450,6 +450,46 @@ h1, h2, h3, h4, h5, h6 {
   }
 }
 
+/* 列表页查询区：每种控件只保留一条底边线，避免 wrapper + inner 双线 */
+.list-search-form,
+.search-card .search-form {
+  .el-input__wrapper,
+  .el-textarea__wrapper,
+  .el-select__wrapper,
+  .el-date-editor.el-input__wrapper,
+  .el-date-picker__wrapper {
+    box-shadow: none !important;
+    border: none !important;
+    border-bottom: 1px solid $border-input !important;
+    border-radius: 0 !important;
+    background-color: transparent !important;
+  }
+
+  .el-input__wrapper.is-focus,
+  .el-textarea__wrapper.is-focus,
+  .el-select__wrapper.is-focused,
+  .el-date-editor.el-input__wrapper.is-active {
+    box-shadow: none !important;
+    border-bottom: 2px solid $primary-color !important;
+  }
+
+  .el-input__inner,
+  .el-textarea__inner,
+  .el-range-input,
+  .el-range-separator {
+    border: none !important;
+    border-bottom: none !important;
+    box-shadow: none !important;
+    background-color: transparent !important;
+  }
+
+  .el-select .el-input__wrapper,
+  .el-date-editor .el-input__wrapper {
+    border-bottom: none !important;
+    box-shadow: none !important;
+  }
+}
+
 .el-input--mini .el-input__inner,
 .el-select--mini .el-select__wrapper {
   height: 28px;
@@ -717,17 +757,66 @@ h1, h2, h3, h4, h5, h6 {
 
 // 商品联想下拉：解除 Element Plus 默认单行省略，避免多列内容叠压看不清
 .product-suggest-popper {
+  --product-suggest-line: #d9d9d9;
+
+  border: 1px solid var(--product-suggest-line) !important;
+  box-sizing: border-box;
+  overflow: hidden;
+
+  .el-autocomplete-suggestion__header {
+    padding: 0 !important;
+    margin: 0;
+    border-bottom: 1px solid var(--product-suggest-line);
+  }
+
   .el-autocomplete-suggestion li {
     overflow: visible !important;
     white-space: normal !important;
     text-overflow: clip !important;
     color: $text-primary !important;
+    padding: 0 !important;
 
     &:hover,
     &.highlighted {
-      background-color: #e6f4ff !important;
+      background-color: #fff3cd !important;
       color: $text-primary !important;
     }
+  }
+
+  .product-suggest-item {
+    column-gap: 0 !important;
+    padding: 0 !important;
+    border-bottom: 1px solid var(--product-suggest-line);
+
+    > span {
+      padding: 6px 8px;
+      border-right: 1px solid var(--product-suggest-line);
+      min-height: 30px;
+      display: flex;
+      align-items: center;
+      box-sizing: border-box;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+
+      &:last-child {
+        border-right: none;
+      }
+
+      &.is-num {
+        justify-content: flex-end;
+        text-align: right;
+      }
+    }
+
+    &.is-header {
+      background: $table-header-bg !important;
+      font-weight: 600;
+    }
+  }
+
+  .el-autocomplete-suggestion li:last-child .product-suggest-item {
+    border-bottom: none;
   }
 
   .product-suggest-item {

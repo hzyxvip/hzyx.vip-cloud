@@ -23,7 +23,14 @@ import {
   showComplianceResult
 } from '@/utils/complianceService'
 import { getPurchaseOrders, onPurchaseInboundAudited } from '@/utils/platformCollaborationService'
+import { useDocumentConfirm } from '@/composables/useDocumentConfirm'
+import { CONFIRM_STATUS_CONFIRMED, CONFIRM_STATUS_UNCONFIRMED, normalizeConfirmStatus } from '@/utils/documentFunctionSettings'
 import { locations } from '@/utils/dataStore'
+import {
+  activeWarehouseOptions,
+  refreshWarehouseOptions,
+  resolveWarehouseLabel as resolveWarehouseLabelFromSettings
+} from '@/utils/warehouseSettings'
 import {
   arrowKeyToDirection,
   findFieldKeyFromElement,
@@ -41,11 +48,41 @@ import {
   scheduleAfterSelectClose,
   shouldNavigateOnArrow as shouldNavigateOnArrowBase
 } from '@/utils/erpFormKeyboard'
+import {
+  loadBatchNoFormat,
+  saveBatchNoFormat,
+  applyProductionDateToItemRow,
+  markBatchNoManual,
+  markExpiryManual,
+  reapplyBatchNoFormatToItems,
+  type BatchNoFormat
+} from '@/utils/productBatchExpiry'
+import BatchNoFormatPicker from '@/components/common/BatchNoFormatPicker.vue'
+import BatchNoCell from '@/components/common/BatchNoCell.vue'
 
 const router = useRouter()
 const route = useRoute()
 
 const INBOUND_STORAGE_KEY = 'purchaseInboundList'
+
+const paymentAccountOptions = [
+  { label: '基本户-工商银行', value: 'icbc' },
+  { label: '一般户-建设银行', value: 'ccb' },
+  { label: '现金账户', value: 'cash' }
+]
+
+const paymentMethodOptions = [
+  { label: '银行转账', value: 'transfer' },
+  { label: '现金', value: 'cash' },
+  { label: '承兑汇票', value: 'acceptance' },
+  { label: '月结', value: 'monthly' }
+]
+
+const prepaymentStatusLabels: Record<string, string> = {
+  prepaidNotAudited: '已预付未审核',
+  prepaidPartiallyAudited: '已审核部分核销',
+  prepaidAudited: '已审核已核销'
+}
 
 interface InboundItem {
   productCode: string
@@ -58,8 +95,11 @@ interface InboundItem {
   warehouseName?: string
   locationCode?: string
   locationName?: string
+  productionDate?: string
   batchNo?: string
   expireDate?: string
+  _batchNoManual?: boolean
+  _expiryManual?: boolean
   unit: string
   quantity: number | string
   price: number | string
@@ -81,7 +121,7 @@ type ItemColumnDef = {
 const DEFAULT_ITEM_COLUMN_KEYS = [
   'productCode', 'productName', 'spec', 'manufacturer', 'brand', 'registrant',
   'warehouseName', 'locationName',
-  'batchNo', 'expiryDate', 'unit', 'quantity', 'price', 'amount', 'remark'
+  'productionDate', 'batchNo', 'expiryDate', 'unit', 'quantity', 'price', 'amount', 'remark'
 ]
 
 const ITEM_COLUMN_DEFINITIONS: ItemColumnDef[] = [
@@ -93,6 +133,7 @@ const ITEM_COLUMN_DEFINITIONS: ItemColumnDef[] = [
   { key: 'registrant', label: '注册人/备案人', prop: 'registrant', align: 'center', overflow: true },
   { key: 'warehouseName', label: '仓库', prop: 'warehouseName', align: 'center' },
   { key: 'locationName', label: '库位', prop: 'locationName', align: 'center' },
+  { key: 'productionDate', label: '生产日期', prop: 'productionDate', align: 'center' },
   { key: 'batchNo', label: '批号', prop: 'batchNo', align: 'center' },
   { key: 'expiryDate', label: '有效期至', prop: 'expireDate', align: 'center' },
   { key: 'unit', label: '单位', prop: 'unit', align: 'center', required: true },
@@ -149,22 +190,10 @@ const HEADER_FIELD_DEFINITIONS: HeaderFieldOption[] = [
   { key: 'createTime', label: '制单时间', type: 'datetime', disabled: true }
 ]
 
-const warehouseOptions = [
-  { label: '北京仓库', value: 'beijing', code: 'WH001' },
-  { label: '上海仓库', value: 'shanghai', code: 'WH002' },
-  { label: '广州仓库', value: 'guangzhou', code: 'WH003' },
-  { label: '深圳仓库', value: 'shenzhen', code: 'WH004' }
-]
-
-const warehouseLabels: Record<string, string> = {
-  beijing: '北京仓库',
-  shanghai: '上海仓库',
-  guangzhou: '广州仓库',
-  shenzhen: '深圳仓库'
-}
+const warehouseOptions = activeWarehouseOptions
 
 const resolveWarehouseName = (warehouseVal: string) =>
-  warehouseLabels[warehouseVal] || warehouseOptions.find(w => w.value === warehouseVal)?.label || warehouseVal
+  resolveWarehouseLabelFromSettings(warehouseVal) || warehouseVal
 
 const getRowLocations = (warehouseVal: string) => {
   if (!warehouseVal) return []
@@ -332,7 +361,7 @@ const supplierOptions = computed(() => {
 const getOptions = (optionsKey?: string) => {
   if (optionsKey === 'orderOptions') return orderOptions.value
   if (optionsKey === 'supplierOptions') return supplierOptions.value
-  if (optionsKey === 'warehouseOptions') return warehouseOptions
+  if (optionsKey === 'warehouseOptions') return warehouseOptions.value
   return []
 }
 
@@ -340,6 +369,7 @@ const isEdit = ref(false)
 const inboundId = ref('')
 const basicInfoCollapsed = ref(false)
 const itemsCollapsed = ref(false)
+const batchNoFormat = ref<BatchNoFormat>(loadBatchNoFormat())
 const amountInfoCollapsed = ref(false)
 const logisticsCollapsed = ref(false)
 
@@ -489,6 +519,10 @@ const initItemColumnConfig = () => {
     const idx = visibleKeys.indexOf(afterKey)
     visibleKeys.splice(idx >= 0 ? idx + 1 : visibleKeys.length, 0, 'warehouseName', 'locationName')
   }
+  if (!visibleKeys.includes('productionDate')) {
+    const batchIdx = visibleKeys.indexOf('batchNo')
+    visibleKeys.splice(batchIdx >= 0 ? batchIdx : visibleKeys.length, 0, 'productionDate')
+  }
   const ordered = orderKeys
     .map(key => ITEM_COLUMN_DEFINITIONS.find(c => c.key === key))
     .filter(Boolean) as ItemColumnDef[]
@@ -553,6 +587,7 @@ const { columnWidths: itemColumnWidths, handleHeaderDragend: handleItemsHeaderDr
   { key: 'registrant', label: '注册人/备案人', defaultWidth: 140 },
   { key: 'warehouseName', label: '仓库', defaultWidth: 120 },
   { key: 'locationName', label: '库位', defaultWidth: 120 },
+  { key: 'productionDate', label: '生产日期', defaultWidth: 100 },
   { key: 'batchNo', label: '批号', defaultWidth: 110 },
   { key: 'expiryDate', label: '有效期至', defaultWidth: 100 },
   { key: 'unit', label: '单位', defaultWidth: 64 },
@@ -608,6 +643,7 @@ const createEmptyItemRow = (): InboundItem => {
     warehouseName: resolveWarehouseName(wh),
     locationCode: '',
     locationName: '',
+    productionDate: '',
     batchNo: '',
     expireDate: '',
     unit: '',
@@ -647,8 +683,14 @@ const form = ref({
   freight: 0,
   discountRate: 0,
   discountAmount: 0,
-  taxRate: 13,
   paidAmount: 0,
+  paymentAccount: '',
+  paymentMethod: '',
+  depositRatio: 0,
+  prepaidDeposit: 0,
+  currentPaymentAmount: 0,
+  enablePreDeduction: false,
+  prepaymentStatus: '',
   remark: '',
   logisticsCompany: '',
   logisticsNo: '',
@@ -661,12 +703,31 @@ const form = ref({
   relatedOrderExecuteStatus: '',
   relatedOrderWarehouseStatus: '',
   auditStatus: 'notAudited' as 'notAudited' | 'audited',
+  confirmStatus: CONFIRM_STATUS_UNCONFIRMED,
   auditor: '',
   auditTime: '',
   createTime: '',
   status: 'draft' as string,
   items: [] as InboundItem[]
 })
+
+const {
+  confirmEnabled: purchaseInboundConfirmEnabled,
+  canConfirm: canConfirmPurchaseInbound,
+  handleConfirm: handleConfirmPurchaseInbound,
+  requireConfirmedBeforeAudit: requirePurchaseInboundConfirmed,
+  resetConfirmStatus: resetPurchaseInboundConfirm,
+  autoConfirmIfNeeded: autoConfirmPurchaseInboundIfNeeded
+} = useDocumentConfirm(
+  'purchase_inbound',
+  () => form.value.confirmStatus,
+  value => { form.value.confirmStatus = value },
+  {
+    permissionCode: 'purchase_inbound_confirm',
+    validate: () => validateForm(),
+    onPersist: () => persistInbound(form.value.status || 'draft')
+  }
+)
 
 const applyDefaultLocationToRow = (row: InboundItem) => {
   const locs = getRowLocations(row.warehouse || form.value.warehouse)
@@ -685,17 +746,15 @@ const subTotalAmount = computed(() =>
   form.value.items.reduce((sum, item) => sum + Number(item.amount || 0), 0)
 )
 
-const totalTaxAmount = computed(() => subTotalAmount.value * (form.value.taxRate / 100))
-
-const totalWithTax = computed(() =>
-  subTotalAmount.value + totalTaxAmount.value + form.value.freight - form.value.discountAmount
+const totalAmount = computed(() =>
+  subTotalAmount.value + form.value.freight - form.value.discountAmount
 )
 
 const totalQuantity = computed(() =>
   form.value.items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)
 )
 
-const unpaidAmount = computed(() => totalWithTax.value - form.value.paidAmount)
+const unpaidAmount = computed(() => totalAmount.value - form.value.paidAmount)
 
 const findPurchaseOrder = (orderNo: string) =>
   purchaseOrders.value.find(
@@ -719,10 +778,38 @@ const updateRelatedOrderInfo = () => {
     orderWarehouseStatusMap[String(po.warehouseStatus || '')] || String(po.warehouseStatus || '')
 }
 
+const clearPurchaseOrderPrepaymentInfo = () => {
+  form.value.discountRate = 0
+  form.value.discountAmount = 0
+  form.value.paymentAccount = ''
+  form.value.paymentMethod = ''
+  form.value.depositRatio = 0
+  form.value.prepaidDeposit = 0
+  form.value.currentPaymentAmount = 0
+  form.value.enablePreDeduction = false
+  form.value.prepaymentStatus = ''
+  form.value.paidAmount = 0
+}
+
+const applyPurchaseOrderPrepaymentFromPo = (po: Record<string, unknown>) => {
+  form.value.discountRate = Number(po.discountRate) || 0
+  form.value.discountAmount = Number(po.discountAmount) || 0
+  form.value.paymentAccount = String(po.paymentAccount || '')
+  form.value.paymentMethod = String(po.paymentMethod || '')
+  form.value.depositRatio = Number(po.depositRatio) || 0
+  form.value.prepaidDeposit = Number(po.prepaidDeposit) || 0
+  form.value.currentPaymentAmount = Number(po.currentPaymentAmount) || 0
+  form.value.enablePreDeduction = po.enablePreDeduction === true
+  form.value.prepaymentStatus = String(po.prepaymentStatus || '')
+  const prepaid = Number(po.prepaidDeposit) || 0
+  const currentPay = Number(po.currentPaymentAmount) || 0
+  form.value.paidAmount = prepaid > 0 ? prepaid : currentPay
+}
+
 const mapOrderItemToInboundItem = (row: Record<string, unknown>): InboundItem => {
   const qty = Number(row.quantity) || 0
   const price = Number(row.unitPrice ?? row.lastPrice ?? row.price ?? 0)
-  const amount = Number(row.amount ?? row.taxIncludedAmount ?? qty * price)
+  const amount = Number(row.amount ?? qty * price)
   const warehouse = String(row.warehouse || form.value.warehouse || '')
   const item: InboundItem = {
     productCode: String(row.productCode || ''),
@@ -735,6 +822,7 @@ const mapOrderItemToInboundItem = (row: Record<string, unknown>): InboundItem =>
     warehouseName: String(row.warehouseName || resolveWarehouseName(warehouse)),
     locationCode: String(row.locationCode || ''),
     locationName: String(row.locationName || ''),
+    productionDate: String(row.productionDate || ''),
     batchNo: String(row.batchNo || ''),
     expireDate: String(row.expiryDate || row.expireDate || ''),
     unit: String(row.unit || ''),
@@ -754,6 +842,26 @@ const applyLocalProductToItem = (target: InboundItem, product: ProductMaster) =>
   target.manufacturer = product.manufacturer || target.manufacturer || ''
   target.brand = product.brand || target.brand || ''
   target.registrant = product.registrant || target.registrant || ''
+  if (target.productionDate) {
+    applyProductionDateToItemRow(target as Record<string, any>, product, batchNoFormat.value)
+  }
+}
+
+const handleBatchNoFormatChange = (format: BatchNoFormat) => {
+  saveBatchNoFormat(format)
+  reapplyBatchNoFormatToItems(form.value.items as Record<string, any>[], format)
+}
+
+const handleProductionDateChange = (row: InboundItem) => {
+  applyProductionDateToItemRow(row as Record<string, any>, undefined, batchNoFormat.value)
+}
+
+const handleBatchNoInput = (row: InboundItem) => {
+  markBatchNoManual(row as Record<string, any>, batchNoFormat.value)
+}
+
+const handleExpiryDateChange = (row: InboundItem) => {
+  markExpiryManual(row as Record<string, any>)
 }
 
 const buildItemProductSearchQuery = (item: Record<string, unknown>): string => {
@@ -1175,6 +1283,7 @@ const handleOrderNoChange = (val: string) => {
   if (po) {
     form.value.supplier = String(po.supplier || '')
     form.value.supplierCode = String(po.supplierCode || '')
+    applyPurchaseOrderPrepaymentFromPo(po)
     if (po.warehouse) {
       form.value.warehouse = String(po.warehouse)
       handleWarehouseChange(form.value.warehouse)
@@ -1191,6 +1300,7 @@ const handleOrderNoChange = (val: string) => {
   }
   form.value.supplier = ''
   form.value.supplierCode = ''
+  clearPurchaseOrderPrepaymentInfo()
   form.value.relatedOrderStatus = ''
   form.value.relatedOrderAuditStatus = ''
   form.value.relatedOrderExecuteStatus = ''
@@ -1198,7 +1308,7 @@ const handleOrderNoChange = (val: string) => {
 }
 
 const handleWarehouseChange = (val: string) => {
-  const warehouse = warehouseOptions.find(w => w.value === val)
+  const warehouse = warehouseOptions.value.find(w => w.value === val)
   form.value.warehouseCode = warehouse?.code || ''
   form.value.items.forEach(item => {
     item.warehouse = val
@@ -1327,11 +1437,16 @@ const buildInboundData = (status: string, validItems: InboundItem[]) => ({
   freight: form.value.freight,
   discountRate: form.value.discountRate,
   discountAmount: form.value.discountAmount,
-  taxRate: form.value.taxRate,
-  taxAmount: totalTaxAmount.value,
-  totalAmount: totalWithTax.value,
+  totalAmount: totalAmount.value,
   paidAmount: form.value.paidAmount,
-  unpaidAmount: totalWithTax.value - form.value.paidAmount,
+  unpaidAmount: totalAmount.value - form.value.paidAmount,
+  paymentAccount: form.value.paymentAccount,
+  paymentMethod: form.value.paymentMethod,
+  depositRatio: form.value.depositRatio,
+  prepaidDeposit: form.value.prepaidDeposit,
+  currentPaymentAmount: form.value.currentPaymentAmount,
+  enablePreDeduction: form.value.enablePreDeduction,
+  prepaymentStatus: form.value.prepaymentStatus,
   remark: form.value.remark,
   logisticsCompany: form.value.logisticsCompany,
   logisticsNo: form.value.logisticsNo,
@@ -1343,8 +1458,9 @@ const buildInboundData = (status: string, validItems: InboundItem[]) => ({
   subTotalAmount: subTotalAmount.value,
   totalQuantity: totalQuantity.value,
   itemCount: `${validItems.length}种`,
-  amount: totalWithTax.value.toFixed(2),
+  amount: totalAmount.value.toFixed(2),
   auditStatus: form.value.auditStatus,
+  confirmStatus: form.value.confirmStatus,
   auditor: form.value.auditor,
   auditTime: form.value.auditTime,
   createTime: form.value.createTime || formatLocalDateTime(),
@@ -1394,8 +1510,14 @@ const applyInboundToForm = (record: Record<string, unknown>) => {
     freight: Number(record.freight) || 0,
     discountRate: Number(record.discountRate) || 0,
     discountAmount: Number(record.discountAmount) || 0,
-    taxRate: Number(record.taxRate) || 13,
     paidAmount: Number(record.paidAmount) || 0,
+    paymentAccount: String(record.paymentAccount || ''),
+    paymentMethod: String(record.paymentMethod || ''),
+    depositRatio: Number(record.depositRatio) || 0,
+    prepaidDeposit: Number(record.prepaidDeposit) || 0,
+    currentPaymentAmount: Number(record.currentPaymentAmount) || 0,
+    enablePreDeduction: record.enablePreDeduction === true,
+    prepaymentStatus: String(record.prepaymentStatus || ''),
     remark: String(record.remark || ''),
     logisticsCompany: String(record.logisticsCompany || ''),
     logisticsNo: String(record.logisticsNo || ''),
@@ -1408,6 +1530,7 @@ const applyInboundToForm = (record: Record<string, unknown>) => {
     relatedOrderExecuteStatus: '',
     relatedOrderWarehouseStatus: '',
     auditStatus: record.auditStatus === 'audited' ? 'audited' : 'notAudited',
+    confirmStatus: normalizeConfirmStatus(record.confirmStatus),
     auditor: String(record.auditor || ''),
     auditTime: String(record.auditTime || ''),
     createTime: String(record.createTime || ''),
@@ -1434,8 +1557,14 @@ const resetForm = () => {
     freight: 0,
     discountRate: 0,
     discountAmount: 0,
-    taxRate: 13,
     paidAmount: 0,
+    paymentAccount: '',
+    paymentMethod: '',
+    depositRatio: 0,
+    prepaidDeposit: 0,
+    currentPaymentAmount: 0,
+    enablePreDeduction: false,
+    prepaymentStatus: '',
     remark: '',
     logisticsCompany: '',
     logisticsNo: '',
@@ -1448,6 +1577,7 @@ const resetForm = () => {
     relatedOrderExecuteStatus: '',
     relatedOrderWarehouseStatus: '',
     auditStatus: 'notAudited',
+    confirmStatus: CONFIRM_STATUS_UNCONFIRMED,
     auditor: '',
     auditTime: '',
     createTime: formatLocalDateTime(),
@@ -1468,6 +1598,22 @@ const handleSaveAndNew = () => {
   handleSave()
   resetForm()
   syncItemsTableLayout()
+}
+
+const confirmStatusTagType = computed(() =>
+  form.value.confirmStatus === CONFIRM_STATUS_CONFIRMED ? 'success' : 'warning'
+)
+
+const handleSaveAndAudit = () => {
+  if (!validateForm()) return
+  if (form.value.auditStatus === 'audited') {
+    ElMessage.info('入库单已审核')
+    return
+  }
+  if (!form.value.inboundNo) form.value.inboundNo = `PIN${Date.now()}`
+  persistInbound('draft')
+  if (!autoConfirmPurchaseInboundIfNeeded()) return
+  handleAuditToggle()
 }
 
 const handleSubmit = () => {
@@ -1492,6 +1638,7 @@ const handleAuditToggle = () => {
       form.value.auditStatus = 'notAudited'
       form.value.auditor = ''
       form.value.auditTime = ''
+      resetPurchaseInboundConfirm()
       if (form.value.status === 'completed' || form.value.status === 'processing') {
         form.value.status = 'pending'
       }
@@ -1500,6 +1647,7 @@ const handleAuditToggle = () => {
     }).catch(() => {})
     return
   }
+  if (!requirePurchaseInboundConfirmed()) return
   ElMessageBox.confirm('确定要审核该采购入库单吗？', '审核确认', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
@@ -1546,13 +1694,13 @@ const buildPrintData = () => ({
     unitPrice: Number(row.price),
     amount: Number(row.amount),
     batchNo: row.batchNo || '',
-    productionDate: '',
+    productionDate: row.productionDate || '',
     expiryDate: row.expireDate || '',
     registrationNo: '',
     productionLicenseNo: '',
     storageCondition: ''
   })),
-  totalAmount: totalWithTax.value,
+  totalAmount: totalAmount.value,
   qualityStatus: '合格'
 })
 
@@ -1591,6 +1739,7 @@ const handleMore = (command: string) => {
 }
 
 onMounted(() => {
+  refreshWarehouseOptions()
   refreshProductList()
   form.value.date = new Date().toISOString().slice(0, 10)
   form.value.createTime = formatLocalDateTime()
@@ -1655,16 +1804,36 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
     <div class="page-title-bar">
       <div class="title-left">
         <h2>采购入库单</h2>
-        <div class="audit-badge" v-if="form.auditStatus === 'audited'">
-          <el-tag type="danger" effect="plain" size="small" class="audit-tag-seal">已审核</el-tag>
-          <span v-if="form.auditor || form.auditTime" class="audit-meta">
-            {{ form.auditor }}<template v-if="form.auditor && form.auditTime"> · </template>{{ form.auditTime }}
-          </span>
+        <div class="status-badges">
+          <div v-if="purchaseInboundConfirmEnabled" class="audit-badge">
+            <el-tag :type="confirmStatusTagType" effect="plain" size="small">
+              {{ form.confirmStatus || CONFIRM_STATUS_UNCONFIRMED }}
+            </el-tag>
+          </div>
+          <div v-if="form.auditStatus === 'audited'" class="audit-badge">
+            <el-tag type="danger" effect="plain" size="small" class="audit-tag-seal">已审核</el-tag>
+            <span v-if="form.auditor || form.auditTime" class="audit-meta">
+              {{ form.auditor }}<template v-if="form.auditor && form.auditTime"> · </template>{{ form.auditTime }}
+            </span>
+          </div>
         </div>
       </div>
       <div class="title-actions">
         <el-button type="primary" size="small" @click="handleSave">保存</el-button>
+        <el-button
+          type="primary"
+          size="small"
+          plain
+          :disabled="form.auditStatus === 'audited'"
+          @click="handleSaveAndAudit"
+        >保存并审核</el-button>
         <el-button type="primary" size="small" plain @click="handleSaveAndNew">保存并新增</el-button>
+        <el-button
+          v-if="canConfirmPurchaseInbound"
+          size="small"
+          type="success"
+          @click="handleConfirmPurchaseInbound"
+        >确定</el-button>
         <el-button
           size="small"
           :type="form.auditStatus === 'audited' ? 'warning' : 'success'"
@@ -1853,6 +2022,7 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
       <div class="section-body items-section" v-show="!itemsCollapsed">
         <div class="items-toolbar">
           <p class="product-query-hint">商品查询：编码、名称、规格、厂家，空格隔开，不限顺序。</p>
+          <BatchNoFormatPicker v-model="batchNoFormat" @change="handleBatchNoFormatChange" />
           <div class="toolbar-right">
             <el-button size="small" plain @click="openBatchAdd">批量选择</el-button>
             <el-button size="small" plain @click="addItem">添加行</el-button>
@@ -2098,7 +2268,27 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
                   @change="calcRowAmount(row)"
                 />
                 <span v-else-if="col.key === 'amount'" class="amount-text">{{ formatMoney(row.amount) }}</span>
-                <el-input v-else-if="col.key === 'batchNo'" v-model="row.batchNo" size="small" />
+                <div
+                  v-else-if="col.key === 'productionDate'"
+                  class="cell-date-wrap"
+                  @keydown.capture="(e: KeyboardEvent) => handleItemDateKeydown(e, row, 'productionDate')"
+                >
+                  <el-date-picker
+                    v-model="row.productionDate"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                    size="small"
+                    class="cell-date"
+                    @change="handleProductionDateChange(row)"
+                  />
+                </div>
+                <BatchNoCell
+                  v-else-if="col.key === 'batchNo'"
+                  :row="row"
+                  :global-format="batchNoFormat"
+                  @format-change="handleProductionDateChange(row)"
+                  @batch-input="handleBatchNoInput(row)"
+                />
                 <div
                   v-else-if="col.key === 'expiryDate'"
                   class="cell-date-wrap"
@@ -2111,6 +2301,7 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
                     size="small"
                     class="cell-date"
                     clearable
+                    @change="handleExpiryDateChange(row)"
                   />
                 </div>
                 <el-input v-else-if="col.key === 'remark'" v-model="row.remark" size="small" maxlength="200" />
@@ -2124,7 +2315,7 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
             <span>金额合计：<strong>{{ formatMoney(subTotalAmount) }}</strong></span>
           </div>
           <div class="summary-right">
-            价税合计：<strong class="highlight-amount">{{ formatMoney(totalWithTax) }}</strong>
+            金额合计：<strong class="highlight-amount">{{ formatMoney(totalAmount) }}</strong>
           </div>
         </div>
       </div>
@@ -2138,16 +2329,8 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
       <div class="section-body" v-show="!amountInfoCollapsed">
         <div class="form-grid">
           <div class="form-field">
-            <label>不含税金额</label>
+            <label>明细金额</label>
             <el-input :model-value="formatMoney(subTotalAmount)" size="small" disabled />
-          </div>
-          <div class="form-field">
-            <label>税率(%)</label>
-            <el-input-number v-model="form.taxRate" :min="0" :max="100" :precision="2" :controls="false" size="small" style="width: 100%;" />
-          </div>
-          <div class="form-field">
-            <label>税额</label>
-            <el-input :model-value="formatMoney(totalTaxAmount)" size="small" disabled />
           </div>
           <div class="form-field">
             <label>运费</label>
@@ -2162,8 +2345,8 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
             <el-input-number v-model="form.discountAmount" :min="0" :precision="2" :controls="false" size="small" style="width: 100%;" />
           </div>
           <div class="form-field">
-            <label>价税合计</label>
-            <el-input :model-value="formatMoney(totalWithTax)" size="small" disabled />
+            <label>金额合计</label>
+            <el-input :model-value="formatMoney(totalAmount)" size="small" disabled />
           </div>
           <div class="form-field">
             <label>已付金额</label>
@@ -2172,6 +2355,92 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
           <div class="form-field">
             <label>未付金额</label>
             <el-input :model-value="formatMoney(unpaidAmount)" size="small" disabled />
+          </div>
+        </div>
+        <div class="prepayment-section">
+          <div class="prepayment-section-title">预付款信息</div>
+          <div class="form-grid">
+            <div class="form-field">
+              <label>预付单据状态</label>
+              <el-input
+                :model-value="prepaymentStatusLabels[form.prepaymentStatus] || '-'"
+                size="small"
+                disabled
+              />
+            </div>
+            <div class="form-field">
+              <label>订金比率(%)</label>
+              <el-input-number
+                v-model="form.depositRatio"
+                :min="0"
+                :max="100"
+                :precision="2"
+                :controls="false"
+                size="small"
+                style="width: 100%;"
+              />
+            </div>
+            <div class="form-field">
+              <label>付款账户</label>
+              <el-select
+                v-model="form.paymentAccount"
+                default-first-option
+                size="small"
+                placeholder="请选择"
+                style="width: 100%;"
+                clearable
+              >
+                <el-option
+                  v-for="opt in paymentAccountOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+            </div>
+            <div class="form-field">
+              <label>付款方式</label>
+              <el-select
+                v-model="form.paymentMethod"
+                default-first-option
+                size="small"
+                placeholder="请选择"
+                style="width: 100%;"
+                clearable
+              >
+                <el-option
+                  v-for="opt in paymentMethodOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+            </div>
+            <div class="form-field">
+              <label>本次付款金额</label>
+              <el-input-number
+                v-model="form.currentPaymentAmount"
+                :min="0"
+                :precision="2"
+                :controls="false"
+                size="small"
+                style="width: 100%;"
+              />
+            </div>
+            <div class="form-field">
+              <label>预付定金</label>
+              <div class="prepay-row">
+                <el-input-number
+                  v-model="form.prepaidDeposit"
+                  :min="0"
+                  :precision="2"
+                  :controls="false"
+                  size="small"
+                  style="flex: 1;"
+                />
+                <el-checkbox v-model="form.enablePreDeduction" size="small">预付抵扣</el-checkbox>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -2353,6 +2622,13 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
     margin: 0;
   }
 
+  .status-badges {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   .audit-badge {
     display: flex;
     align-items: center;
@@ -2508,6 +2784,31 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
       padding: 4px 0;
     }
   }
+}
+
+.prepayment-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed #e4e7ed;
+
+  .prepayment-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #344054;
+    margin-bottom: 12px;
+  }
+
+  .prepay-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+}
+
+.batch-cell-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .items-toolbar {
@@ -3027,16 +3328,14 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
   .product-suggest-item {
     display: grid;
     grid-template-columns: var(--product-suggest-cols);
-    column-gap: 8px;
-    align-items: center;
+    column-gap: 0;
+    align-items: stretch;
     width: 100%;
     box-sizing: border-box;
-    padding: 6px 10px;
     font-size: 12px;
     color: #333;
 
     &.is-header {
-      padding: 7px 10px;
       background: #f5f7fa;
       font-weight: 600;
       color: #606266;

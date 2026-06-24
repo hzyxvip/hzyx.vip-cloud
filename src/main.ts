@@ -5,12 +5,15 @@ import { createPinia } from 'pinia'
 import router from './router'
 import App from './App.vue'
 import './styles/index.scss'
+import { elementPlusZhCn, setupChineseLocale } from './utils/localeSetup'
 import { initPrint, registerTemplate, createSalesOutboundTemplate, createSalesReturnTemplate, createPurchaseInboundTemplate, createPurchaseReturnTemplate, createSalesOrderTemplate } from './utils/printService'
+
+setupChineseLocale()
 
 const app = createApp(App)
 const pinia = createPinia()
 
-app.use(ElementPlus)
+app.use(ElementPlus, { locale: elementPlusZhCn })
 app.use(pinia)
 app.use(router)
 

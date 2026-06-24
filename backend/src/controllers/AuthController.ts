@@ -5,6 +5,8 @@ import { User } from '../entities/User'
 import { Company } from '../entities/Company'
 import { signToken } from '../config/jwt'
 import { PLATFORM_BOSS_ROLES, PLATFORM_COMPANY_SEED } from '../constants/loginAccounts'
+import { buildLoginAccountEntry } from '../utils/loginAccountHints'
+import { isAccountExpired } from '../utils/accountValidity'
 
 export class AuthController {
   private getUserRepository() {
@@ -27,6 +29,25 @@ export class AuthController {
       : user.companyId
     const company = await companyRepository.findOne({ where: { id: targetCompanyId } })
     return { company, targetCompanyId }
+  }
+
+  async getLoginAccounts(_req: Request, res: Response) {
+    try {
+      const users = await this.getUserRepository().find({
+        where: { status: '启用', showOnLogin: true },
+        relations: ['company'],
+        order: { id: 'ASC' }
+      })
+
+      const data = users
+        .filter(user => user.company && user.company.status === '启用')
+        .map(user => buildLoginAccountEntry(user))
+
+      res.json({ success: true, data })
+    } catch (error) {
+      console.error('获取登录页账号列表错误:', error)
+      res.status(500).json({ message: '服务器错误' })
+    }
   }
 
   async login(req: Request, res: Response) {
@@ -52,6 +73,10 @@ export class AuthController {
 
       if (user.status !== '启用') {
         return res.status(401).json({ message: '用户已停用，请联系管理员' })
+      }
+
+      if (isAccountExpired(user.expiresAt)) {
+        return res.status(401).json({ message: '账号已过期，请联系管理员续期' })
       }
 
       const { company, targetCompanyId } = await this.resolveLoginCompany(user)

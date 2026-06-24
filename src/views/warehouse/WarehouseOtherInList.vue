@@ -144,7 +144,7 @@ const warehouseList = getWarehouseList()
 const tableData = ref([
   { 
     id: 'IN202606001', 
-    warehouse: warehouseList[0]?.name || '北京仓库', 
+    warehouse: warehouseList[0]?.name || '公司库', 
     inType: 'damage',
     date: '2026-06-15', 
     amount: '¥12,500', 
@@ -156,7 +156,7 @@ const tableData = ref([
   },
   { 
     id: 'IN202606002', 
-    warehouse: warehouseList[1]?.name || '上海仓库', 
+    warehouse: warehouseList[1]?.name || '公司库', 
     inType: 'overflow',
     date: '2026-06-14', 
     amount: '¥8,800', 
@@ -168,7 +168,7 @@ const tableData = ref([
   },
   { 
     id: 'IN202606003', 
-    warehouse: warehouseList[2]?.name || '广州仓库', 
+    warehouse: warehouseList[2]?.name || '公司库', 
     inType: 'gift',
     date: '2026-06-13', 
     amount: '¥15,200', 
@@ -180,7 +180,7 @@ const tableData = ref([
   },
   { 
     id: 'IN202606004', 
-    warehouse: warehouseList[0]?.name || '北京仓库', 
+    warehouse: warehouseList[0]?.name || '公司库', 
     inType: 'return',
     date: '2026-06-12', 
     amount: '¥45,600', 
@@ -192,7 +192,7 @@ const tableData = ref([
   },
   { 
     id: 'IN202606005', 
-    warehouse: warehouseList[1]?.name || '上海仓库', 
+    warehouse: warehouseList[1]?.name || '公司库', 
     inType: 'other',
     date: '2026-06-11', 
     amount: '¥8,900', 
@@ -204,7 +204,7 @@ const tableData = ref([
   },
   { 
     id: 'IN202606006', 
-    warehouse: warehouseList[2]?.name || '广州仓库', 
+    warehouse: warehouseList[2]?.name || '公司库', 
     inType: 'damage',
     date: '2026-06-10', 
     amount: '¥35,000', 

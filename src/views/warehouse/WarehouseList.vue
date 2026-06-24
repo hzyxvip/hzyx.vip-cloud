@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
 
 const searchForm = ref({
   product: '',
@@ -8,8 +9,8 @@ const searchForm = ref({
 })
 
 const tableData = ref([
-  { product: '一次性口罩', warehouse: '北京仓库', stock: 1200, unit: '盒', price: '¥12.50' },
-  { product: '医用手套', warehouse: '北京仓库', stock: 500, unit: '盒', price: '¥28.00' }
+  { product: '一次性口罩', warehouse: '公司库', stock: 1200, unit: '盒', price: '¥12.50' },
+  { product: '医用手套', warehouse: '公司库', stock: 500, unit: '盒', price: '¥28.00' }
 ])
 
 const { columnWidths, handleHeaderDragend } = useTableStyle('warehouse-list', [
@@ -32,6 +33,7 @@ const handleReset = () => {
 }
 
 const handleRefresh = () => {
+  refreshWarehouseOptions()
   const stored = localStorage.getItem('warehouseList')
   if (stored) {
     try {
@@ -44,6 +46,10 @@ const handleRefresh = () => {
     }
   }
 }
+
+onMounted(() => {
+  refreshWarehouseOptions()
+})
 </script>
 
 <template>
@@ -55,7 +61,7 @@ const handleRefresh = () => {
     <div class="search-card">
       <el-form :model="searchForm" inline>
         <el-form-item label="商品名称"><el-input v-model="searchForm.product" placeholder="请输入商品名称" clearable /></el-form-item>
-        <el-form-item label="仓库"><el-select v-model="searchForm.warehouse" placeholder="请选择仓库"><el-option label="北京仓库" value="beijing" /></el-select></el-form-item>
+        <el-form-item label="仓库"><el-select v-model="searchForm.warehouse" placeholder="请选择仓库" clearable><el-option v-for="opt in activeWarehouseOptions" :key="opt.value" :label="opt.label" :value="opt.value" /></el-select></el-form-item>
         <el-form-item><el-button type="primary" icon="Search" @click="handleSearch">查询</el-button><el-button @click="handleReset">重置</el-button><el-button @click="handleRefresh">刷新</el-button></el-form-item>
       </el-form>
     </div>

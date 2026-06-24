@@ -1,33 +1,56 @@
 import type { Company, Warehouse, Location, User } from './dataStore'
+import type { LoginDemoAccount } from '@/constants/loginAccounts'
+import { clearAuthSession, getAuthToken, migrateLegacyAuthToSession } from './authSession'
+
+migrateLegacyAuthToSession()
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
 
-const getToken = () => localStorage.getItem('token')
+type ApiRequestOptions = RequestInit & {
+  /** 后台请求失败时不强制退出登录（避免刚进入系统就被踢回登录页） */
+  skipAuthRedirect?: boolean
+  timeoutMs?: number
+}
 
-const request = async <T>(url: string, options: RequestInit = {}): Promise<T> => {
+const getToken = () => getAuthToken()
+
+const request = async <T>(url: string, options: ApiRequestOptions = {}): Promise<T> => {
+  const { skipAuthRedirect = false, timeoutMs = 30000, ...fetchOptions } = options
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(options.headers as Record<string, string>)
+    ...(fetchOptions.headers as Record<string, string>)
   }
-  
+
   const token = getToken()
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
 
-  const response = await fetch(`${BASE_URL}${url}`, {
-    ...options,
-    headers
-  })
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+
+  let response: Response
+  try {
+    response = await fetch(`${BASE_URL}${url}`, {
+      ...fetchOptions,
+      headers,
+      signal: controller.signal
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('请求超时，请确认后端服务已启动（端口 3006）')
+    }
+    throw new Error('无法连接后端服务，请在项目根目录运行 npm run dev:all')
+  } finally {
+    window.clearTimeout(timer)
+  }
 
   if (response.status === 401) {
-    localStorage.removeItem('token')
-    localStorage.removeItem('user')
-    localStorage.removeItem('userRole')
-    localStorage.removeItem('userPermissions')
-    localStorage.removeItem('currentCompanyId')
-    if (!window.location.pathname.startsWith('/login')) {
-      window.location.href = '/login'
+    if (!skipAuthRedirect) {
+      clearAuthSession()
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login'
+      }
     }
     throw new Error('登录已过期，请重新登录')
   }
@@ -40,11 +63,37 @@ const request = async <T>(url: string, options: RequestInit = {}): Promise<T> =>
   return response.json()
 }
 
+/** 检测后端是否在线（登录页展示状态用） */
+export async function checkBackendHealth(timeoutMs = 4000): Promise<boolean> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const health = await fetch(`${BASE_URL}/health`, { signal: controller.signal })
+    if (health.ok) return true
+
+    const probe = await fetch(`${BASE_URL}/companies`, { signal: controller.signal })
+    return probe.ok || probe.status === 401
+  } catch {
+    return false
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
 export const authApi = {
-  login: (data: { username: string; password: string }) => 
+  getLoginAccounts: async () => {
+    const res = await request<{ success: boolean; data: LoginDemoAccount[] }>('/auth/login-accounts', {
+      skipAuthRedirect: true,
+      timeoutMs: 8000
+    })
+    return Array.isArray(res?.data) ? res.data : []
+  },
+
+  login: (data: { username: string; password: string }) =>
     request<{ success: boolean; token: string; user: any }>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify(data)
+      body: JSON.stringify(data),
+      timeoutMs: 12000
     }),
   
   changePassword: (data: { userId: number; oldPassword: string; newPassword: string }) =>
@@ -128,6 +177,11 @@ export const userApi = {
     companyId: number
     role?: string
     status?: string
+    showOnLogin?: boolean
+    loginHintPassword?: string | null
+    enabledAt?: string
+    validityYears?: number
+    expiresAt?: string
   }) =>
     request<{ success: boolean; data: User }>('/users', {
       method: 'POST',
@@ -140,6 +194,58 @@ export const userApi = {
     }),
   delete: (id: number) =>
     request<{ success: boolean; message: string }>(`/users/${id}`, {
+      method: 'DELETE'
+    })
+}
+
+export type ApiProduct = Record<string, unknown>
+
+export type ApiCustomer = Record<string, unknown>
+
+export const customerApi = {
+  getAll: async (options?: { background?: boolean }) => {
+    const res = await request<{ success: boolean; data: ApiCustomer[] }>('/customers', {
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 8000 : 30000
+    })
+    return Array.isArray(res?.data) ? res.data : []
+  },
+  sync: (items: ApiCustomer[], options?: { replace?: boolean; background?: boolean }) =>
+    request<{ success: boolean; data: ApiCustomer[]; message?: string }>('/customers/sync', {
+      method: 'POST',
+      body: JSON.stringify({ items, replace: options?.replace === true }),
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 60000 : 120000
+    }),
+  delete: (id: number) =>
+    request<{ success: boolean; message: string }>(`/customers/${id}`, {
+      method: 'DELETE'
+    })
+}
+
+export const productApi = {
+  getAll: async (options?: { background?: boolean }) => {
+    const res = await request<{ success: boolean; data: ApiProduct[] }>('/products', {
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 8000 : 30000
+    })
+    return Array.isArray(res?.data) ? res.data : []
+  },
+  getPlatformCatalog: async (options?: { background?: boolean }) => {
+    const res = await request<{ success: boolean; data: ApiProduct[] }>('/products/platform-catalog', {
+      skipAuthRedirect: options?.background === true
+    })
+    return Array.isArray(res?.data) ? res.data : []
+  },
+  sync: (items: ApiProduct[], options?: { replace?: boolean; background?: boolean }) =>
+    request<{ success: boolean; data: ApiProduct[]; message?: string }>('/products/sync', {
+      method: 'POST',
+      body: JSON.stringify({ items, replace: options?.replace === true }),
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 60000 : 120000
+    }),
+  delete: (id: number) =>
+    request<{ success: boolean; message: string }>(`/products/${id}`, {
       method: 'DELETE'
     })
 }

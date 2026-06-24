@@ -113,20 +113,93 @@ export function isValidCategorySelection(
   return categories.some(category => category.id === selectedCategoryId)
 }
 
+export type SavedProductListCategoryFilter = {
+  sortType: string
+  categoryId?: number | null
+  categoryName?: string
+}
+
+export function saveProductListCategoryFilter(
+  storageKey: string,
+  filter: SavedProductListCategoryFilter
+): void {
+  sessionStorage.setItem(storageKey, JSON.stringify(filter))
+}
+
+export function loadProductListCategoryFilter(
+  storageKey: string
+): SavedProductListCategoryFilter | null {
+  try {
+    const raw = sessionStorage.getItem(storageKey)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as SavedProductListCategoryFilter
+    if (!parsed || typeof parsed.sortType !== 'string') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+export function clearProductListCategoryFilter(storageKey: string): void {
+  sessionStorage.removeItem(storageKey)
+}
+
+export function findCategoryNameBySelection(
+  selectedCategoryId: number | null,
+  categories: Array<{ id: number; name: string; children?: Array<{ id: number; name: string }> }>
+): string | null {
+  if (isAllCategorySelected(selectedCategoryId)) return null
+  return findCategoryNameById(selectedCategoryId!, categories)
+}
+
+/** 分类树重建或刷新列表后，尽量按名称恢复选中项，避免误重置为「全部分类」 */
+export function resolveSelectedCategoryAfterRebuild(
+  sortType: string,
+  categories: Array<{ id: number; name: string; children?: Array<{ id: number; name: string }> }>,
+  currentSelectedId: number | null,
+  savedCategoryName?: string | null
+): number | null {
+  if (sortType === 'all') return CATEGORY_ALL_ID
+  if (isAllCategorySelected(currentSelectedId)) return CATEGORY_ALL_ID
+
+  if (
+    currentSelectedId != null &&
+    !isAllCategorySelected(currentSelectedId) &&
+    isValidCategorySelection(currentSelectedId, sortType, categories)
+  ) {
+    return currentSelectedId
+  }
+
+  const nameToMatch =
+    savedCategoryName ?? findCategoryNameBySelection(currentSelectedId, categories)
+  if (nameToMatch) {
+    for (const category of categories) {
+      if (category.name === nameToMatch) return category.id
+      const child = category.children?.find(item => item.name === nameToMatch)
+      if (child) return child.id
+    }
+  }
+
+  if (
+    currentSelectedId != null &&
+    !isAllCategorySelected(currentSelectedId) &&
+    sortType === 'type' &&
+    PRODUCT_TYPE_CATEGORY_MAP[currentSelectedId]
+  ) {
+    return currentSelectedId
+  }
+
+  return CATEGORY_ALL_ID
+}
+
+import { fieldContainsKeyword } from '@/utils/pinyinSearch'
+
 export type ProductListSearchForm = {
   codeName: string
   spec: string
-  manufacturer: string
-  brand: string
-  type: string
+  registrant: string
   auditStatus: string
   status: string
-}
-
-const fieldContains = (value: unknown, keyword: string) => {
-  const query = keyword.trim()
-  if (!query) return true
-  return String(value ?? '').toLowerCase().includes(query.toLowerCase())
 }
 
 /** 任一条件不满足则排除（排除法） */
@@ -135,13 +208,17 @@ export function matchesProductListSearch(
   searchForm: ProductListSearchForm
 ): boolean {
   const codeName = searchForm.codeName.trim()
-  if (codeName && !fieldContains(item.code, codeName) && !fieldContains(item.name, codeName)) {
+  if (
+    codeName
+    && !fieldContainsKeyword(item.code, codeName)
+    && !fieldContainsKeyword(item.name, codeName)
+  ) {
     return false
   }
-  if (searchForm.spec.trim() && !fieldContains(item.spec, searchForm.spec)) return false
-  if (searchForm.manufacturer.trim() && !fieldContains(item.manufacturer, searchForm.manufacturer)) return false
-  if (searchForm.brand.trim() && !fieldContains(item.brand, searchForm.brand)) return false
-  if (searchForm.type.trim() && !fieldContains(item.type, searchForm.type)) return false
+  if (searchForm.spec.trim() && !fieldContainsKeyword(item.spec, searchForm.spec)) return false
+  if (searchForm.registrant.trim() && !fieldContainsKeyword(item.registrant, searchForm.registrant)) {
+    return false
+  }
   if (searchForm.auditStatus && String(item.auditStatus ?? '') !== searchForm.auditStatus) return false
   if (searchForm.status && String(item.status ?? '') !== searchForm.status) return false
   return true
@@ -176,7 +253,7 @@ export function filterProductsByCategorySelection(
     })
   }
 
-  const categoryField = sortType as 'manufacturer' | 'brand' | 'name'
+  const categoryField = sortType
   const categoryItem = categories.find(category => category.id === selectedCategoryId)
   if (!categoryItem) return products
   return products.filter(item => String(item[categoryField] ?? '') === categoryItem.name)
@@ -199,7 +276,7 @@ export function sortProductsByCategoryType(
       case 'name':
         return String(a.name ?? '').localeCompare(String(b.name ?? ''), 'zh-CN')
       default:
-        return 0
+        return String(a[sortType] ?? '').localeCompare(String(b[sortType] ?? ''), 'zh-CN')
     }
   })
 }
@@ -208,9 +285,7 @@ export function createEmptyProductSearchForm(): ProductListSearchForm {
   return {
     codeName: '',
     spec: '',
-    manufacturer: '',
-    brand: '',
-    type: '',
+    registrant: '',
     auditStatus: '',
     status: ''
   }

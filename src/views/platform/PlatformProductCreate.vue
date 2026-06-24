@@ -1,8 +1,18 @@
 <script setup lang="ts">
-import { ref, reactive, watch, computed, onMounted } from 'vue'
+import { ref, reactive, watch, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { loadProductList, saveProductList } from '@/utils/productStore'
+import { ArrowLeft } from '@element-plus/icons-vue'
+import { loadProductList, saveProductList, findProductByCode, findProductIndexInList, safeDecodeProductCode, validateProductIdentityUnique, formatProductIdentityConflictMessage, acknowledgeRestoredProductCodes } from '@/utils/productStore'
+import { PLATFORM_PRODUCT_CREATE_DRAFT_KEY } from '@/utils/productCreateDraftStore'
+import { useProductCreateNavigation } from '@/composables/useProductCreateNavigation'
+import { resolveNewProductMeta } from '@/utils/productFormAssist'
+import { isPlatformOperator } from '@/utils/customerProductService'
+import { useProductCreateAssist } from '@/composables/useProductCreateAssist'
+import {
+  getPlatformConversionUnitOptions,
+  getPlatformMeasureUnitOptions
+} from '@/utils/platformUnitStore'
 
 const router = useRouter()
 const route = useRoute()
@@ -11,9 +21,9 @@ const formRef = ref<InstanceType<typeof import('element-plus')['ElForm']> | null
 const auditStatus = ref<'pending' | 'approved' | 'rejected'>('pending')
 const isAudited = ref(false)
 
-// 编辑模式：从路由获取商品ID
+// 编辑模式：路由参数为商品编码（唯一标识）
 const isEditMode = computed(() => route.path.includes('/edit/'))
-const editId = computed(() => route.params.id as string)
+const editCode = computed(() => safeDecodeProductCode(String(route.params.id || '')))
 
 const handleAudit = () => {
   if (auditStatus.value === 'pending') {
@@ -31,89 +41,9 @@ const handleAudit = () => {
   }
 }
 
-const handleSave = () => {
-  if (isEditMode.value && editId.value) {
-    const productList = loadProductList()
-    
-    const index = productList.findIndex((p: any) => String(p.id) === editId.value)
-    if (index !== -1) {
-      productList[index] = {
-        ...productList[index],
-        ...formData
-      }
-      
-      saveProductList(productList)
-      ElMessage.success('修改成功')
-      router.push('/platform/product')
-    } else {
-      ElMessage.error('商品不存在')
-    }
-  } else {
-    const newProduct = {
-      id: Date.now(),
-      code: formData.code || `PD${Date.now()}`,
-      name: formData.name,
-      spec: formData.spec,
-      manufacturer: formData.manufacturer,
-      registrant: formData.registrant,
-      brand: formData.brand,
-      category: formData.category,
-      type: formData.type,
-      measureUnit: formData.measureUnit,
-      licenseNo: formData.licenseNo,
-      registerNo: formData.registerNo,
-      udiCode: formData.udiCode,
-      barcode: formData.barcode,
-      medicalCode: formData.medicalCode,
-      medicalClass: formData.medicalClass,
-      storageCondition: formData.storageCondition,
-      medType: formData.medType,
-      minStock: formData.minStock,
-      maxStock: formData.maxStock,
-      safetyStock: formData.safetyStock,
-      volumeLength: formData.volumeLength,
-      volumeWidth: formData.volumeWidth,
-      volumeHeight: formData.volumeHeight,
-      purchaseUnit: formData.purchaseUnit,
-      saleUnit: formData.saleUnit,
-      stockUnit: formData.stockUnit,
-      reportUnit: formData.reportUnit,
-      batchManage: formData.batchManage,
-      serialNoManage: formData.serialNoManage,
-      expiryManage: formData.expiryManage,
-      expiryDate: formData.expiryDate,
-      expiryUnit: formData.expiryUnit,
-      warningDays: formData.warningDays,
-      expiryCalcMethod: formData.expiryCalcMethod,
-      sterilizationBatch: formData.sterilizationBatch,
-      bidType: formData.bidType,
-      taxRate: formData.taxRate,
-      remark1: formData.remark1,
-      remark2: formData.remark2,
-      remark3: formData.remark3,
-      remark4: formData.remark4,
-      remark5: formData.remark5,
-      status: '正常',
-      auditStatus: '待审核'
-    }
-    
-    const productList = loadProductList()
-
-    productList.push(newProduct)
-
-    saveProductList(productList)
-    
-    ElMessage.success('保存成功')
-    router.push('/platform/product')
-  }
-}
-
 const handleCopy = () => {
   ElMessage.info('复制成功')
 }
-
-// 选择的已有商品编码
-const selectedProductCode = ref('')
 
 const formData = reactive({
   code: '',
@@ -158,7 +88,6 @@ const formData = reactive({
   bidType: '',
   storageCondition: '',
   medType: '',
-  taxRate: '',
   volumeLength: '',
   volumeWidth: '',
   volumeHeight: '',
@@ -174,23 +103,187 @@ const formData = reactive({
   remark7: '',
   remark8: '',
   remark9: '',
-  remark10: ''
+  remark10: '',
+  platformProductCode: ''
 })
 
-// 编辑模式初始化
-onMounted(() => {
-  if (isEditMode.value && editId.value) {
+const {
+  selectedProductCode,
+  fromPlatformPick,
+  duplicateProductWarning,
+  registrantWarning,
+  platformProductOptions,
+  fetchNameSuggestions,
+  fetchSpecSuggestions,
+  fetchRegistrantSuggestions,
+  handleNameSelect,
+  handleSpecSelect,
+  handleRegistrantSelect,
+  checkDuplicateProduct,
+  checkRegistrantSimilarity,
+  handleSelectPlatformProduct
+} = useProductCreateAssist(formData, {
+  isEditMode: () => isEditMode.value,
+  isAudited: () => isAudited.value,
+  editCode: () => formData.code
+})
+
+const saveToProductList = (): boolean => {
+  if (isEditMode.value && editCode.value) {
     const productList = loadProductList()
-    if (productList.length) {
-      const product = productList.find((p: any) => String(p.id) === editId.value)
-      if (product) {
-        Object.assign(formData, product)
-        auditStatus.value = product.auditStatus === '已审核' ? 'approved' : 'pending'
-        isAudited.value = product.auditStatus === '已审核'
+
+    const index = findProductIndexInList(productList, formData.code || editCode.value)
+    if (index !== -1) {
+      const merged = {
+        ...productList[index],
+        ...formData
       }
+      const identityCheck = validateProductIdentityUnique(productList, merged, {
+        excludeCode: String(formData.code || editCode.value)
+      })
+      if (!identityCheck.ok) {
+        ElMessage.warning(formatProductIdentityConflictMessage(identityCheck.existing))
+        return false
+      }
+
+      productList[index] = merged
+
+      acknowledgeRestoredProductCodes([String(formData.code || editCode.value || '')])
+      saveProductList(productList)
+      ElMessage.success('修改成功')
+      return true
+    }
+
+    ElMessage.error('商品不存在')
+    return false
+  }
+
+  const meta = resolveNewProductMeta({
+    fromPlatform: fromPlatformPick.value,
+    isPlatformOperator: isPlatformOperator()
+  })
+  const newProduct = {
+    id: Date.now(),
+    code: formData.code || `PD${Date.now()}`,
+    name: formData.name,
+    spec: formData.spec,
+    manufacturer: formData.manufacturer,
+    registrant: formData.registrant,
+    brand: formData.brand,
+    category: formData.category,
+    type: formData.type,
+    measureUnit: formData.measureUnit,
+    licenseNo: formData.licenseNo,
+    registerNo: formData.registerNo,
+    udiCode: formData.udiCode,
+    barcode: formData.barcode,
+    medicalCode: formData.medicalCode,
+    medicalClass: formData.medicalClass,
+    storageCondition: formData.storageCondition,
+    medType: formData.medType,
+    minStock: formData.minStock,
+    maxStock: formData.maxStock,
+    safetyStock: formData.safetyStock,
+    volumeLength: formData.volumeLength,
+    volumeWidth: formData.volumeWidth,
+    volumeHeight: formData.volumeHeight,
+    purchaseUnit: formData.purchaseUnit,
+    saleUnit: formData.saleUnit,
+    stockUnit: formData.stockUnit,
+    reportUnit: formData.reportUnit,
+    batchManage: formData.batchManage,
+    serialNoManage: formData.serialNoManage,
+    expiryManage: formData.expiryManage,
+    expiryDate: formData.expiryDate,
+    expiryUnit: formData.expiryUnit,
+    warningDays: formData.warningDays,
+    expiryCalcMethod: formData.expiryCalcMethod,
+    sterilizationBatch: formData.sterilizationBatch,
+    bidType: formData.bidType,
+    remark1: formData.remark1,
+    remark2: formData.remark2,
+    remark3: formData.remark3,
+    remark4: formData.remark4,
+    remark5: formData.remark5,
+    status: '正常',
+    auditStatus: '待审核',
+    source: meta.source,
+    platformReviewStatus: meta.platformReviewStatus,
+    fromPlatform: fromPlatformPick.value,
+    platformProductCode: fromPlatformPick.value ? String(formData.platformProductCode || '') : ''
+  }
+
+  const productList = loadProductList()
+
+  const identityCheck = validateProductIdentityUnique(productList, newProduct)
+  if (!identityCheck.ok) {
+    ElMessage.warning(formatProductIdentityConflictMessage(identityCheck.existing))
+    return false
+  }
+
+  productList.push(newProduct)
+
+  acknowledgeRestoredProductCodes([String(newProduct.code || '')])
+  saveProductList(productList)
+
+  ElMessage.success('保存成功')
+  return true
+}
+
+const { handleBack, handleSaveClick } = useProductCreateNavigation({
+  formData,
+  auditStatus,
+  fromPlatformPick,
+  isEditMode,
+  listPath: '/platform/product',
+  draftStorageKey: PLATFORM_PRODUCT_CREATE_DRAFT_KEY,
+  formRef,
+  saveToProductList
+})
+
+// 编辑模式初始化（按商品编码优先定位，避免重复 id 加载错误商品）
+const loadEditProduct = () => {
+  if (!isEditMode.value || !editCode.value) return
+
+  const product = findProductByCode(editCode.value)
+  if (!product) {
+    ElMessage.error('未找到该商品编码，请返回列表重试')
+    return
+  }
+
+  Object.assign(formData, product)
+  auditStatus.value = product.auditStatus === '已审核' ? 'approved' : 'pending'
+  isAudited.value = product.auditStatus === '已审核'
+}
+
+watch(
+  () => editCode.value,
+  () => loadEditProduct(),
+  { immediate: true }
+)
+
+// 提取品牌名：只保留地方名+企业名
+const extractBrandFromManufacturer = (manufacturer: string): string => {
+  if (!manufacturer) return ''
+  // 去掉省市区县等行政区划前缀
+  let name = manufacturer.replace(/^(北京|天津|河北|山西|内蒙古|辽宁|吉林|黑龙江|上海|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|广西|海南|重庆|四川|贵州|云南|西藏|陕西|甘肃|青海|宁夏|新疆|香港|澳门|台湾|北京|上海|天津|重庆)(省|市|区|县)/g, '')
+  // 去掉所有公司性质和行业性质的词，只保留企业名
+  name = name.replace(/(有限公司|集团有限公司|股份有限公司|集团|有限责任公司|公司|事业有限公司|事业|生物工程|医疗用品|医疗器械|医药|制药|化学|化工|生物科技|科技|技术|电子|智能|贸易|商贸|实业|经贸|材料|制品|产品|制作|包装|印务|物流|运输|食品|饮料|环保|光学|仪器|设备|医用|敷料|粘合剂|高分子|保健|净化|消毒|计生|计生用品)/g, '')
+  return name.trim()
+}
+
+// 监听生产厂家变化，自动填充注册人/备案人和品牌
+watch(
+  () => formData.manufacturer,
+  (newManufacturer) => {
+    if (!isAudited.value) {
+      // 自动复制到注册人/备案人
+      formData.registrant = newManufacturer || ''
+      // 自动提取品牌（去掉省市区划和公司后缀）
+      formData.brand = extractBrandFromManufacturer(newManufacturer)
     }
   }
-})
+)
 
 const categories = [
   { label: '手术器械', value: '手术器械' },
@@ -362,200 +455,66 @@ const volumeResult = computed(() => {
   return ''
 })
 
-const handleSubmit = () => {
-  formRef.value.validate((valid: boolean) => {
-    if (!valid) return
-    ElMessage.success('保存成功')
-    router.push('/platform/product')
-  })
-}
-
-const handleBack = () => {
-  router.push('/platform/product')
-}
-
-// 平台计量单位数据
-const platformMeasureUnits = ref([
-  { label: '个', value: '个' },
-  { label: '只', value: '只' },
-  { label: '支', value: '支' },
-  { label: '根', value: '根' },
-  { label: '枚', value: '枚' },
-  { label: '套', value: '套' },
-  { label: '件', value: '件' },
-  { label: '盒', value: '盒' },
-  { label: '瓶', value: '瓶' },
-  { label: '袋', value: '袋' },
-  { label: '包', value: '包' },
-  { label: '片', value: '片' },
-  { label: '张', value: '张' },
-  { label: '贴', value: '贴' },
-  { label: '卷', value: '卷' },
-  { label: '台', value: '台' },
-  { label: '把', value: '把' },
-  { label: '柄', value: '柄' },
-  { label: '条', value: '条' },
-  { label: '管', value: '管' },
-  { label: '粒', value: '粒' },
-  { label: '丸', value: '丸' },
-  { label: '颗', value: '颗' },
-  { label: '组', value: '组' },
-  { label: '单元', value: '单元' }
-])
-
-// 平台辅助单位数据（用于单位换算）
-const platformAuxUnits = ref([
-  { label: '箱', value: '箱' },
-  { label: '大箱', value: '大箱' },
-  { label: '中箱', value: '中箱' },
-  { label: '小箱', value: '小箱' },
-  { label: '盒', value: '盒' },
-  { label: '大包', value: '大包' },
-  { label: '小包', value: '小包' },
-  { label: '件', value: '件' },
-  { label: '袋', value: '袋' },
-  { label: '包', value: '包' },
-  { label: '捆', value: '捆' },
-  { label: '扎', value: '扎' },
-  { label: '托盘', value: '托盘' },
-  { label: '板', value: '板' },
-  { label: '排', value: '排' },
-  { label: '层', value: '层' },
-  { label: '个', value: '个' },
-  { label: '只', value: '只' },
-  { label: '支', value: '支' },
-  { label: '瓶', value: '瓶' }
-])
-
-// 模拟已有商品数据
-const existingProducts = ref([
-  {
-    code: 'P001',
-    name: '一次性医用口罩',
-    spec: '17.5cm×9.5cm',
-    measureUnit: '只',
-    manufacturer: '某某医疗科技有限公司',
-    registrant: '某某医疗科技有限公司',
-    brand: '医盾',
-    category: '医用耗材',
-    type: '一次性用品',
-    licenseNo: '豫械注准20202140xxx',
-    registerNo: '20202140xxx',
-    udiCode: '6901234567890',
-    barcode: '1234567890123',
-    medType: '二类',
-    storageCondition: '常温',
-    taxRate: 13
-  },
-  {
-    code: 'P002',
-    name: '医用酒精消毒液',
-    spec: '500ml',
-    measureUnit: '瓶',
-    manufacturer: '某某化工有限公司',
-    registrant: '某某化工有限公司',
-    brand: '洁康',
-    category: '医用耗材',
-    type: '消毒用品',
-    licenseNo: '消字号2020001x',
-    registerNo: '',
-    udiCode: '6901234567891',
-    barcode: '1234567890124',
-    medType: '消字号类',
-    storageCondition: '阴凉',
-    taxRate: 13
-  },
-  {
-    code: 'P003',
-    name: '电子体温计',
-    spec: 'ET-101',
-    measureUnit: '支',
-    manufacturer: '某某电子股份有限公司',
-    registrant: '某某电子股份有限公司',
-    brand: '康达',
-    category: '诊断设备',
-    type: '检验设备',
-    licenseNo: '粤械注准20201230xxx',
-    registerNo: '20201230xxx',
-    udiCode: '6901234567892',
-    barcode: '1234567890125',
-    medType: '二类',
-    storageCondition: '常温',
-    taxRate: 13
-  }
-])
-
-// 选择已有商品
-const handleSelectProduct = (product: any) => {
-  if (!product) return
-  // 填充表单数据
-  Object.assign(formData, {
-    code: '', // 新增时清空编码
-    name: product.name,
-    spec: product.spec,
-    measureUnit: product.measureUnit,
-    manufacturer: product.manufacturer,
-    registrant: product.registrant,
-    brand: product.brand,
-    category: product.category,
-    type: product.type,
-    licenseNo: product.licenseNo,
-    registerNo: product.registerNo,
-    udiCode: product.udiCode,
-    barcode: product.barcode,
-    medType: product.medType,
-    storageCondition: product.storageCondition,
-    taxRate: product.taxRate
-  })
-  ElMessage.success('已选择商品，信息已带出')
-}
-
+// 平台计量单位 / 计价单位（来自「平台单位设定」）
+const platformMeasureUnits = computed(() => getPlatformMeasureUnitOptions())
+const platformAuxUnits = computed(() => getPlatformConversionUnitOptions())
 
 </script>
 
 <template>
   <div class="product-create-container">
     <div class="page-header">
-      <div class="page-breadcrumb">
-        <span>首页</span>
-        <span class="breadcrumb-arrow">/</span>
-        <span>平台管理</span>
-        <span class="breadcrumb-arrow">/</span>
-        <span>平台商品基本资料</span>
-        <span class="breadcrumb-arrow">/</span>
-        <span>新增商品</span>
-      </div>
-      <div class="page-title">
-        <h2>新增商品</h2>
+      <div class="page-header-main">
+        <div class="page-breadcrumb">
+          <span>首页</span>
+          <span class="breadcrumb-arrow">/</span>
+          <span>平台管理</span>
+          <span class="breadcrumb-arrow">/</span>
+          <span>平台商品基本资料</span>
+          <span class="breadcrumb-arrow">/</span>
+          <span>{{ isEditMode ? '编辑商品' : '新增商品' }}</span>
+        </div>
+        <div class="page-title">
+          <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
+          <h2>{{ isEditMode ? '编辑商品' : '新增商品' }}</h2>
+        </div>
       </div>
     </div>
     
     <div class="form-container">
       <el-form ref="formRef" :model="formData" :rules="rules" label-position="top">
-        <!-- 选择已有商品 -->
+        <!-- 引用平台商品 -->
         <div class="select-product-bar">
-          <span class="select-label">选择已有商品：</span>
-          <el-select 
-            v-model="selectedProductCode" 
-            placeholder="请选择已有商品（可选）" 
+          <span class="select-label">引用平台商品：</span>
+          <el-select
+            v-model="selectedProductCode"
+            placeholder="输入名称/编码搜索平台商品（可选）"
             clearable
             filterable
-            @change="handleSelectProduct"
             class="product-select"
+            @change="handleSelectPlatformProduct"
           >
             <el-option
-              v-for="item in existingProducts"
+              v-for="item in platformProductOptions"
               :key="item.code"
-              :label="`${item.name} - ${item.spec} - ${item.registerNo || '无注册证'}`"
+              :label="`${item.name} - ${item.spec || '无规格'} - ${item.registerNo || '无注册证'}`"
               :value="item.code"
             >
               <span class="product-option-name">{{ item.name }}</span>
-              <span class="product-option-spec">{{ item.spec }}</span>
+              <span class="product-option-spec">{{ item.spec || '无规格' }}</span>
               <span class="product-option-reg">{{ item.registerNo || '无注册证' }}</span>
             </el-option>
           </el-select>
-          <span class="select-tip">（选择后可快速带出商品信息，修改后保存为新商品）</span>
+          <span class="select-tip">引用后自动保存到商品列表；客户自行录入的商品需平台人工审核后方可纳入平台资料</span>
         </div>
+        <el-alert
+          v-if="duplicateProductWarning"
+          class="product-assist-alert"
+          type="warning"
+          :closable="false"
+          show-icon
+          :title="duplicateProductWarning"
+        />
         
         <!-- 基本信息 -->
         <div class="form-section">
@@ -567,7 +526,7 @@ const handleSelectProduct = (product: any) => {
                   <span class="stamp-inner">已审核</span>
                 </div>
               </div>
-              <el-button type="primary" size="small" @click="handleSave">保存</el-button>
+              <el-button type="primary" size="small" @click="handleSaveClick">保存</el-button>
               <el-button 
                 :type="auditStatus === 'approved' ? 'warning' : 'success'" 
                 size="small" 
@@ -593,26 +552,75 @@ const handleSelectProduct = (product: any) => {
               </div>
               <div class="field-item w-6">
                 <el-form-item label="商品名称" prop="name" required>
-                  <el-input v-model="formData.name" placeholder="商品全称" :disabled="isAudited" />
+                  <el-autocomplete
+                    v-model="formData.name"
+                    :fetch-suggestions="fetchNameSuggestions"
+                    :debounce="200"
+                    :trigger-on-focus="true"
+                    placeholder="输入时匹配商品列表已有名称"
+                    value-key="value"
+                    :disabled="isAudited"
+                    class="product-autocomplete"
+                    @select="handleNameSelect"
+                    @blur="checkDuplicateProduct"
+                  >
+                    <template #default="{ item }">
+                      <div class="product-suggest-row">
+                        <span class="product-suggest-name">{{ item.name }}</span>
+                        <span class="product-suggest-spec">{{ item.spec || '无规格' }}</span>
+                        <span class="product-suggest-code">{{ item.code }}</span>
+                      </div>
+                    </template>
+                  </el-autocomplete>
                 </el-form-item>
               </div>
               <div class="field-item w-6">
                 <el-form-item label="规格型号">
-                  <el-input v-model="formData.spec" placeholder="规格描述" :disabled="isAudited" />
+                  <el-autocomplete
+                    v-model="formData.spec"
+                    :fetch-suggestions="fetchSpecSuggestions"
+                    :debounce="200"
+                    :trigger-on-focus="true"
+                    placeholder="输入时显示已有规格型号"
+                    value-key="value"
+                    :disabled="isAudited"
+                    class="product-autocomplete"
+                    @select="handleSpecSelect"
+                    @blur="checkDuplicateProduct"
+                  >
+                    <template #default="{ item }">
+                      <div class="product-suggest-row">
+                        <span class="product-suggest-name">{{ item.name }}</span>
+                        <span class="product-suggest-spec">{{ item.spec || '无规格' }}</span>
+                        <span class="product-suggest-code">{{ item.code }}</span>
+                      </div>
+                    </template>
+                  </el-autocomplete>
                 </el-form-item>
               </div>
               <div class="field-item w-6">
                 <el-form-item label="注册人/备案人">
-                  <el-input v-model="formData.registrant" placeholder="VIP续费企业提示" :disabled="isAudited" />
+                  <el-autocomplete
+                    v-model="formData.registrant"
+                    :fetch-suggestions="fetchRegistrantSuggestions"
+                    :debounce="200"
+                    :trigger-on-focus="true"
+                    placeholder="自动去重，相似名称将提示"
+                    value-key="value"
+                    :disabled="isAudited"
+                    class="product-autocomplete"
+                    @select="handleRegistrantSelect"
+                    @blur="checkRegistrantSimilarity"
+                  />
                 </el-form-item>
+                <div v-if="registrantWarning" class="field-warning">{{ registrantWarning }}</div>
               </div>
               <div class="field-item measure-unit-row">
                 <el-form-item label="计量单位" prop="measureUnit" required class="measure-unit-input">
-                  <el-select 
-                    v-model="formData.measureUnit" 
-                    placeholder="选择/输入" 
-                    filterable 
-                    allow-create
+                  <el-select
+                    v-model="formData.measureUnit"
+                    placeholder="请选择计量单位"
+                    filterable
                     default-first-option
                     :disabled="isAudited"
                   >
@@ -672,13 +680,13 @@ const handleSelectProduct = (product: any) => {
               <div class="conversion-column">
                 <div v-for="(row, index) in formData.unitConversions" :key="index" class="conversion-row-item">
                   <span class="conversion-label">换算{{ index + 1 }}</span>
-                  <el-select v-model="row.fromUnit" placeholder="从单位" filterable allow-create default-first-option class="conversion-input">
+                  <el-select v-model="row.fromUnit" placeholder="从单位" filterable default-first-option class="conversion-input">
                     <el-option v-for="item in platformAuxUnits" :key="item.value" :label="item.label" :value="item.value" />
                   </el-select>
                   <span class="conversion-operator">=</span>
                   <el-input v-model="row.rate" type="number" placeholder="换算率" class="conversion-input" />
                   <span class="conversion-multiply">×</span>
-                  <el-select v-model="row.toUnit" placeholder="到单位" filterable allow-create default-first-option class="conversion-input">
+                  <el-select v-model="row.toUnit" placeholder="到单位" filterable default-first-option class="conversion-input">
                     <el-option v-for="item in platformAuxUnits" :key="item.value" :label="item.label" :value="item.value" />
                   </el-select>
                 </div>
@@ -686,28 +694,28 @@ const handleSelectProduct = (product: any) => {
               <div class="field-row">
                 <div class="field-item w-6">
                   <el-form-item label="采购单位" prop="purchaseUnit" required>
-                    <el-select v-model="formData.purchaseUnit" placeholder="选择/输入" filterable allow-create default-first-option>
+                    <el-select v-model="formData.purchaseUnit" placeholder="请选择" filterable default-first-option>
                       <el-option v-for="item in platformAuxUnits" :key="item.value" :label="item.label" :value="item.value" />
                     </el-select>
                   </el-form-item>
                 </div>
                 <div class="field-item w-6">
                   <el-form-item label="销售单位" prop="saleUnit" required>
-                    <el-select v-model="formData.saleUnit" placeholder="选择/输入" filterable allow-create default-first-option>
+                    <el-select v-model="formData.saleUnit" placeholder="请选择" filterable default-first-option>
                       <el-option v-for="item in platformAuxUnits" :key="item.value" :label="item.label" :value="item.value" />
                     </el-select>
                   </el-form-item>
                 </div>
                 <div class="field-item w-6">
                   <el-form-item label="库存单位" prop="stockUnit">
-                    <el-select v-model="formData.stockUnit" placeholder="选择/输入" filterable allow-create default-first-option>
+                    <el-select v-model="formData.stockUnit" placeholder="请选择" filterable default-first-option>
                       <el-option v-for="item in platformAuxUnits" :key="item.value" :label="item.label" :value="item.value" />
                     </el-select>
                   </el-form-item>
                 </div>
                 <div class="field-item w-6">
                   <el-form-item label="报表单位" prop="reportUnit">
-                    <el-select v-model="formData.reportUnit" placeholder="选择/输入" filterable allow-create default-first-option>
+                    <el-select v-model="formData.reportUnit" placeholder="请选择" filterable default-first-option>
                       <el-option v-for="item in platformAuxUnits" :key="item.value" :label="item.label" :value="item.value" />
                     </el-select>
                   </el-form-item>
@@ -879,11 +887,6 @@ const handleSelectProduct = (product: any) => {
           <div class="field-group">
             <div class="field-row">
               <div class="field-item w-6">
-                <el-form-item label="税率">
-                  <el-input v-model="formData.taxRate" type="number" placeholder="%" />
-                </el-form-item>
-              </div>
-              <div class="field-item w-6">
                 <el-form-item label="体积-长(cm)">
                   <el-input v-model="formData.volumeLength" type="number" />
                 </el-form-item>
@@ -970,7 +973,7 @@ const handleSelectProduct = (product: any) => {
         
         <div class="form-footer">
           <el-button @click="handleBack">取消</el-button>
-          <el-button type="primary" @click="handleSubmit">保存</el-button>
+          <el-button type="primary" @click="handleSaveClick">保存</el-button>
         </div>
       </el-form>
     </div>
@@ -1025,6 +1028,10 @@ export default {
   }
   
   .page-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
     h2 {
       font-size: 18px;
       font-weight: 600;
@@ -1296,6 +1303,44 @@ export default {
   font-size: 12px;
   color: #98A2B3;
   margin-left: 12px;
+  flex: 1;
+}
+
+.product-assist-alert {
+  margin-bottom: 16px;
+}
+
+.product-autocomplete {
+  width: 100%;
+}
+
+.product-suggest-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  line-height: 1.4;
+}
+
+.product-suggest-name {
+  flex: 1;
+  color: #344054;
+}
+
+.product-suggest-spec {
+  color: #667085;
+  font-size: 12px;
+}
+
+.product-suggest-code {
+  color: #98A2B3;
+  font-size: 12px;
+}
+
+.field-warning {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #b54708;
+  line-height: 1.4;
 }
 
 .product-option-name {

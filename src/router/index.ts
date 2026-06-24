@@ -611,6 +611,31 @@ const routes: RouteRecordRaw[] = [
         path: 'system/permission',
         name: 'SystemPermission',
         component: () => import('@/views/system/SystemPermission.vue')
+      },
+      {
+        path: 'system/document-function',
+        name: 'SystemDocumentFunction',
+        component: () => import('@/views/system/SystemDocumentFunction.vue')
+      },
+      {
+        path: 'system/print',
+        name: 'SystemPrintSettings',
+        component: () => import('@/views/system/SystemPrintSettings.vue')
+      },
+      {
+        path: 'system/document-number',
+        name: 'SystemDocumentNumber',
+        component: () => import('@/views/system/SystemDocumentNumber.vue')
+      },
+      {
+        path: 'system/batch-no',
+        name: 'SystemBatchNoSettings',
+        component: () => import('@/views/system/SystemBatchNoSettings.vue')
+      },
+      {
+        path: 'system/account',
+        name: 'SystemAccount',
+        component: () => import('@/views/platform/PlatformAccount.vue')
       }
     ]
   }

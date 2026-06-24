@@ -9,6 +9,7 @@ import {
   type PlatformCustomer,
   type PlatformCustomerDocument
 } from '@/utils/platformCustomerStore'
+import { isPlatformPartnerCode } from '@/utils/partnerPlatformCode'
 
 export function mapSupplierTypeToPlatformCompanyType(type: string): string {
   if (type === 'manufacturer' || type === 'distributor' || type === 'hospital') {
@@ -20,8 +21,14 @@ export function mapSupplierTypeToPlatformCompanyType(type: string): string {
 
 function findPlatformCustomerIndex(
   list: PlatformCustomer[],
-  supplier: Pick<SupplierMaster, 'id' | 'code' | 'name'>
+  supplier: Pick<SupplierMaster, 'id' | 'code' | 'name'> & { platformCustomerId?: unknown }
 ): number {
+  const platformCustomerId = Number(supplier.platformCustomerId)
+  if (Number.isFinite(platformCustomerId) && platformCustomerId > 0) {
+    const byId = list.findIndex(item => item.id === platformCustomerId)
+    if (byId >= 0) return byId
+  }
+
   const code = String(supplier.code || supplier.id).trim()
   const name = supplier.name.trim()
   if (code) {
@@ -43,7 +50,10 @@ export function buildPlatformCustomerFromSupplier(
   const today = options?.today ?? formatToday()
   const operator = options?.operator ?? getCurrentUserName()
   const companyType = mapSupplierTypeToPlatformCompanyType(supplier.type)
-  const companyCode = String(supplier.code || supplier.id).trim()
+  const companyCode =
+    existing?.companyCode && isPlatformPartnerCode(existing.companyCode)
+      ? existing.companyCode
+      : String(supplier.code || supplier.id).trim()
   const documents = normalizePartnerDocuments(supplier.documents || [], companyType).map(
     (doc): PlatformCustomerDocument => ({ ...doc })
   )

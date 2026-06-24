@@ -46,6 +46,11 @@ export interface User {
   companyId: number
   role: string
   status: string
+  showOnLogin?: boolean
+  loginHintPassword?: string | null
+  enabledAt?: string
+  validityYears?: number
+  expiresAt?: string
   company?: Company
 }
 
@@ -74,15 +79,22 @@ export interface Warehouse {
 
 const currentCompanyId = ref<number | null>(null)
 
+import { getAuthCompanyId } from './authSession'
+import {
+  SYSTEM_DEFAULT_WAREHOUSE_CODE,
+  SYSTEM_DEFAULT_WAREHOUSE_NAME,
+  buildSystemDefaultWarehouseRecord
+} from './warehouseDefaults'
+
 export const setCurrentCompany = (companyId: number) => {
   currentCompanyId.value = companyId
-  localStorage.setItem('currentCompanyId', String(companyId))
+  sessionStorage.setItem('currentCompanyId', String(companyId))
 }
 
 export const getCurrentCompany = () => {
   if (currentCompanyId.value === null) {
-    const stored = localStorage.getItem('currentCompanyId')
-    currentCompanyId.value = stored ? Number(stored) : 1
+    const stored = getAuthCompanyId()
+    currentCompanyId.value = stored ?? 1
   }
   return currentCompanyId.value
 }
@@ -164,19 +176,125 @@ export const userStore = {
 export const warehouseStore = {
   getAll: () => warehouses.value,
   getById: (id: number) => warehouses.value.find(w => w.id === id),
+  getDefault: (companyId: number) => warehouses.value.find(w => w.companyId === companyId && w.isDefault),
   add: (warehouse: Omit<Warehouse, 'id'>) => {
     const newId = warehouses.value.length > 0 ? Math.max(...warehouses.value.map(w => w.id)) + 1 : 1
-    warehouses.value.push({ ...warehouse, id: newId })
+    const record = { ...warehouse, id: newId, isDefault: warehouse.isDefault ?? false }
+    warehouses.value.push(record)
+    if (record.isDefault) {
+      warehouseStore.setDefault(newId)
+    }
     return newId
   },
   update: (id: number, updates: Partial<Warehouse>) => {
     const index = warehouses.value.findIndex(w => w.id === id)
     if (index > -1) warehouses.value[index] = { ...warehouses.value[index], ...updates }
   },
+  setDefault: (id: number) => {
+    const target = warehouses.value.find(w => w.id === id)
+    if (!target) return
+    warehouses.value.forEach(w => {
+      if (w.companyId === target.companyId) {
+        w.isDefault = w.id === id
+      }
+    })
+  },
+  clearDefault: (id: number) => {
+    const target = warehouses.value.find(w => w.id === id)
+    if (target) target.isDefault = false
+  },
   delete: (id: number) => {
     const index = warehouses.value.findIndex(w => w.id === id)
     if (index > -1) warehouses.value.splice(index, 1)
   }
+}
+
+export function mapWarehouseFromApi(item: Warehouse): Warehouse {
+  return {
+    id: item.id,
+    companyId: item.companyId,
+    code: item.code,
+    name: item.name,
+    address: item.address || '',
+    manager: item.manager || '',
+    phone: item.phone || '',
+    status: item.status || '启用',
+    allowNegativeStock: Boolean(item.allowNegativeStock),
+    isDefault: Boolean(item.isDefault)
+  }
+}
+
+export async function saveWarehouseRecord(
+  data: Omit<Warehouse, 'id'>,
+  id?: number | null
+): Promise<void> {
+  const { warehouseApi } = await import('./api')
+  const payload = {
+    code: data.code,
+    name: data.name,
+    manager: data.manager,
+    phone: data.phone,
+    address: data.address,
+    status: data.status,
+    allowNegativeStock: data.allowNegativeStock,
+    isDefault: data.isDefault
+  }
+
+  if (id) {
+    try {
+      await warehouseApi.update(id, payload)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      if (message.includes('不存在')) {
+        await warehouseApi.create({ ...payload, companyId: data.companyId })
+      } else {
+        throw error
+      }
+    }
+  } else {
+    await warehouseApi.create({ ...payload, companyId: data.companyId })
+  }
+  await loadWarehousesFromApi()
+}
+
+export async function patchWarehouseRecord(id: number, updates: Partial<Warehouse>): Promise<void> {
+  const { warehouseApi } = await import('./api')
+  const payload: Partial<Warehouse> = { ...updates }
+  delete payload.id
+  delete payload.companyId
+
+  const existing = warehouses.value.find(w => w.id === id)
+  try {
+    await warehouseApi.update(id, payload)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    if (existing && message.includes('不存在')) {
+      await saveWarehouseRecord(
+        {
+          companyId: existing.companyId,
+          code: existing.code,
+          name: existing.name,
+          manager: existing.manager,
+          phone: existing.phone,
+          address: existing.address,
+          status: existing.status,
+          allowNegativeStock: existing.allowNegativeStock,
+          isDefault: existing.isDefault,
+          ...payload
+        },
+        null
+      )
+      return
+    }
+    throw error
+  }
+  await loadWarehousesFromApi()
+}
+
+export async function removeWarehouseRecord(id: number): Promise<void> {
+  const { warehouseApi } = await import('./api')
+  await warehouseApi.delete(id)
+  warehouseStore.delete(id)
 }
 
 export const locationStore = {
@@ -215,4 +333,55 @@ export const positionStore = {
   }
 }
 
-export const refreshData = () => {}
+export const refreshData = async () => {
+  await Promise.all([loadWarehousesFromApi(), loadLocationsFromApi()])
+}
+
+function unwrapApiList<T>(res: unknown): T[] | null {
+  if (Array.isArray(res)) return res as T[]
+  if (res && typeof res === 'object' && Array.isArray((res as { data?: T[] }).data)) {
+    return (res as { data: T[] }).data
+  }
+  return null
+}
+
+export async function loadWarehousesFromApi() {
+  try {
+    const { warehouseApi } = await import('./api')
+    const list = unwrapApiList<Warehouse>(await warehouseApi.getAll())
+    if (!list) {
+      ensureLocalSystemDefaultWarehouse(getCurrentCompany())
+      return
+    }
+    warehouses.value = list.map(mapWarehouseFromApi)
+  } catch {
+    ensureLocalSystemDefaultWarehouse(getCurrentCompany())
+  }
+}
+
+/** 后端不可用时，本地补一条系统默认仓库 ck01 */
+export function ensureLocalSystemDefaultWarehouse(companyId: number) {
+  const companyWarehouses = warehouses.value.filter(w => w.companyId === companyId)
+  if (companyWarehouses.length > 0) return
+
+  warehouseStore.add(buildSystemDefaultWarehouseRecord(companyId))
+}
+
+export async function loadLocationsFromApi() {
+  try {
+    const { locationApi } = await import('./api')
+    const list = unwrapApiList<Location>(await locationApi.getAll())
+    if (!list) return
+    locations.value = list.map(item => ({
+      id: item.id,
+      companyId: item.companyId,
+      code: item.code,
+      name: item.name,
+      warehouse: item.warehouse,
+      area: item.area || '',
+      status: item.status || '启用'
+    }))
+  } catch {
+    // 保留本地数据
+  }
+}

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import '@/styles/data-list-table.scss'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { Search, Plus, Refresh, View } from '@element-plus/icons-vue'
@@ -443,7 +444,7 @@ const handleCurrentChange = () => {}
     </div>
 
     <!-- 订单记录表格 -->
-    <div class="table-card" v-show="activeTab === 'order'">
+    <div class="table-card data-list-table-card" v-show="activeTab === 'order'">
       <el-table :data="filteredOrderRecords" class="common-table" border :fit="true" @header-dragend="handleHeaderDragend">
         <el-table-column prop="id" label="订单号" :width="columnWidths.id">
           <template #default="{ row }">
@@ -510,7 +511,7 @@ const handleCurrentChange = () => {}
     </div>
 
     <!-- 操作日志表格 -->
-    <div class="table-card" v-show="activeTab === 'log'">
+    <div class="table-card data-list-table-card" v-show="activeTab === 'log'">
       <el-table :data="filteredOperationLogs" class="common-table" border>
         <el-table-column prop="orderId" label="订单号" width="140">
           <template #default="{ row }">

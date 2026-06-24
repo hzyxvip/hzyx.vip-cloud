@@ -1,19 +1,25 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
-  warehouseOptions, 
   logisticsCompanyOptions,
   logisticsCompanyMap,
   auditStatusOptions,
   warehouseInStatusOptions,
   formatStatus
 } from '@/utils/statusManager'
+import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
 import { print, preview, type SalesReturnData, type ProductItem } from '@/utils/printService'
 import { getCompanyInfo } from '@/utils/companyConfig'
 
 const router = useRouter()
+
+const warehouseOptions = activeWarehouseOptions
+
+onMounted(() => {
+  refreshWarehouseOptions()
+})
 
 interface OrderItem {
   productCode: string

@@ -2,7 +2,12 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getCompanyInfo, setCompanyInfo, resetCompanyInfo, CompanyInfo } from '@/utils/companyConfig'
-import { logisticsCompanyOptions, warehouseOptions } from '@/utils/statusManager'
+import { logisticsCompanyOptions } from '@/utils/statusManager'
+import {
+  activeWarehouseOptions,
+  isLegacyTestWarehouse,
+  refreshWarehouseOptions
+} from '@/utils/warehouseSettings'
 
 // 公司信息
 const companyForm = reactive<CompanyInfo>({
@@ -21,7 +26,7 @@ const companyForm = reactive<CompanyInfo>({
 })
 
 // 仓库配置
-const warehouseList = ref([...warehouseOptions])
+const warehouseList = ref<Array<{ label: string; value: string; code?: string }>>([])
 
 // 物流配置
 const logisticsList = ref([...logisticsCompanyOptions])
@@ -65,10 +70,22 @@ const saveLogistics = () => {
 
 onMounted(() => {
   loadCompanyInfo()
-  // 从localStorage加载自定义配置
+  refreshWarehouseOptions()
   const savedWarehouse = localStorage.getItem('system_warehouse_list')
   if (savedWarehouse) {
-    warehouseList.value = JSON.parse(savedWarehouse)
+    try {
+      const parsed = JSON.parse(savedWarehouse) as Array<{ label: string; value: string; code?: string }>
+      warehouseList.value = parsed.filter(w =>
+        !isLegacyTestWarehouse({ label: w.label, value: w.value || w.label })
+      )
+    } catch {}
+  }
+  if (!warehouseList.value.length) {
+    warehouseList.value = activeWarehouseOptions.value.map(w => ({
+      label: w.label,
+      value: w.value,
+      code: w.code
+    }))
   }
   const savedLogistics = localStorage.getItem('system_logistics_list')
   if (savedLogistics) {

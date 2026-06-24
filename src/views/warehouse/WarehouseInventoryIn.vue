@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
+import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
 
 const form = ref({ inventoryNo: '', warehouse: '', date: '', items: [] })
+const warehouseOptions = activeWarehouseOptions
+
+onMounted(() => refreshWarehouseOptions())
 </script>
 
 <template>
@@ -14,7 +18,11 @@ const form = ref({ inventoryNo: '', warehouse: '', date: '', items: [] })
       <el-form :model="form" label-width="100px">
         <div class="form-row">
           <el-form-item label="盘点单号"><el-input v-model="form.inventoryNo" /></el-form-item>
-          <el-form-item label="仓库"><el-select v-model="form.warehouse"><el-option label="北京仓库" value="beijing" /></el-select></el-form-item>
+          <el-form-item label="仓库">
+            <el-select v-model="form.warehouse" placeholder="请选择仓库">
+              <el-option v-for="w in warehouseOptions" :key="w.value" :label="w.label" :value="w.value" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="日期"><el-date-picker v-model="form.date" type="date" /></el-form-item>
         </div>
       </el-form>

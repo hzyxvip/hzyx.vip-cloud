@@ -146,6 +146,73 @@ const genSalesOrderNo = () => {
 
 const genInboundNo = () => `PIN${Date.now()}${Math.floor(Math.random() * 100)}`
 
+/** 计算入库明细行金额 */
+export const calcInboundLineAmount = (line: Record<string, unknown>): number => {
+  const qty = Number(line.quantity) || 0
+  const explicit = Number(line.amount)
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  const price = Number(line.price ?? line.unitPrice ?? 0)
+  return Number((qty * price).toFixed(2))
+}
+
+/** 计算入库单合计金额 */
+export const calcInboundItemsAmount = (items: Record<string, unknown>[]): number =>
+  Number(items.reduce((sum, line) => sum + calcInboundLineAmount(line), 0).toFixed(2))
+
+/** 补全入库单金额、种类等展示字段 */
+export const enrichInboundRecord = (inbound: Record<string, unknown>): Record<string, unknown> => {
+  const items = ((inbound.items || []) as Record<string, unknown>[]).map(line => {
+    const qty = Number(line.quantity) || 0
+    const price = Number(line.price ?? line.unitPrice ?? 0)
+    const amount = calcInboundLineAmount({ ...line, quantity: qty, price, unitPrice: price })
+    return { ...line, quantity: qty, price, unitPrice: price, amount }
+  })
+  const computedAmount = calcInboundItemsAmount(items)
+  const existingAmount = Number(inbound.amount)
+  const amount = existingAmount > 0 ? existingAmount : computedAmount
+  const itemCount =
+    inbound.itemCount || (items.length ? `${items.length}种` : '')
+  const totalQty =
+    inbound.totalQuantity ??
+    items.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0)
+  const inboundNo = String(inbound.inboundNo || inbound.id || '')
+  return {
+    ...inbound,
+    id: inbound.id ?? inboundNo,
+    inboundNo,
+    items,
+    amount: amount > 0 ? amount.toFixed(2) : inbound.amount,
+    itemCount,
+    totalQuantity: totalQty
+  }
+}
+
+/** 回填历史入库单缺失的入库金额 */
+export const backfillInboundAmounts = (): number => {
+  const list = readJson<Record<string, unknown>[]>(KEYS.inboundList, [])
+  let changed = 0
+  const next = list.map(row => {
+    const enriched = enrichInboundRecord(row)
+    const before = JSON.stringify({
+      amount: row.amount,
+      itemCount: row.itemCount,
+      totalQuantity: row.totalQuantity
+    })
+    const after = JSON.stringify({
+      amount: enriched.amount,
+      itemCount: enriched.itemCount,
+      totalQuantity: enriched.totalQuantity
+    })
+    if (before !== after) {
+      changed += 1
+      return enriched
+    }
+    return row
+  })
+  if (changed > 0) writeJson(KEYS.inboundList, next)
+  return changed
+}
+
 const updatePurchaseOrder = (orderId: string, patch: Record<string, unknown>) => {
   const orders = getPurchaseOrders()
   const idx = orders.findIndex(o => o.id === orderId)
@@ -169,6 +236,32 @@ const findLinkByBuyerOrder = (buyerOrderId: string) =>
 
 const findLinkBySellerOrder = (sellerOrderId: string) =>
   getCollabLinks().find(l => l.sellerOrderId === sellerOrderId)
+
+/** 销售订单外部单号 = 采购方采购订单号 */
+export const resolveSalesOrderExternalNo = (so: Record<string, unknown>): string => {
+  const direct = String(so.externalNo || '').trim()
+  if (direct) return direct
+  const fromSource = String(so.sourcePurchaseOrderNo || so.sourcePurchaseOrderId || '').trim()
+  if (fromSource) return fromSource
+  const orderId = String(so.id || so.orderNo || '').trim()
+  if (!orderId) return ''
+  const link = findLinkBySellerOrder(orderId)
+  return String(link?.buyerOrderNo || '').trim()
+}
+
+/** 回填历史协同销售订单的外部单号 */
+export const backfillSalesOrderExternalNos = (): number => {
+  const orders = getSalesOrders()
+  let changed = 0
+  const next = orders.map(order => {
+    const externalNo = resolveSalesOrderExternalNo(order)
+    if (!externalNo || externalNo === String(order.externalNo || '').trim()) return order
+    changed += 1
+    return { ...order, externalNo }
+  })
+  if (changed > 0) saveSalesOrders(next)
+  return changed
+}
 
 const upsertLink = (link: CollabLink) => {
   const links = getCollabLinks()
@@ -247,12 +340,12 @@ export const onPurchaseOrderAudited = (po: Record<string, unknown>): CollabLink 
     lines: detailItems,
     discountRate: po.discountRate,
     discountAmount: po.discountAmount,
-    purchaseExpenses: po.purchaseExpenses as { amount?: number | string }[],
-    unitPriceIncludesTax: po.unitPriceIncludesTax === true
+    purchaseExpenses: po.purchaseExpenses as { amount?: number | string }[]
   })
   const amount = formatDealAmountStr(amountResult.dealAmount)
 
   const buyerName = getBuyerCompanyName()
+  const buyerOrderNo = String(po.orderNo || po.id || '')
   const salesOrder = {
     id: soId,
     orderNo: soId,
@@ -270,7 +363,9 @@ export const onPurchaseOrderAudited = (po: Record<string, unknown>): CollabLink 
     receiveStatus: 'notReceived',
     status: 'pending',
     sourcePurchaseOrderId: po.id,
-    sourcePurchaseOrderNo: po.orderNo || po.id,
+    sourcePurchaseOrderNo: buyerOrderNo,
+    externalNo: buyerOrderNo,
+    docSource: '平台协同',
     platformOrderNo: existing?.platformOrderNo || genPlatformNo(),
     modifyRequestStatus: 'none',
     creator: '平台协同',
@@ -341,7 +436,7 @@ export const onSalesOrderAudited = (so: Record<string, unknown>): CollabLink | n
   return link ?? null
 }
 
-/** 按出库明细行生成多张采购入库单 */
+/** 一张销售出库单 → 一张采购入库单；分次出库（货不齐）时再分别转单 */
 export const onSalesOutboundAudited = (
   outbound: Record<string, unknown>
 ): { inbounds: Record<string, unknown>[]; skipped: boolean } => {
@@ -365,49 +460,62 @@ export const onSalesOutboundAudited = (
     return { inbounds: [], skipped: true }
   }
 
-  const items = (outbound.items || outbound.outboundItems || []) as Record<string, unknown>[]
+  const rawItems = (outbound.items || outbound.outboundItems || []) as Record<string, unknown>[]
+  const items = rawItems
+    .map(line => {
+      const qty = Number(line.quantity) || 0
+      const price = Number(line.price ?? line.unitPrice ?? 0)
+      const amount = calcInboundLineAmount({ ...line, quantity: qty, price, unitPrice: price })
+      return { ...line, quantity: qty, price, unitPrice: price, amount }
+    })
+    .filter(line => line.quantity > 0)
   if (!items.length) return { inbounds: [], skipped: false }
 
   const inboundList = readJson<Record<string, unknown>[]>(KEYS.inboundList, [])
-  const created: Record<string, unknown>[] = []
 
-  items.forEach((line, index) => {
-    const qty = Number(line.quantity) || 0
-    if (qty <= 0) return
+  if (outboundNo) {
+    const existing = inboundList.find(
+      ib =>
+        String(ib.outboundNo || '') === outboundNo &&
+        (ib.autoGenerated === true || String(ib.source || '').includes('outbound'))
+    )
+    if (existing) {
+      return { inbounds: [], skipped: true }
+    }
+  }
 
-    const inboundNo = genInboundNo()
-    const inbound = {
-      id: Date.now() + index,
-      inboundNo,
-      orderNo: link?.buyerOrderNo || salesOrderNo || '',
-      purchaseOrderId: link?.buyerOrderId || '',
-      salesOrderNo,
-      outboundNo,
-      platformOrderNo: link?.platformOrderNo || outbound.platformOrderNo || '',
-      supplier: outbound.customer || link?.supplierName || '',
-      supplierCode: outbound.customerCode || '',
-      warehouse: outbound.warehouse || '公司库',
-      date: new Date().toISOString().slice(0, 10),
-      operator: '平台协同',
-      items: [{ ...line, quantity: qty }],
-      totalQuantity: qty,
-      status: 'pending',
-      auditStatus: 'notAudited',
-      autoGenerated: true,
-      source: link ? 'collab-outbound' : 'direct-outbound',
-      createTime: new Date().toLocaleString('zh-CN')
-    }
-    inboundList.unshift(inbound)
-    created.push(inbound)
-    if (link) {
-      link.inboundIds.push(inboundNo)
-      link.status = 'outbound'
-    }
+  const totalQuantity = items.reduce((sum, line) => sum + line.quantity, 0)
+  const amount = calcInboundItemsAmount(items)
+  const inboundNo = genInboundNo()
+  const inbound = enrichInboundRecord({
+    id: Date.now(),
+    inboundNo,
+    orderNo: link?.buyerOrderNo || salesOrderNo || '',
+    purchaseOrderId: link?.buyerOrderId || '',
+    salesOrderNo,
+    outboundNo,
+    platformOrderNo: link?.platformOrderNo || outbound.platformOrderNo || '',
+    supplier: outbound.customer || link?.supplierName || '',
+    supplierCode: outbound.customerCode || '',
+    warehouse: outbound.warehouse || '公司库',
+    date: new Date().toISOString().slice(0, 10),
+    operator: '平台协同',
+    items,
+    totalQuantity,
+    amount: amount.toFixed(2),
+    itemCount: `${items.length}种`,
+    status: 'pending',
+    auditStatus: 'notAudited',
+    autoGenerated: true,
+    source: link ? 'collab-outbound' : 'direct-outbound',
+    createTime: new Date().toLocaleString('zh-CN')
   })
-
+  inboundList.unshift(inbound)
   writeJson(KEYS.inboundList, inboundList)
 
   if (link) {
+    link.inboundIds.push(inboundNo)
+    link.status = 'outbound'
     if (outboundNo && !link.outboundIds.includes(outboundNo)) {
       link.outboundIds.push(outboundNo)
     }
@@ -430,7 +538,7 @@ export const onSalesOutboundAudited = (
     }
   }
 
-  return { inbounds: created, skipped: false }
+  return { inbounds: [inbound], skipped: false }
 }
 
 /** 采购入库确认/审核 → 回写卖方「对方已入库」 */

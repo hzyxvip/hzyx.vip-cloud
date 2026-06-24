@@ -31,7 +31,7 @@ import {
 import {
   findPlatformCustomerById,
   formatToday,
-  getCompanyCategory,
+  getNextPlatformCustomerCode,
   loadPlatformCustomerList,
   savePlatformCustomerList,
   type PlatformCustomer,
@@ -39,9 +39,11 @@ import {
 } from '@/utils/platformCustomerStore'
 import { isPlatformProductAdmin, requirePlatformProductAdmin } from '@/utils/userPermission'
 import type { PlatformFieldDef } from '@/utils/platformFieldStore'
+import { useLayoutNavigateBack } from '@/composables/useLayoutNavigateBack'
 
 const router = useRouter()
 const route = useRoute()
+const layoutNavigateBack = useLayoutNavigateBack()
 
 const isEdit = computed(() => route.path.includes('/edit/'))
 const editId = computed(() => route.params.id as string)
@@ -97,7 +99,7 @@ const loadCreateState = () => {
   }
 
   form.value = createEmptyPlatformCustomerForm()
-  form.value.companyCode = `PC${Date.now().toString().slice(-6)}`
+  form.value.companyCode = getNextPlatformCustomerCode(loadPlatformCustomerList())
   documents.value = createDefaultPartnerDocuments()
 }
 
@@ -182,13 +184,8 @@ const handleSave = () => {
   }
 
   const list = loadPlatformCustomerList()
-  const companyCode = String(form.value.companyCode || '').trim()
-  const duplicate = list.find(
-    item => item.companyCode === companyCode && String(item.id) !== String(editId.value || '')
-  )
-  if (duplicate) {
-    ElMessage.warning('公司代码已存在')
-    return
+  if (!isEdit.value) {
+    form.value.companyCode = getNextPlatformCustomerCode(list)
   }
 
   syncDocumentStatus()
@@ -245,7 +242,7 @@ const handleAuditToggle = async () => {
 }
 
 const handleBack = () => {
-  router.push('/platform/customer')
+  layoutNavigateBack()
 }
 </script>
 
@@ -321,7 +318,7 @@ const handleBack = () => {
               </template>
 
               <el-input
-                v-if="isPlatformCustomerReadOnlyField(field.fieldCode, isEdit)"
+                v-if="isPlatformCustomerReadOnlyField(field.fieldCode)"
                 :model-value="String(form[getPlatformCustomerFormKey(field.fieldCode)] || '')"
                 disabled
               />

@@ -1,13 +1,18 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElLoading } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Setting } from '@element-plus/icons-vue'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { useElTableLayout } from '@/composables/useElTableLayout'
+import '@/styles/product-list-table.scss'
 import { useProductListColumnSettings } from '@/composables/useProductListColumnSettings'
 import { useProductListBatchActions } from '@/composables/useProductListBatchActions'
+import { useProductListSearchKeyboard } from '@/composables/useListSearchKeyboard'
+import { getAuthToken } from '@/utils/authSession'
 import { productSourceLabel } from '@/utils/customerProductService'
-import { saveProductList, loadAndEnsureProductList, clearProductList, getProductUnit } from '@/utils/productStore'
+import { saveProductList, loadAndEnsureProductList, clearProductListFully, getProductUnit, hydrateProductListFromServer, acknowledgeRestoredProductCodes } from '@/utils/productStore'
+import { LOADING_RESULT_MESSAGE_DURATION, runWithLoading } from '@/utils/loadingFeedback'
 import {
   PRODUCT_EXPORT_LIMIT,
   exportProductsToExcel,
@@ -24,10 +29,14 @@ import {
 import {
   applyProductListFilters,
   CATEGORY_ALL_ID,
+  clearProductListCategoryFilter,
   createEmptyProductSearchForm,
+  findCategoryNameBySelection,
   isAllCategorySelected,
-  isValidCategorySelection,
+  loadProductListCategoryFilter,
   PRODUCT_AUDIT_STATUS_OPTIONS,
+  resolveSelectedCategoryAfterRebuild,
+  saveProductListCategoryFilter,
   sortProductsByColumn,
   type ProductColumnSortOrder
 } from '@/utils/productListFilter'
@@ -37,6 +46,7 @@ const importInputRef = ref<HTMLInputElement | null>(null)
 const canProductAuditDelete = computed(() => isPlatformProductAdmin())
 const canProductAudit = computed(() => isProductAuditor())
 const LEGACY_CATEGORY_STORAGE_KEYS = ['defaultProductCategory', 'defaultPlatformProductCategory']
+const CATEGORY_FILTER_STORAGE_KEY = 'dataProductListCategoryFilter'
 
 const defaultCategories = [
   { id: 1, name: '手术器械', children: [
@@ -101,16 +111,34 @@ const filteredCategories = computed(() => {
 // 分类排序方式
 const storedSortType = localStorage.getItem('categorySortType')
 const categorySortType = ref<string>(storedSortType || 'all')
+const lastCategorySortType = ref(categorySortType.value)
+
+const getSavedCategoryName = () => {
+  const saved = loadProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  if (!saved || saved.sortType !== categorySortType.value) return null
+  return saved.categoryName ?? null
+}
+
+const persistCategoryFilter = () => {
+  saveProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY, {
+    sortType: categorySortType.value,
+    categoryId: selectedCategory.value,
+    categoryName: findCategoryNameBySelection(selectedCategory.value, categories.value) ?? undefined
+  })
+}
+
+const syncSelectedCategory = () => {
+  selectedCategory.value = resolveSelectedCategoryAfterRebuild(
+    categorySortType.value,
+    categories.value,
+    selectedCategory.value,
+    getSavedCategoryName()
+  )
+}
 
 // 搜索表单数据
 const searchForm = reactive({
-  codeName: '',
-  spec: '',
-  manufacturer: '',
-  brand: '',
-  type: '',
-  auditStatus: '',
-  status: ''
+  ...createEmptyProductSearchForm()
 })
 
 // 默认商品数据
@@ -226,7 +254,7 @@ const allProducts = ref<any[]>([])
 const filteredData = ref<any[]>([])
 const tableData = ref<any[]>([])
 
-const { columnWidths, handleHeaderDragend } = useTableStyle('product-list', [
+const { columnWidths, getColumnWidth, handleHeaderDragend } = useTableStyle('product-list', [
   { key: 'selection', label: '', defaultWidth: 50 },
   { key: 'index', label: '行号', defaultWidth: 56 },
   { key: 'code', label: '商品编码', defaultWidth: 120 },
@@ -234,6 +262,7 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('product-list', [
   { key: 'spec', label: '规格型号', defaultWidth: 120 },
   { key: 'measureUnit', label: '单位', defaultWidth: 72, align: 'center' },
   { key: 'manufacturer', label: '生产厂家', defaultWidth: 150 },
+  { key: 'registrant', label: '注册人/备案人', defaultWidth: 150 },
   { key: 'brand', label: '品牌', defaultWidth: 80 },
   { key: 'category', label: '商品分类', defaultWidth: 100 },
   { key: 'type', label: '商品类型', defaultWidth: 100 },
@@ -271,10 +300,17 @@ const initProductListData = () => {
 onMounted(() => {
   initProductListData()
 
-  selectedCategory.value = CATEGORY_ALL_ID
   categorySearchKeyword.value = ''
   clearSavedCategoryFilters()
-  Object.assign(searchForm, createEmptyProductSearchForm())
+
+  const saved = loadProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  if (saved?.sortType === categorySortType.value && saved.categoryId != null) {
+    selectedCategory.value = saved.categoryId
+  } else {
+    selectedCategory.value = CATEGORY_ALL_ID
+  }
+
+  resetSearchFormSilently(searchForm)
   handleCategorySort()
   layoutProductTable()
 })
@@ -296,12 +332,7 @@ const clearSavedCategoryFilters = () => {
 }
 
 const refreshProductList = (resetPage = true) => {
-  if (
-    !isAllCategorySelected(selectedCategory.value) &&
-    !isValidCategorySelection(selectedCategory.value, categorySortType.value, categories.value)
-  ) {
-    selectedCategory.value = CATEGORY_ALL_ID
-  }
+  syncSelectedCategory()
 
   filteredData.value = applyProductListFilters(allProducts.value, searchForm, {
     sortType: categorySortType.value,
@@ -355,24 +386,44 @@ const resetProductFilters = () => {
   selectedCategory.value = CATEGORY_ALL_ID
   categorySearchKeyword.value = ''
   clearSavedCategoryFilters()
-  Object.assign(searchForm, createEmptyProductSearchForm())
+  clearProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  resetSearchFormSilently(searchForm)
   selectedIds.value = []
   selectAll.value = false
   refreshProductList(true)
 }
 
-// 刷新数据
-const handleRefresh = () => {
-  initProductListData()
-
-  currentPage.value = 1
-  handleCategorySort()
+// 刷新数据：重新拉取并清空筛选，避免刷新后列表被旧条件隐藏
+const handleRefresh = async () => {
+  await runWithLoading(async () => {
+    if (getAuthToken()) {
+      await hydrateProductListFromServer()
+    }
+    initProductListData()
+    selectedCategory.value = CATEGORY_ALL_ID
+    categorySearchKeyword.value = ''
+    clearSavedCategoryFilters()
+    clearProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+    resetSearchFormSilently(searchForm)
+    selectedIds.value = []
+    selectAll.value = false
+    productTableRef.value?.clearSelection?.()
+    currentPage.value = 1
+    handleCategorySort()
+    ElMessage.success({ message: '数据已刷新', duration: LOADING_RESULT_MESSAGE_DURATION })
+  }, { text: '正在刷新商品资料，请稍候…', minDurationMs: 800 })
 }
 
 // 搜索商品（与分类筛选联合，排除不符合条件的记录）
 const handleSearch = () => {
   refreshProductList(true)
 }
+
+const {
+  onInputEnter: onSearchInputEnter,
+  onSelectEnter: onSearchSelectEnter,
+  resetSearchFormSilently
+} = useProductListSearchKeyboard(handleSearch)
 
 const selectedIds = ref<(number | string)[]>([])
 const selectAll = ref(false)
@@ -381,15 +432,20 @@ const productTableRef = ref<{
   clearSelection: () => void
   doLayout?: () => void
 }>()
+const tableScrollRef = ref<HTMLElement | null>(null)
 
 const layoutProductTable = () => {
-  nextTick(() => {
-    productTableRef.value?.doLayout?.()
-  })
+  relayoutTable()
 }
 
+const { relayoutTable, tableHeight } = useElTableLayout(productTableRef, tableScrollRef)
+
+watch(tableData, () => layoutProductTable())
+watch(tableColumnRenderKey, () => layoutProductTable())
+watch(pageSize, () => layoutProductTable())
+
 const handleSelectionChange = (val: any[]) => {
-  selectedIds.value = val.map(item => item.id)
+  selectedIds.value = val.map(item => getProductRowKey(item))
   selectAll.value = val.length > 0 && val.length === tableData.value.length
 }
 
@@ -405,12 +461,19 @@ const handleSelectAllChange = (checked: boolean) => {
 
 const handleCategoryClick = (id: number) => {
   selectedCategory.value = id
+  persistCategoryFilter()
   refreshProductList(true)
 }
 
 const handleCategorySortTypeChange = () => {
-  selectedCategory.value = CATEGORY_ALL_ID
-  clearSavedCategoryFilters()
+  const typeChanged = categorySortType.value !== lastCategorySortType.value
+  lastCategorySortType.value = categorySortType.value
+
+  if (typeChanged) {
+    selectedCategory.value = CATEGORY_ALL_ID
+    clearProductListCategoryFilter(CATEGORY_FILTER_STORAGE_KEY)
+  }
+
   handleCategorySort()
 }
 
@@ -442,14 +505,17 @@ const handleCategorySort = (resetPage = true) => {
     expandedKeys.value = dynamicCategories.map(c => c.id)
   }
 
+  syncSelectedCategory()
+  persistCategoryFilter()
   refreshProductList(resetPage)
 }
 
-const sortOrders = reactive<Record<'code' | 'name' | 'spec' | 'manufacturer', ProductColumnSortOrder>>({
+const sortOrders = reactive<Record<'code' | 'name' | 'spec' | 'manufacturer' | 'registrant', ProductColumnSortOrder>>({
   code: '',
   name: '',
   spec: '',
-  manufacturer: ''
+  manufacturer: '',
+  registrant: ''
 })
 
 const getActiveColumnSort = () => {
@@ -490,13 +556,19 @@ const clearTableSelection = () => {
   nextTick(() => productTableRef.value?.clearSelection())
 }
 
+const openProductEdit = (row: { code?: string }) => {
+  const code = String(row.code ?? '').trim()
+  if (!code) return
+  router.push(`/data/product/edit/${encodeURIComponent(code)}`)
+}
+
 // 双击行跳转到编辑页面
 const handleRowDoubleClick = (row: any) => {
-  router.push(`/data/product/edit/${row.id}`)
+  openProductEdit(row)
 }
 
 const handleCodeClick = (row: any) => {
-  router.push(`/data/product/edit/${row.id}`)
+  openProductEdit(row)
 }
 
 const {
@@ -555,12 +627,16 @@ const handleClearAllProducts = async () => {
   if (!confirmed) return
 
   allProducts.value = []
-  clearProductList()
+  const synced = await clearProductListFully()
   selectedIds.value = []
   selectAll.value = false
   currentPage.value = 1
   handleCategorySort()
-  ElMessage.success(`已清空全部 ${total} 条商品资料，请重新导入`)
+  ElMessage.success(
+    synced
+      ? `已清空全部 ${total} 条商品资料，请重新导入（以商品编码为唯一标识）`
+      : `本地已清空 ${total} 条，服务器同步失败，请检查网络后点「刷新」`
+  )
 }
 
 const handleImportClick = () => {
@@ -573,30 +649,34 @@ const handleImportFile = async (event: Event) => {
   input.value = ''
   if (!file) return
 
-  const loading = ElLoading.service({
-    lock: true,
-    text: `正在导入 ${file.name}，请稍候…`,
-    background: 'rgba(255, 255, 255, 0.7)'
-  })
-
-  try {
-    await new Promise(resolve => setTimeout(resolve, 0))
+  await runWithLoading(async () => {
     const imported = await parseProductImportFile(file)
     if (imported.length === 0) {
-      ElMessage.warning('未识别到有效商品：请确认含「商品编号/商品编码」和「商品名称」列（WPS 导出格式已支持）')
+      ElMessage.warning({
+        message: '未识别到有效商品：请确认含「商品编号/商品编码」和「商品名称」列（WPS 导出格式已支持）',
+        duration: LOADING_RESULT_MESSAGE_DURATION
+      })
       return
     }
 
     const { list, added, updated, skipped } = mergeImportedProducts(allProducts.value, imported)
     allProducts.value = list
+    acknowledgeRestoredProductCodes(imported.map(item => String(item.code ?? '')))
     saveProductList(list)
     handleCategorySort()
-    ElMessage.success(`导入完成：共识别 ${imported.length} 条，新增 ${added} 条，更新 ${updated} 条${skipped ? `，跳过 ${skipped} 条` : ''}`)
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导入失败，请检查文件格式')
-  } finally {
-    loading.close()
-  }
+    ElMessage.success({
+      message: `导入完成：共识别 ${imported.length} 条，新增 ${added} 条，更新 ${updated} 条${skipped ? `，跳过 ${skipped} 条（含名称+规格+厂家重复）` : ''}`,
+      duration: LOADING_RESULT_MESSAGE_DURATION
+    })
+  }, {
+    text: `正在导入 ${file.name}，请稍候…`,
+    minDurationMs: 1500
+  }).catch(error => {
+    ElMessage.error({
+      message: error instanceof Error ? error.message : '导入失败，请检查文件格式',
+      duration: LOADING_RESULT_MESSAGE_DURATION
+    })
+  })
 }
 </script>
 
@@ -608,27 +688,49 @@ const handleImportFile = async (event: Event) => {
       </div>
     </div>
     
-    <div class="search-form">
-      <el-input v-model="searchForm.codeName" placeholder="商品编码/名称" style="width: 200px;" />
-      <el-input v-model="searchForm.spec" placeholder="规格型号" style="width: 150px;" />
-      <el-input v-model="searchForm.manufacturer" placeholder="生产厂家" style="width: 150px;" />
-      <el-input v-model="searchForm.brand" placeholder="品牌" style="width: 100px;" />
-      <el-input v-model="searchForm.type" placeholder="商品类型" style="width: 100px;" />
-      <el-select
-        v-model="searchForm.auditStatus"
-        placeholder="审核状态"
-        clearable
-        style="width: 110px;"
-      >
+    <div class="search-form list-search-form">
+      <div class="search-field" data-search-key="codeName">
+        <el-input
+          v-model="searchForm.codeName"
+          placeholder="商品编码/名称/拼音"
+          style="width: 200px;"
+          @keydown.enter="onSearchInputEnter('codeName', $event)"
+        />
+      </div>
+      <div class="search-field" data-search-key="spec">
+        <el-input
+          v-model="searchForm.spec"
+          placeholder="规格型号/拼音"
+          style="width: 150px;"
+          @keydown.enter="onSearchInputEnter('spec', $event)"
+        />
+      </div>
+      <div class="search-field" data-search-key="registrant">
+        <el-input
+          v-model="searchForm.registrant"
+          placeholder="注册人/备案人/拼音"
+          style="width: 160px;"
+          @keydown.enter="onSearchInputEnter('registrant', $event)"
+        />
+      </div>
+      <div class="search-field" data-search-key="auditStatus">
+        <el-select
+          v-model="searchForm.auditStatus"
+          placeholder="审核状态"
+          clearable
+          style="width: 110px;"
+          @keydown.enter.capture="onSearchSelectEnter('auditStatus', $event)"
+        >
         <el-option
           v-for="opt in PRODUCT_AUDIT_STATUS_OPTIONS"
           :key="opt.value || 'all'"
           :label="opt.label"
           :value="opt.value"
         />
-      </el-select>
+        </el-select>
+      </div>
       <el-button type="primary" @click="handleSearch">查询</el-button>
-      <el-button @click="resetProductFilters">重置</el-button>
+      <el-button type="danger" plain @click="resetProductFilters">重置</el-button>
       <el-button type="primary" @click="router.push('/data/product/create')">新增</el-button>
       <el-button v-if="canProductAuditDelete" type="danger" plain @click="handleClearAllProducts">清空全部</el-button>
       <el-button type="primary" @click="handleRefresh">刷新</el-button>
@@ -680,6 +782,13 @@ const handleImportFile = async (event: Event) => {
           </el-input>
         </div>
         <div v-if="categorySortType !== 'all'" class="category-tree">
+          <div
+            class="category-title category-all-item"
+            :class="{ active: isAllCategorySelected(selectedCategory) }"
+            @click="handleCategoryClick(CATEGORY_ALL_ID)"
+          >
+            全部分类
+          </div>
             <div v-for="cat in filteredCategories" :key="cat.id" class="category-item">
             <div 
               class="category-title" 
@@ -754,28 +863,29 @@ const handleImportFile = async (event: Event) => {
           </div>
         </div>
         
-        <div class="table-card">
-          <div class="table-scroll">
+        <div class="table-card product-list-table-card">
+          <div ref="tableScrollRef" class="table-scroll product-list-table-scroll">
           <div v-if="sortedVisibleColumns.length === 0" class="header-empty-tip">请点击「商品资料设置」选择要显示的列</div>
           <el-table
             v-else
             ref="productTableRef"
             :key="tableColumnRenderKey"
             :data="tableData"
+            :height="tableHeight"
             :row-key="getProductRowKey"
             class="common-table"
             border
-            :fit="false"
+            :fit="true"
             @selection-change="handleSelectionChange"
             @row-dblclick="handleRowDoubleClick"
             @header-dragend="handleHeaderDragend"
           >
-            <el-table-column type="selection" :width="columnWidths.selection" align="center" header-align="center" />
+            <el-table-column type="selection" :width="getColumnWidth('selection', 50)" align="center" header-align="center" />
             <el-table-column
               type="index"
               label="行号"
               :index="indexMethod"
-              :width="columnWidths.index"
+              :width="getColumnWidth('index', 56)"
               align="center"
               header-align="center"
             />
@@ -785,7 +895,7 @@ const handleImportFile = async (event: Event) => {
               :key="col.key"
               :prop="col.prop"
               :label="col.label"
-              :width="columnWidths[col.key]"
+              :width="getColumnWidth(col.key)"
               :align="col.align"
               :header-align="col.headerAlign || col.align || 'center'"
               show-overflow-tooltip
@@ -1241,76 +1351,6 @@ const handleImportFile = async (event: Event) => {
 .table-scroll {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-
-  :deep(.common-table.el-table) {
-    --table-line-color: #d9d9d9;
-    --table-row-odd-bg: #f0f7ff;
-    --table-row-even-bg: #f5f5f5;
-    --table-row-hover-bg: #fff3cd;
-    --table-header-bg: #f5f5f5;
-
-    border: 1px solid var(--table-line-color);
-
-    .el-table__inner-wrapper::before,
-    .el-table__border-left-patch,
-    .el-table__border-right-patch {
-      background-color: var(--table-line-color);
-    }
-
-    th.el-table__cell,
-    td.el-table__cell {
-      border-color: var(--table-line-color) !important;
-      border-right: 1px solid var(--table-line-color);
-      border-bottom: 1px solid var(--table-line-color);
-    }
-
-    .el-table__header-wrapper th.el-table__cell {
-      background: var(--table-header-bg) !important;
-      color: #333;
-      font-weight: 600;
-    }
-
-    .el-table__header-wrapper th.el-table__cell .cell {
-      text-align: center;
-      justify-content: center;
-      white-space: nowrap;
-    }
-
-    .el-table__header-wrapper th.el-table__cell.is-right,
-    .el-table__body-wrapper td.el-table__cell.is-right {
-      text-align: right;
-    }
-
-    .el-table__header-wrapper th.el-table__cell.is-right .cell,
-    .el-table__body-wrapper td.el-table__cell.is-right .cell {
-      text-align: right;
-      justify-content: flex-end;
-    }
-
-    .el-table__header-wrapper th.el-table__cell.is-left .cell,
-    .el-table__body-wrapper td.el-table__cell.is-left .cell {
-      text-align: left;
-      justify-content: flex-start;
-    }
-
-    .el-table__body-wrapper td.el-table__cell.is-center .cell {
-      text-align: center !important;
-      justify-content: center;
-    }
-
-    .el-table__body-wrapper .el-table__row:nth-child(odd) > td.el-table__cell {
-      background-color: var(--table-row-odd-bg) !important;
-    }
-
-    .el-table__body-wrapper .el-table__row:nth-child(even) > td.el-table__cell {
-      background-color: var(--table-row-even-bg) !important;
-    }
-
-    .el-table__body-wrapper .el-table__row:hover > td.el-table__cell {
-      background-color: var(--table-row-hover-bg) !important;
-    }
-  }
 }
 
 .sort-header {

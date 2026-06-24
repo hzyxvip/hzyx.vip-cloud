@@ -1,6 +1,67 @@
 import type { PartnerDocument, PartnerProfileExtension } from '@/types/partnerProfile'
+import { customerApi } from '@/utils/api'
+import { getAuthToken, getAuthUser } from '@/utils/authSession'
+import { loadPlatformCustomerList } from '@/utils/platformCustomerStore'
+import {
+  ensureStablePlatformPartnerCodes,
+  formatPlatformPartnerCode,
+  getNextPlatformPartnerCode,
+  buildUsedPlatformPartnerCodeSet,
+  rememberRetiredPlatformPartnerCodes
+} from '@/utils/partnerPlatformCode'
 
 export const CUSTOMERS_KEY = 'customers'
+const CUSTOMER_SERVER_SYNCED_KEY = 'customers_serverSyncedAt'
+export const CUSTOMER_DELETED_CODES_KEY = 'customerDeletedCodes'
+export const CUSTOMER_CODE_PREFIX = 'YY'
+
+let customerSyncTask: Promise<boolean> = Promise.resolve(true)
+
+function hasAuthToken(): boolean {
+  return !!getAuthToken()
+}
+
+function customerCodeOf(item: CustomerMaster): string {
+  return String(item.code || item.id || '').trim()
+}
+
+function parseAuditTime(value?: string): number {
+  const ts = Date.parse(String(value || ''))
+  return Number.isNaN(ts) ? 0 : ts
+}
+
+function mergeCustomerRecord(local: CustomerMaster, remote: CustomerMaster): CustomerMaster {
+  const code = customerCodeOf(local) || customerCodeOf(remote)
+  const localAudited = local.auditStatus === 'audited'
+  const remoteAudited = remote.auditStatus === 'audited'
+
+  if (localAudited && !remoteAudited) {
+    return { ...remote, ...local, id: String(local.id || remote.id), code }
+  }
+
+  if (localAudited && remoteAudited) {
+    if (parseAuditTime(local.auditTime) >= parseAuditTime(remote.auditTime)) {
+      return { ...remote, ...local, id: String(local.id || remote.id), code }
+    }
+  }
+
+  return { ...local, ...remote, id: String(remote.id || local.id), code }
+}
+
+function mergeCustomerListsByCode(local: CustomerMaster[], remote: CustomerMaster[]): CustomerMaster[] {
+  const map = new Map<string, CustomerMaster>()
+  for (const item of remote) {
+    const code = customerCodeOf(item)
+    if (code) map.set(code, item)
+  }
+  for (const item of local) {
+    const code = customerCodeOf(item)
+    if (!code) continue
+    const existing = map.get(code)
+    map.set(code, existing ? mergeCustomerRecord(item, existing) : item)
+  }
+  return Array.from(map.values())
+}
 
 export type CustomerDocument = PartnerDocument
 
@@ -39,138 +100,6 @@ export interface CustomerMaster extends PartnerProfileExtension {
 }
 
 export const defaultCustomers: CustomerMaster[] = [
-  {
-    id: 'CU202606001',
-    code: 'CU202606001',
-    name: '北京协和医院',
-    contact: '张三',
-    phone: '13900139000',
-    mobile: '13800138000',
-    email: 'zhang@xiehe.com',
-    type: 'hospital',
-    address: '北京市东城区东单北大街1号',
-    province: '北京市',
-    city: '东城区',
-    postalCode: '100005',
-    auditStatus: 'audited',
-    status: 'normal',
-    creditCode: '91110000101105375R',
-    bankName: '工商银行北京分行',
-    bankAccount: '6222020200012345678',
-    taxNo: '110101101105375',
-    createTime: '2026-06-15',
-    creator: '系统管理员'
-  },
-  {
-    id: 'CU202606002',
-    code: 'CU202606002',
-    name: '上海瑞金医院',
-    contact: '李四',
-    phone: '13900219000',
-    mobile: '13800218000',
-    email: 'li@ruijin.com',
-    type: 'hospital',
-    address: '上海市黄浦区瑞金二路197号',
-    province: '上海市',
-    city: '黄浦区',
-    postalCode: '200025',
-    auditStatus: 'audited',
-    status: 'normal',
-    creditCode: '91310000425011781Q',
-    bankName: '建设银行上海分行',
-    bankAccount: '6227002581234567890',
-    taxNo: '310101425011781',
-    createTime: '2026-06-14',
-    creator: '系统管理员'
-  },
-  {
-    id: 'CU202606003',
-    code: 'CU202606003',
-    name: '广州中山医院',
-    contact: '王五',
-    phone: '13900319000',
-    mobile: '13800318000',
-    email: 'wang@zsyy.com',
-    type: 'hospital',
-    address: '广州市越秀区中山二路58号',
-    province: '广东省',
-    city: '广州市',
-    postalCode: '510080',
-    auditStatus: 'notAudited',
-    status: 'normal',
-    creditCode: '91440000456067556J',
-    bankName: '农业银行广州分行',
-    bankAccount: '6228480080123456789',
-    taxNo: '440101456067556',
-    createTime: '2026-06-13',
-    creator: '张三'
-  },
-  {
-    id: 'CU202606004',
-    code: 'CU202606004',
-    name: '深圳医疗器械有限公司',
-    contact: '赵六',
-    phone: '13900419000',
-    mobile: '13800418000',
-    email: 'zhao@szdevice.com',
-    type: 'deviceCompany',
-    address: '深圳市南山区科技园路8号',
-    province: '广东省',
-    city: '深圳市',
-    postalCode: '518057',
-    auditStatus: 'audited',
-    status: 'disabled',
-    creditCode: '91440300724729974T',
-    bankName: '招商银行深圳分行',
-    bankAccount: '6225887890123456789',
-    taxNo: '440301724729974',
-    createTime: '2026-06-12',
-    creator: '李四'
-  },
-  {
-    id: 'CU202606005',
-    code: 'CU202606005',
-    name: '杭州大药房',
-    contact: '钱七',
-    phone: '13900519000',
-    mobile: '13800518000',
-    email: 'qian@hzdyf.com',
-    type: 'pharmacy',
-    address: '杭州市西湖区延安路500号',
-    province: '浙江省',
-    city: '杭州市',
-    postalCode: '310006',
-    auditStatus: 'audited',
-    status: 'normal',
-    creditCode: '91330100736028591X',
-    bankName: '交通银行杭州分行',
-    bankAccount: '6222620123456789012',
-    taxNo: '330101736028591',
-    createTime: '2026-06-11',
-    creator: '王五'
-  },
-  {
-    id: 'CU202606006',
-    code: 'CU202606006',
-    name: '成都华西诊所',
-    contact: '孙八',
-    phone: '13900619000',
-    mobile: '13800618000',
-    email: 'sun@huaxi.com',
-    type: 'clinic',
-    address: '成都市武侯区玉林路100号',
-    province: '四川省',
-    city: '成都市',
-    postalCode: '610041',
-    auditStatus: 'notAudited',
-    status: 'normal',
-    creditCode: '91510100MA61T2X61N',
-    bankName: '中国银行成都分行',
-    bankAccount: '6217850000123456789',
-    taxNo: '510107MA61T2X61N',
-    createTime: '2026-06-10',
-    creator: '赵六'
-  },
   {
     id: 'GX01671',
     code: 'GX01671',
@@ -221,6 +150,94 @@ export const defaultCustomers: CustomerMaster[] = [
   }
 ]
 
+/** 已废弃的随意演示客户编码，加载时自动清除 */
+const REMOVED_DEMO_CUSTOMER_CODES = new Set([
+  'CU202606001',
+  'CU202606002',
+  'CU202606003',
+  'CU202606004',
+  'CU202606005',
+  'CU202606006',
+  'KH001',
+  'KH002',
+  'KH003',
+  'KH004',
+  'KH005',
+  'KH006'
+])
+
+function filterRemovedDemoCustomers(list: CustomerMaster[]): CustomerMaster[] {
+  return list.filter(item => !REMOVED_DEMO_CUSTOMER_CODES.has(customerCodeOf(item)))
+}
+
+function readDeletedCustomerCodes(): Set<string> {
+  const raw = localStorage.getItem(CUSTOMER_DELETED_CODES_KEY)
+  if (!raw) return new Set()
+  try {
+    const parsed = JSON.parse(raw)
+    return new Set(Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function rememberDeletedCustomerCodes(codes: string[]): void {
+  if (codes.length === 0) return
+  const set = readDeletedCustomerCodes()
+  codes.forEach(code => {
+    if (code) set.add(code)
+  })
+  localStorage.setItem(CUSTOMER_DELETED_CODES_KEY, JSON.stringify([...set]))
+}
+
+function forgetDeletedCustomerCodes(codes: string[]): void {
+  if (codes.length === 0) return
+  const set = readDeletedCustomerCodes()
+  codes.forEach(code => {
+    if (code) set.delete(code)
+  })
+  localStorage.setItem(CUSTOMER_DELETED_CODES_KEY, JSON.stringify([...set]))
+}
+
+function filterDeletedCustomers(list: CustomerMaster[]): CustomerMaster[] {
+  const deletedCodes = readDeletedCustomerCodes()
+  if (deletedCodes.size === 0) return list
+  return list.filter(item => !deletedCodes.has(customerCodeOf(item)))
+}
+
+function customerMatchesDeleteTarget(item: CustomerMaster, idSet: Set<string>): boolean {
+  const code = customerCodeOf(item)
+  return idSet.has(String(item.id)) || (code ? idSet.has(code) : false)
+}
+
+export function formatCustomerCode(sequence: number): string {
+  return formatPlatformPartnerCode(sequence)
+}
+
+/** @deprecated 使用 ensureCustomerPlatformCodes，编号与资料绑定后不再整体重排 */
+export function assignSequentialCustomerCodes(list: CustomerMaster[]): CustomerMaster[] {
+  return ensureCustomerPlatformCodes(list)
+}
+
+export function ensureCustomerPlatformCodes(list: CustomerMaster[]): CustomerMaster[] {
+  return ensureStablePlatformPartnerCodes(list, {
+    getStableId: item => String(item.id),
+    getCode: item => customerCodeOf(item),
+    setCode: (item, code) => ({ ...item, code })
+  })
+}
+
+export function getNextCustomerCode(list: CustomerMaster[]): string {
+  const used = buildUsedPlatformPartnerCodeSet(list.map(item => customerCodeOf(item)))
+  return getNextPlatformPartnerCode(used)
+}
+
+function persistCustomerList(list: CustomerMaster[]): CustomerMaster[] {
+  const withCodes = ensureCustomerPlatformCodes(list)
+  writeCustomerListRaw(withCodes)
+  return withCodes
+}
+
 function readCustomerListRaw(): CustomerMaster[] {
   const stored = localStorage.getItem(CUSTOMERS_KEY)
   if (!stored || stored === '[]') return []
@@ -232,39 +249,184 @@ function readCustomerListRaw(): CustomerMaster[] {
   }
 }
 
+function writeCustomerListRaw(list: CustomerMaster[]): void {
+  localStorage.setItem(CUSTOMERS_KEY, JSON.stringify(list))
+}
+
 export function loadCustomerList(): CustomerMaster[] {
   return readCustomerListRaw()
 }
 
 export function saveCustomerList(list: CustomerMaster[]): void {
-  localStorage.setItem(CUSTOMERS_KEY, JSON.stringify(list))
+  const withCodes = persistCustomerList(list)
+  void syncCustomerListToServer(withCodes)
 }
 
-/** 加载客户列表，空库时写入默认演示数据；按编号补全缺失的默认客户 */
-export function loadAndEnsureCustomerList(): CustomerMaster[] {
-  const stored = readCustomerListRaw()
-  const idSet = new Set(stored.map(item => item.id))
-  const codeSet = new Set(stored.map(item => String(item.code || item.id)).filter(Boolean))
-  const missing = defaultCustomers.filter(
-    item => !idSet.has(item.id) && !codeSet.has(item.code || item.id)
-  )
-  const merged = missing.length ? [...missing, ...stored] : stored.length ? stored : [...defaultCustomers]
+export async function syncCustomerListToServer(
+  list?: CustomerMaster[],
+  options?: { replace?: boolean; background?: boolean }
+): Promise<boolean> {
+  if (!hasAuthToken()) return false
 
-  if (stored.length === 0 || missing.length > 0) {
-    saveCustomerList(merged)
+  const run = async (): Promise<boolean> => {
+    try {
+      const payload = (list ?? readCustomerListRaw()).map(item => ({
+        ...item,
+        code: item.code || item.id
+      }))
+      if (payload.length === 0 && options?.replace !== true) return false
+      await customerApi.sync(payload as Record<string, unknown>[], {
+        replace: options?.replace === true,
+        background: options?.background !== false
+      })
+      localStorage.setItem(CUSTOMER_SERVER_SYNCED_KEY, new Date().toISOString())
+      return true
+    } catch (error) {
+      console.warn('[customerStore] 同步客户到服务器失败', error)
+      return false
+    }
   }
 
-  return merged
+  customerSyncTask = customerSyncTask.then(run, run)
+  return customerSyncTask
+}
+
+/** 登录后从服务器拉取/合并客户资料；服务器为空时回传本地默认数据 */
+export async function hydrateCustomerListFromServer(options?: { timeoutMs?: number }): Promise<void> {
+  if (!hasAuthToken()) return
+
+  const timeoutMs = options?.timeoutMs ?? 15000
+  const hydrateTask = (async () => {
+    const remote = filterDeletedCustomers(
+      filterRemovedDemoCustomers(
+        (await customerApi.getAll({ background: true })) as CustomerMaster[]
+      )
+    )
+
+    if (remote.length > 0) {
+      const local = filterDeletedCustomers(
+        filterRemovedDemoCustomers(readCustomerListRaw())
+      )
+      const merged = filterDeletedCustomers(
+        mergeCustomerListsByCode(local.length > 0 ? local : defaultCustomers, remote)
+      )
+      writeCustomerListRaw(merged)
+      localStorage.setItem(CUSTOMER_SERVER_SYNCED_KEY, new Date().toISOString())
+    }
+
+    loadAndEnsureCustomerList()
+  })()
+
+  try {
+    await Promise.race([
+      hydrateTask,
+      new Promise<void>((_, reject) => {
+        setTimeout(() => reject(new Error('客户数据同步超时')), timeoutMs)
+      })
+    ])
+  } catch (error) {
+    console.warn('[customerStore] 从服务器加载客户失败，继续使用本地数据', error)
+    loadAndEnsureCustomerList()
+  }
+}
+
+export function resolveCustomerMaster(nameOrCode?: string): CustomerMaster | undefined {
+  const key = String(nameOrCode || '').trim()
+  if (!key) return undefined
+  return loadCustomerList().find(
+    item => item.name === key || item.code === key || item.id === key
+  )
+}
+
+export function applyCustomerMasterToTarget(
+  target: {
+    customer?: string
+    customerCode?: string
+    contact?: string
+    phone?: string
+    address?: string
+  },
+  customer: CustomerMaster
+): void {
+  target.customer = customer.name
+  target.customerCode = customer.code || customer.id
+  target.contact = customer.contact || ''
+  target.phone = customer.phone || customer.mobile || ''
+  target.address = customer.address || ''
+}
+
+/** 按客户名称或编码，从资料库补全联系人、电话、地址等字段 */
+export function enrichCustomerFieldsFromMaster(
+  target: {
+    customer?: string
+    customerCode?: string
+    contact?: string
+    phone?: string
+    address?: string
+  }
+): void {
+  const found =
+    resolveCustomerMaster(target.customer) ||
+    resolveCustomerMaster(target.customerCode)
+  if (found) {
+    applyCustomerMasterToTarget(target, found)
+  }
+}
+
+/** 加载客户列表，空库时写入默认演示数据；清除已废弃的随意演示客户 */
+export function loadAndEnsureCustomerList(): CustomerMaster[] {
+  const hasStoredList = localStorage.getItem(CUSTOMERS_KEY) !== null
+  const deletedCodes = readDeletedCustomerCodes()
+  const rawStored = readCustomerListRaw()
+  const stored = filterDeletedCustomers(
+    rawStored.filter(item => !REMOVED_DEMO_CUSTOMER_CODES.has(customerCodeOf(item)))
+  )
+  const idSet = new Set(stored.map(item => item.id))
+  const codeSet = new Set(stored.map(item => customerCodeOf(item)).filter(Boolean))
+  const missing = defaultCustomers.filter(item => {
+    const code = customerCodeOf(item)
+    return !idSet.has(item.id) && !codeSet.has(code) && !deletedCodes.has(code)
+  })
+  const merged = missing.length
+    ? [...missing, ...stored]
+    : stored.length
+      ? stored
+      : hasStoredList
+        ? stored
+        : [...defaultCustomers]
+
+  const normalized = merged.map(item => ({
+    ...item,
+    code: item.code || item.id
+  }))
+  const withCodes = ensureCustomerPlatformCodes(normalized)
+  const shouldWrite =
+    !hasStoredList ||
+    missing.length > 0 ||
+    stored.length !== rawStored.length ||
+    withCodes.some((item, index) => item.code !== normalized[index]?.code)
+
+  if (shouldWrite) {
+    writeCustomerListRaw(withCodes)
+  }
+  return withCodes
 }
 
 export function getCustomerById(id: string): CustomerMaster | undefined {
-  return loadCustomerList().find(c => c.id === id)
+  const key = String(id || '').trim()
+  return loadCustomerList().find(
+    item => item.id === key || customerCodeOf(item) === key
+  )
 }
 
 export function getCurrentUserName(): string {
+  const user = getAuthUser<Record<string, unknown>>()
+  if (user) {
+    return String(user.realName || user.username || user.name || '系统管理员')
+  }
   try {
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
-    return user.realName || user.username || user.name || '系统管理员'
+    const legacy = JSON.parse(localStorage.getItem('user') || '{}')
+    return legacy.realName || legacy.username || legacy.name || '系统管理员'
   } catch {
     return '系统管理员'
   }
@@ -272,25 +434,101 @@ export function getCurrentUserName(): string {
 
 export function upsertCustomer(customer: CustomerMaster): void {
   const list = loadCustomerList()
-  const index = list.findIndex(c => c.id === customer.id)
   const record: CustomerMaster = {
     ...customer,
     code: customer.code || customer.id
   }
+  const code = customerCodeOf(record)
+  const index = list.findIndex(
+    item => item.id === record.id || (code && customerCodeOf(item) === code)
+  )
   if (index >= 0) {
-    list[index] = { ...list[index], ...record }
+    list[index] = { ...list[index], ...record, id: record.id }
   } else {
     list.unshift(record)
   }
   saveCustomerList(list)
 }
 
+export async function saveCustomerRecord(customer: CustomerMaster): Promise<boolean> {
+  const list = loadAndEnsureCustomerList()
+  const record: CustomerMaster = {
+    ...customer,
+    code: customer.code || customer.id
+  }
+  const code = customerCodeOf(record)
+  const index = list.findIndex(
+    item => item.id === record.id || (code && customerCodeOf(item) === code)
+  )
+  if (index >= 0) {
+    list[index] = { ...list[index], ...record, id: record.id }
+  } else {
+    list.unshift(record)
+  }
+  forgetDeletedCustomerCodes([code])
+  const next = persistCustomerList(list)
+  if (!hasAuthToken()) return true
+  return syncCustomerListToServer(next, { background: true, replace: false })
+}
+
 export function deleteCustomer(id: string): boolean {
-  const list = loadCustomerList()
-  const next = list.filter(c => c.id !== id)
-  if (next.length === list.length) return false
-  saveCustomerList(next)
+  const idSet = new Set([String(id)])
+  const existed = loadCustomerList().some(item => customerMatchesDeleteTarget(item, idSet))
+  if (!existed) return false
+  batchDeleteCustomers([id])
   return true
+}
+
+export function batchDeleteCustomers(ids: string[]): CustomerMaster[] {
+  const idSet = new Set(ids.map(String).filter(Boolean))
+  if (idSet.size === 0) return loadAndEnsureCustomerList()
+
+  const list = loadAndEnsureCustomerList()
+  const removedCodes = list
+    .filter(item => customerMatchesDeleteTarget(item, idSet))
+    .map(item => customerCodeOf(item))
+    .filter(Boolean)
+  rememberDeletedCustomerCodes(removedCodes)
+  rememberRetiredPlatformPartnerCodes(removedCodes)
+
+  const next = list.filter(item => !customerMatchesDeleteTarget(item, idSet))
+  const saved = persistCustomerList(next)
+  void syncCustomerListToServer(saved, { background: true, replace: true })
+  return loadAndEnsureCustomerList()
+}
+
+export function setCustomerStatus(
+  id: string,
+  status: 'normal' | 'disabled'
+): CustomerMaster | undefined {
+  const list = loadCustomerList()
+  const index = list.findIndex(item => item.id === id)
+  if (index < 0) return undefined
+
+  list[index] = { ...list[index], status }
+  saveCustomerList(list)
+  return list[index]
+}
+
+export function batchSetCustomerStatus(
+  ids: string[],
+  status: 'normal' | 'disabled'
+): CustomerMaster[] {
+  const idSet = new Set(ids.map(String).filter(Boolean))
+  if (idSet.size === 0) return loadCustomerList()
+
+  const next = loadCustomerList().map(item =>
+    idSet.has(item.id) ? { ...item, status } : item
+  )
+  saveCustomerList(next)
+  return next
+}
+
+/** 业务单据下拉用：正常且已审核的客户 */
+export function loadActiveCustomerList(): CustomerMaster[] {
+  return loadCustomerList().filter(
+    item => item.status !== 'disabled' && item.auditStatus === 'audited'
+  )
 }
 
 export function setCustomerAuditStatus(
@@ -333,4 +571,15 @@ export function batchSetCustomerAuditStatus(
   })
   saveCustomerList(next)
   return next
+}
+
+/** 是否平台关联客户（展示 VIP 标识） */
+export function isPlatformVipCustomer(customer: Partial<CustomerMaster>): boolean {
+  const platformUser = String(customer.platformUser ?? '否').trim()
+  if (platformUser && platformUser !== '否') return true
+  if (String(customer.recordStatus ?? '否').trim() === '是') return true
+
+  const code = customerCodeOf(customer as CustomerMaster)
+  if (!code) return false
+  return loadPlatformCustomerList().some(item => item.companyCode === code)
 }

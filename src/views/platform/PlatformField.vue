@@ -53,8 +53,8 @@ const fieldTypes = [
 
 const modules = [
   { value: 'product', label: '商品资料' },
-  { value: 'supplier', label: '供应商资料' },
-  { value: 'customer', label: '客户管理' },
+  { value: 'supplier', label: '供应商列表' },
+  { value: 'customer', label: '客户列表' },
   { value: 'company', label: '公司资料' },
   { value: 'warehouse', label: '仓库管理' },
   { value: 'location', label: '库位管理' },

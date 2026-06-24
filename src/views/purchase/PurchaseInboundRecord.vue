@@ -1,15 +1,23 @@
 <script setup lang="ts">
+import '@/styles/product-list-table.scss'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { usePurchaseInboundRecordColumnSettings } from '@/composables/usePurchaseInboundRecordColumnSettings'
 import {
   onPurchaseInboundAudited,
-  onPurchaseInboundDeleted
+  onPurchaseInboundDeleted,
+  backfillInboundAmounts,
+  calcInboundItemsAmount,
+  enrichInboundRecord,
+  getCollabLinks
 } from '@/utils/platformCollaborationService'
 
 const router = useRouter()
 const showAdvancedFilter = ref(true)
+
+const PAGE_TITLE = '采购入库单记录'
 
 const INBOUND_STORAGE_KEY = 'purchaseInboundList'
 const SEARCH_FORM_KEY = 'purchase-inbound-search-form'
@@ -192,8 +200,8 @@ const defaultData = [
     orderNo: 'PO202606001',
     supplier: '北京医疗器械有限公司',
     supplierCode: 'SP001',
-    warehouse: '北京仓库',
-    warehouseCode: 'WH001',
+    warehouse: '公司库',
+    warehouseCode: 'ck01',
     date: '2026-06-19',
     operator: '张三',
     itemCount: '3种',
@@ -216,7 +224,7 @@ const defaultData = [
     orderNo: 'PO202606002',
     supplier: '上海医疗科技有限公司',
     supplierCode: 'SP002',
-    warehouse: '上海仓库',
+    warehouse: '公司库',
     warehouseCode: 'WH002',
     date: '2026-06-18',
     operator: '李四',
@@ -240,7 +248,7 @@ const defaultData = [
     orderNo: 'PO202606003',
     supplier: '广州医疗器械厂',
     supplierCode: 'SP003',
-    warehouse: '广州仓库',
+    warehouse: '公司库',
     warehouseCode: 'WH003',
     date: '2026-06-17',
     operator: '王五',
@@ -264,7 +272,7 @@ const defaultData = [
     orderNo: 'PO202606004',
     supplier: '深圳医疗设备公司',
     supplierCode: 'SP004',
-    warehouse: '深圳仓库',
+    warehouse: '公司库',
     warehouseCode: 'WH004',
     date: '2026-06-16',
     operator: '赵六',
@@ -344,6 +352,43 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('purchase-inbound-re
   { key: 'remark', label: '备注', defaultWidth: 120 }
 ])
 
+const {
+  showColumnSelector,
+  columnOptions,
+  selectedColumns,
+  sortedVisibleColumns,
+  tableColumnRenderKey,
+  openColumnSettings,
+  handleColumnDragStart,
+  handleColumnDragOver,
+  handleColumnDrop,
+  confirmColumnSelection
+} = usePurchaseInboundRecordColumnSettings('purchase-inbound-record-list')
+
+const resolveLinkedSalesOrderId = (row: Record<string, unknown>): string => {
+  const direct = String(row.salesOrderNo || '').trim()
+  if (direct) return direct
+  const poId = String(row.purchaseOrderId || row.orderNo || '').trim()
+  if (!poId) return ''
+  const link = getCollabLinks().find(l =>
+    l.buyerOrderId === poId || l.buyerOrderNo === poId
+  )
+  return String(link?.sellerOrderId || link?.sellerOrderNo || '').trim()
+}
+
+const resolveLinkedOutboundNo = (row: Record<string, unknown>): string => {
+  const direct = String(row.outboundNo || '').trim()
+  if (direct) return direct
+  const poId = String(row.purchaseOrderId || row.orderNo || '').trim()
+  const link = getCollabLinks().find(l =>
+    l.buyerOrderId === poId || l.buyerOrderNo === poId
+  )
+  if (link?.outboundIds?.length) {
+    return String(link.outboundIds[link.outboundIds.length - 1])
+  }
+  return ''
+}
+
 const resolveAuditStatus = (row: Record<string, unknown>) => {
   if (row.auditStatus) return String(row.auditStatus)
   const status = String(row.status || '')
@@ -386,18 +431,37 @@ const resolveLogisticsStatusKey = (row: Record<string, unknown>) => {
 }
 
 const normalizeInboundRow = (row: Record<string, unknown>) => {
-  const normalized = {
-    ...row,
-    auditStatus: resolveAuditStatus(row),
-    closeStatus: resolveCloseStatus(row),
-    inboundStatus: resolveInboundStatusKey(row),
-    paymentStatus: resolvePaymentStatusKey(row),
-    logisticsStatus: resolveLogisticsStatusKey(row)
+  const enriched = enrichInboundRecord(row)
+  return {
+    ...enriched,
+    auditStatus: resolveAuditStatus(enriched),
+    closeStatus: resolveCloseStatus(enriched),
+    inboundStatus: resolveInboundStatusKey(enriched),
+    paymentStatus: resolvePaymentStatusKey(enriched),
+    logisticsStatus: resolveLogisticsStatusKey(enriched)
   }
-  return normalized
+}
+
+const formatInboundAmount = (row: Record<string, unknown>) => {
+  const val = Number(row.amount)
+  if (val > 0) {
+    return val.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  }
+  const items = (row.items || []) as Record<string, unknown>[]
+  const computed = calcInboundItemsAmount(items)
+  if (computed > 0) {
+    return computed.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  }
+  return '—'
+}
+
+const displayInboundAmount = (row: Record<string, unknown>) => {
+  const formatted = formatInboundAmount(row)
+  return formatted === '—' ? '—' : `¥${formatted}`
 }
 
 const syncInboundStorage = () => {
+  tableData.value = tableData.value.map(row => normalizeInboundRow(row))
   localStorage.setItem(INBOUND_STORAGE_KEY, JSON.stringify(tableData.value))
 }
 
@@ -416,6 +480,7 @@ const persistInboundChanges = (inboundId: string, changes: Record<string, unknow
 }
 
 const loadData = () => {
+  backfillInboundAmounts()
   const savedList = JSON.parse(localStorage.getItem(INBOUND_STORAGE_KEY) || '[]')
   const existingIds = new Set(defaultData.map(item => item.id))
   const newRows = savedList
@@ -684,31 +749,39 @@ const handleClose = () => {
   }).catch(() => {})
 }
 
-const handleInbound = () => {
-  const row = getSelectedRow()
-  if (row) openInbound(row)
-}
-
 const handleBatchModify = () => {
   if (!requireSelection()) return
   ElMessage.info(`批量修改：已选择 ${selectedRows.value.length} 条入库单`)
 }
 
-const handleToPurchaseOrder = () => {
+const handleToSalesOrder = () => {
   const row = getSelectedRow()
-  if (!row?.orderNo) {
-    ElMessage.warning('该入库单未关联采购订单')
+  if (!row) return
+  const salesOrderId = resolveLinkedSalesOrderId(row)
+  if (!salesOrderId) {
+    ElMessage.warning('该入库单未关联销售订单')
     return
   }
-  const orders = JSON.parse(localStorage.getItem('purchase-orders') || '[]')
-  const po = orders.find((item: Record<string, unknown>) =>
-    String(item.orderNo) === String(row.orderNo) || String(item.id) === String(row.orderNo)
+  const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
+  const so = orders.find((item: Record<string, unknown>) =>
+    String(item.orderNo) === salesOrderId || String(item.id) === salesOrderId
   )
-  if (po?.id) {
-    router.push(`/purchase/order-list/create/${po.id}`)
+  if (so?.id) {
+    router.push(`/sales/order-list/create/${so.id}`)
     return
   }
-  ElMessage.info(`关联采购订单：${row.orderNo}`)
+  router.push({ path: '/sales/order-list/create', query: { id: salesOrderId } })
+}
+
+const handleToSalesOutbound = () => {
+  const row = getSelectedRow()
+  if (!row) return
+  const outboundNo = resolveLinkedOutboundNo(row)
+  if (!outboundNo) {
+    ElMessage.warning('该入库单未关联销售出库单')
+    return
+  }
+  router.push({ path: '/sales/outbound', query: { id: outboundNo } })
 }
 
 const handleSign = () => {
@@ -866,7 +939,7 @@ watch(() => [
 ], saveSearchForm, { deep: true })
 
 onMounted(() => {
-  document.title = '采购入库单记录'
+  document.title = PAGE_TITLE
   const range = getDateRange('thisMonth')
   if (range) {
     searchForm.value.dateRange = range
@@ -882,6 +955,9 @@ onMounted(() => {
 
 <template>
   <div class="page-container">
+    <div class="page-header">
+      <h1>{{ PAGE_TITLE }}</h1>
+    </div>
     <div class="search-card">
       <div class="search-row">
         <el-form :model="searchForm" inline class="search-form">
@@ -963,19 +1039,25 @@ onMounted(() => {
         <el-button type="danger" link size="small" class="btn-delete-link" @click="handleDelete">删除</el-button>
         <el-button type="primary" link size="small" @click="handleEnable">启用</el-button>
         <el-button type="primary" link size="small" @click="handleClose">关闭</el-button>
-        <el-button type="primary" link size="small" @click="handleInbound">入库</el-button>
         <el-button type="primary" link size="small" @click="handleBatchModify">批量修改</el-button>
-        <el-button type="primary" link size="small" @click="handleToPurchaseOrder">关联采购订单</el-button>
+        <el-button type="primary" link size="small" @click="handleToSalesOrder">转销售订单</el-button>
+        <el-button type="primary" link size="small" @click="handleToSalesOutbound">转销售出库单</el-button>
         <el-button type="primary" link size="small" @click="handleSign">入库</el-button>
         <el-button type="primary" link size="small" @click="handleTrackLogistics()">物流</el-button>
+        <el-button type="primary" link size="small" @click="openColumnSettings">列表设置</el-button>
       </div>
       <div class="action-bar-extra">
         <el-button type="primary" class="btn-teal" size="small" @click="handleCreate">新增</el-button>
       </div>
     </div>
 
-    <div class="table-card">
+    <div class="table-card product-list-table-card">
+      <div v-if="sortedVisibleColumns.length === 0" class="header-empty-tip">
+        请点击「列表设置」选择要显示的列
+      </div>
+      <div v-else class="table-scroll product-list-table-scroll">
       <el-table
+        :key="tableColumnRenderKey"
         :data="pagedData"
         class="common-table"
         border
@@ -984,94 +1066,77 @@ onMounted(() => {
         @selection-change="handleSelectionChange"
       >
         <el-table-column type="selection" width="50" />
-        <el-table-column label="入库单号" :width="columnWidths.inboundNo">
+        <el-table-column
+          v-for="col in sortedVisibleColumns"
+          :key="col.key"
+          :prop="col.prop"
+          :label="col.label"
+          :width="columnWidths[col.key]"
+          :align="col.align"
+          :header-align="col.headerAlign || col.align || 'center'"
+        >
           <template #default="{ row }">
-            <span class="code-link" @click="handleInboundNoClick(row)">{{ row.id }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="orderNo" label="采购订单号" :width="columnWidths.orderNo" />
-        <el-table-column prop="supplier" label="供应商" :width="columnWidths.supplier" />
-        <el-table-column prop="warehouse" label="仓库" :width="columnWidths.warehouse" />
-        <el-table-column prop="date" label="入库日期" :width="columnWidths.date" />
-        <el-table-column prop="operator" label="操作员" :width="columnWidths.operator" />
-        <el-table-column prop="itemCount" label="商品种类" :width="columnWidths.itemCount" align="center" />
-        <el-table-column prop="totalQuantity" label="总数量" :width="columnWidths.totalQuantity" align="center" />
-        <el-table-column label="入库金额" :width="columnWidths.amount" align="right">
-          <template #default="{ row }">
-            <span>¥{{ row.amount }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="审核状态" :width="columnWidths.auditStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="resolveAuditStatus(row) === 'audited' ? 'success' : 'info'">
+            <span
+              v-if="col.key === 'inboundNo'"
+              class="code-link"
+              @click="handleInboundNoClick(row)"
+            >{{ row.inboundNo || row.id }}</span>
+            <span v-else-if="col.key === 'amount'">{{ displayInboundAmount(row) }}</span>
+            <el-tag
+              v-else-if="col.key === 'auditStatus'"
+              size="small"
+              :type="resolveAuditStatus(row) === 'audited' ? 'success' : 'info'"
+            >
               {{ auditStatusLabels[resolveAuditStatus(row)] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="入库状态" :width="columnWidths.inboundStatus" align="center">
-          <template #default="{ row }">
             <el-tag
+              v-else-if="col.key === 'inboundStatus'"
               size="small"
               :type="resolveInboundStatusKey(row) === 'allInWarehoused' ? 'success' : resolveInboundStatusKey(row) === 'partiallyInWarehoused' ? 'warning' : 'info'"
             >
               {{ inboundStatusLabels[resolveInboundStatusKey(row)] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="付款状态" :width="columnWidths.paymentStatus" align="center">
-          <template #default="{ row }">
             <el-tag
+              v-else-if="col.key === 'paymentStatus'"
               size="small"
               :type="resolvePaymentStatusKey(row) === 'paid' ? 'success' : resolvePaymentStatusKey(row) === 'partiallyPaid' ? 'warning' : 'info'"
             >
               {{ paymentStatusLabels[resolvePaymentStatusKey(row)] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="物流状态" :width="columnWidths.logisticsStatus" align="center">
-          <template #default="{ row }">
             <el-tag
+              v-else-if="col.key === 'logisticsStatus'"
               size="small"
               :type="resolveLogisticsStatusKey(row) === 'signed' ? 'success' : resolveLogisticsStatusKey(row) === 'inTransit' ? 'warning' : 'info'"
             >
               {{ logisticsStatusLabels[resolveLogisticsStatusKey(row)] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="物流公司" :width="columnWidths.logisticsCompany" align="center">
-          <template #default="{ row }">
-            <span>{{ logisticsCompanyMap[row.logisticsCompany] || '-' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="物流单号" :width="columnWidths.logisticsNo">
-          <template #default="{ row }">
+            <span v-else-if="col.key === 'logisticsCompany'">
+              {{ logisticsCompanyMap[row.logisticsCompany] || '-' }}
+            </span>
             <span
-              v-if="row.logisticsNo"
-              class="code-link"
-              @click="handleTrackLogistics(row)"
-            >{{ row.logisticsNo }}</span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="关闭状态" :width="columnWidths.closeStatus" align="center">
-          <template #default="{ row }">
+              v-else-if="col.key === 'logisticsNo'"
+              :class="{ 'code-link': row.logisticsNo }"
+              @click="row.logisticsNo && handleTrackLogistics(row)"
+            >{{ row.logisticsNo || '-' }}</span>
             <el-tag
+              v-else-if="col.key === 'closeStatus'"
               size="small"
               :type="resolveCloseStatus(row) === 'closed' ? 'danger' : resolveCloseStatus(row) === 'manualClosed' ? 'warning' : 'info'"
             >
               {{ closeStatusLabels[resolveCloseStatus(row)] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" :width="columnWidths.status" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusLabels[row.status]?.color || 'info'">
+            <el-tag
+              v-else-if="col.key === 'status'"
+              size="small"
+              :type="statusLabels[row.status]?.color || 'info'"
+            >
               {{ statusLabels[row.status]?.text || row.status }}
             </el-tag>
+            <span v-else>{{ col.prop ? row[col.prop] : '' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="remark" label="备注" :width="columnWidths.remark" />
       </el-table>
+      </div>
 
       <div class="pagination">
         <el-pagination
@@ -1084,6 +1149,32 @@ onMounted(() => {
       </div>
     </div>
   </div>
+
+  <el-dialog v-model="showColumnSelector" title="采购入库单列表设置" width="720px" draggable>
+    <div class="field-selector">
+      <p class="sort-tip">勾选需要在列表中显示的列，拖拽可调整顺序</p>
+      <el-checkbox-group v-model="selectedColumns">
+        <el-row :gutter="10">
+          <el-col :span="8" v-for="(col, index) in columnOptions" :key="col.key">
+            <div
+              class="field-item"
+              draggable="true"
+              @dragstart="(event) => handleColumnDragStart(event, index)"
+              @dragover="handleColumnDragOver"
+              @drop="(event) => handleColumnDrop(event, index)"
+            >
+              <span class="field-order">{{ index + 1 }}.</span>
+              <el-checkbox :label="col.key" :disabled="col.required">{{ col.label }}</el-checkbox>
+            </div>
+          </el-col>
+        </el-row>
+      </el-checkbox-group>
+    </div>
+    <template #footer>
+      <el-button @click="showColumnSelector = false">取消</el-button>
+      <el-button type="primary" class="btn-teal" @click="confirmColumnSelection">确定</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style lang="scss" scoped>
@@ -1091,6 +1182,18 @@ onMounted(() => {
   padding: 16px 20px;
   background: #f5f7fa;
   min-height: calc(100vh - 60px);
+}
+
+.page-header {
+  margin-bottom: 12px;
+
+  h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #333;
+    margin: 0;
+    line-height: 24px;
+  }
 }
 
 .btn-teal {
@@ -1269,16 +1372,50 @@ onMounted(() => {
   border-radius: 4px;
   padding: 16px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
 
-  :deep(.el-table__header-wrapper th) {
-    background: #f5f7fa;
-    color: #344054;
-    font-weight: 600;
+.header-empty-tip {
+  padding: 40px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 14px;
+}
+
+.field-selector {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 10px 0;
+
+  .sort-tip {
+    color: #909399;
+    font-size: 12px;
+    margin-bottom: 10px;
+    padding: 0 10px;
   }
 
-  :deep(.el-table__row:nth-child(odd)) {
-    background-color: #f0f9f7;
+  .field-item {
+    cursor: move;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    &:hover {
+      background: #f5f7fa;
+    }
+
+    .field-order {
+      color: #909399;
+      font-size: 12px;
+      min-width: 20px;
+    }
   }
+}
+
+.table-scroll {
+  overflow-x: auto;
 }
 
 .code-link {

@@ -10,6 +10,7 @@ import {
   getCompanyCategory,
   type PlatformCustomer
 } from '@/utils/platformCustomerStore'
+import { isPlatformPartnerCode } from '@/utils/partnerPlatformCode'
 
 /** 平台公司资料字段 → 平台客户表单属性（与公司资料设定对齐） */
 export const PLATFORM_CUSTOMER_FIELD_PROP_MAP: Record<string, string> = {
@@ -171,8 +172,8 @@ export function validatePlatformCustomerByFieldDefs(
   return null
 }
 
-export function isPlatformCustomerReadOnlyField(fieldCode: string, isEdit: boolean): boolean {
-  return isEdit && fieldCode === 'companyCode'
+export function isPlatformCustomerReadOnlyField(fieldCode: string): boolean {
+  return fieldCode === 'companyCode'
 }
 
 export function getPlatformCustomerFieldSelectOptions(field: PlatformFieldDef, includePlatformType = true) {
@@ -203,7 +204,10 @@ export function buildPlatformCustomerFromForm(
   return {
     id: existing?.id ?? Date.now(),
     platformStatus: (form.platformStatus as PlatformCustomer['platformStatus']) || 'platformNotAudited',
-    companyCode: String(form.companyCode || '').trim(),
+    companyCode:
+      existing?.companyCode && isPlatformPartnerCode(existing.companyCode)
+        ? existing.companyCode
+        : String(form.companyCode || '').trim(),
     companyName: String(form.companyName || '').trim(),
     companyShortName: String(form.companyShortName || '').trim(),
     companyType: String(form.companyType || ''),

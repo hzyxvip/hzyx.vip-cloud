@@ -4,6 +4,7 @@ import { AppDataSource } from '../config/database'
 import { User } from '../entities/User'
 import { AuthenticatedRequest } from '../middleware/auth'
 import { PLATFORM_BOSS_ROLES } from '../constants/loginAccounts'
+import { resolveAccountValidity, todayYmd } from '../utils/accountValidity'
 
 export class UserController {
   private getUserRepository() {
@@ -17,6 +18,22 @@ export class UserController {
   private sanitizeUser(user: User) {
     const { password: _password, ...safe } = user
     return safe
+  }
+
+  private applyValidityFields(target: User, body: Record<string, unknown>) {
+    if (!('enabledAt' in body) && !('validityYears' in body) && !('expiresAt' in body)) {
+      return
+    }
+
+    const resolved = resolveAccountValidity({
+      enabledAt: 'enabledAt' in body ? body.enabledAt : target.enabledAt,
+      validityYears: 'validityYears' in body ? body.validityYears : target.validityYears,
+      expiresAt: 'expiresAt' in body ? body.expiresAt : target.expiresAt
+    })
+
+    target.enabledAt = resolved.enabledAt
+    target.validityYears = resolved.validityYears
+    target.expiresAt = resolved.expiresAt
   }
 
   async getAll(req: AuthenticatedRequest, res: Response) {
@@ -60,7 +77,19 @@ export class UserController {
 
   async create(req: AuthenticatedRequest, res: Response) {
     try {
-      const { username, password, realName, companyId, role, status } = req.body
+      const {
+        username,
+        password,
+        realName,
+        companyId,
+        role,
+        status,
+        showOnLogin,
+        loginHintPassword,
+        enabledAt,
+        validityYears,
+        expiresAt
+      } = req.body
       const normalizedUsername = String(username || '').trim()
 
       if (!normalizedUsername || !password || !realName || !companyId) {
@@ -78,13 +107,25 @@ export class UserController {
 
       const hashedPassword = await bcrypt.hash(String(password), 10)
 
+      const validity = resolveAccountValidity({
+        enabledAt: enabledAt || todayYmd(),
+        validityYears: validityYears || 1,
+        expiresAt
+      })
       const user = this.getUserRepository().create({
         username: normalizedUsername,
         password: hashedPassword,
         realName: String(realName).trim(),
         companyId: Number(companyId),
         role: role || 'company_admin',
-        status: status || '启用'
+        status: status || '启用',
+        showOnLogin: Boolean(showOnLogin),
+        loginHintPassword: showOnLogin && loginHintPassword
+          ? String(loginHintPassword)
+          : undefined,
+        enabledAt: validity.enabledAt,
+        validityYears: validity.validityYears,
+        expiresAt: validity.expiresAt
       })
 
       await this.getUserRepository().save(user)
@@ -137,7 +178,21 @@ export class UserController {
         updates.realName = String(updates.realName).trim()
       }
 
+      if ('showOnLogin' in updates) {
+        updates.showOnLogin = Boolean(updates.showOnLogin)
+        if (!updates.showOnLogin) {
+          updates.loginHintPassword = undefined
+        }
+      }
+
+      if ('loginHintPassword' in updates) {
+        updates.loginHintPassword = updates.loginHintPassword
+          ? String(updates.loginHintPassword)
+          : undefined
+      }
+
       Object.assign(user, updates)
+      this.applyValidityFields(user, updates)
       await this.getUserRepository().save(user)
 
       const saved = await this.getUserRepository().findOne({

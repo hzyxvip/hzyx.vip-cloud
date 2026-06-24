@@ -2,9 +2,11 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { useLayoutNavigateBack } from '@/composables/useLayoutNavigateBack'
 
 const router = useRouter()
 const route = useRoute()
+const layoutNavigateBack = useLayoutNavigateBack()
 
 const isEdit = ref(false)
 
@@ -65,7 +67,7 @@ const handleSave = () => {
 }
 
 const handleBack = () => {
-  router.push('/data/barcode-rule')
+  layoutNavigateBack()
 }
 </script>
 

@@ -3,8 +3,8 @@ import { ref } from 'vue'
 
 const categories = ref([
   { name: '商品资料列表', path: '/data/product', desc: '商品信息管理' },
-  { name: '供应商资料', path: '/data/supplier', desc: '管理供应商基本信息' },
-  { name: '客户管理', path: '/data/customer', desc: '管理客户基本信息' },
+  { name: '供应商列表', path: '/data/supplier', desc: '管理供应商基本信息' },
+  { name: '客户列表', path: '/data/customer', desc: '管理客户基本信息' },
   { name: '公司资料设定', path: '/data/company', desc: '维护本企业公司资料' },
   { name: '仓库资料设定', path: '/data/warehouse', desc: '仓库信息管理' }
 ])

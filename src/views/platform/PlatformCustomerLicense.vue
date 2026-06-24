@@ -23,9 +23,11 @@ import {
   savePlatformCustomerList,
   type PlatformCustomerDocument
 } from '@/utils/platformCustomerStore'
+import { useLayoutNavigateBack } from '@/composables/useLayoutNavigateBack'
 
 const router = useRouter()
 const route = useRoute()
+const layoutNavigateBack = useLayoutNavigateBack()
 
 const saving = ref(false)
 const loading = ref(false)
@@ -130,13 +132,17 @@ const handleSave = () => {
 }
 
 onMounted(loadData)
+
+const handleBack = () => {
+  layoutNavigateBack()
+}
 </script>
 
 <template>
   <div class="page-container profile-page-primary-btn">
     <div class="page-header">
       <div class="header-left">
-        <el-button :icon="ArrowLeft" @click="router.push(backPath)">返回</el-button>
+        <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
         <div>
           <h1>企业证照</h1>
           <div class="breadcrumb">

@@ -4,7 +4,8 @@ import { useRouter } from 'vue-router'
 import { Setting } from '@element-plus/icons-vue'
 import { useTableStyle } from '@/composables/useTableStyle'
 import { usePlatformCustomerListColumnSettings } from '@/composables/usePlatformCustomerListColumnSettings'
-import { ElMessage, ElMessageBox, ElLoading } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { LOADING_RESULT_MESSAGE_DURATION, runWithLoading } from '@/utils/loadingFeedback'
 import {
   companyTypeOptions as platformCompanyTypeOptions,
   deletePlatformCustomersByIds,
@@ -94,10 +95,6 @@ interface SearchFormState {
   selectedPreset: string
   dateRange: Date[]
   companyCode: string
-  companyName: string
-  pinyin: string
-  phone: string
-  contact: string
   province: string
   city: string
   platformUser: string
@@ -111,10 +108,6 @@ const createEmptySearchForm = (): SearchFormState => ({
   selectedPreset: '',
   dateRange: [],
   companyCode: '',
-  companyName: '',
-  pinyin: '',
-  phone: '',
-  contact: '',
   province: '',
   city: '',
   platformUser: '',
@@ -196,10 +189,6 @@ const matchBySearchForm = (item: ReturnType<typeof loadPlatformCustomerList>[num
   }
 
   if (!includesText(item.companyCode, form.companyCode)) return false
-  if (!includesText(item.companyName, form.companyName)) return false
-  if (!includesText(item.pinyin, form.pinyin)) return false
-  if (!includesText(item.phone, form.phone)) return false
-  if (!includesText(item.contact, form.contact)) return false
   if (!includesText(item.province, form.province)) return false
   if (!includesText(item.city, form.city)) return false
   if (!includesText(item.platformUser, form.platformUser)) return false
@@ -251,7 +240,7 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('platform-customer',
   { key: 'select', label: '', defaultWidth: 40 },
   { key: 'platformStatus', label: '平台状态', defaultWidth: 80 },
   { key: 'status', label: '状态', defaultWidth: 80 },
-  { key: 'companyCode', label: '公司代码', defaultWidth: 100 },
+  { key: 'companyCode', label: '医享平台编号', defaultWidth: 100 },
   { key: 'companyName', label: '公司名称', defaultWidth: 200 },
   { key: 'companyShortName', label: '公司简称', defaultWidth: 100 },
   { key: 'companyType', label: '公司类型', defaultWidth: 80 },
@@ -388,15 +377,24 @@ const handleReset = () => {
   ElMessage.info('筛选条件已重置')
 }
 
-const handleRefresh = () => {
-  tableData.value = loadPlatformCustomerList()
-  handleReset()
-  ElMessage.success('数据已刷新')
+const handleRefresh = async () => {
+  await runWithLoading(async () => {
+    tableData.value = loadPlatformCustomerList()
+    appliedSearch.value = createEmptySearchForm()
+    searchForm.value = createEmptySearchForm()
+    showAdvancedFilter.value = false
+    currentPage.value = 1
+    clearTableSelection()
+    ElMessage.success({ message: '数据已刷新', duration: LOADING_RESULT_MESSAGE_DURATION })
+  }, { text: '正在刷新客户列表，请稍候…', minDurationMs: 800 })
 }
 
 const applyImportedCustomers = (imported: PlatformCustomerImportRow[], sourceLabel: string) => {
   if (imported.length === 0) {
-    ElMessage.warning('未识别到有效客户：请确认含「供应商名称/公司名称」列')
+    ElMessage.warning({
+      message: '未识别到有效客户：请确认含「供应商名称/公司名称」列',
+      duration: LOADING_RESULT_MESSAGE_DURATION
+    })
     return
   }
 
@@ -406,9 +404,10 @@ const applyImportedCustomers = (imported: PlatformCustomerImportRow[], sourceLab
   selectedRows.value = []
   tableRef.value?.clearSelection?.()
   currentPage.value = 1
-  ElMessage.success(
-    `${sourceLabel}完成：共识别 ${imported.length} 条，新增 ${added} 条，更新 ${updated} 条${skipped ? `，跳过 ${skipped} 条` : ''}`
-  )
+  ElMessage.success({
+    message: `${sourceLabel}完成：共识别 ${imported.length} 条，新增 ${added} 条，更新 ${updated} 条${skipped ? `，跳过 ${skipped} 条` : ''}`,
+    duration: LOADING_RESULT_MESSAGE_DURATION
+  })
 }
 
 const handleImportClick = () => {
@@ -421,21 +420,18 @@ const handleImportFile = async (event: Event) => {
   input.value = ''
   if (!file) return
 
-  const loading = ElLoading.service({
-    lock: true,
-    text: `正在导入 ${file.name}，请稍候…`,
-    background: 'rgba(255, 255, 255, 0.7)'
-  })
-
-  try {
-    await new Promise(resolve => setTimeout(resolve, 0))
+  await runWithLoading(async () => {
     const imported = await parsePlatformCustomerImportFile(file)
     applyImportedCustomers(imported, '导入')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导入失败，请检查文件格式')
-  } finally {
-    loading.close()
-  }
+  }, {
+    text: `正在导入 ${file.name}，请稍候…`,
+    minDurationMs: 1500
+  }).catch(error => {
+    ElMessage.error({
+      message: error instanceof Error ? error.message : '导入失败，请检查文件格式',
+      duration: LOADING_RESULT_MESSAGE_DURATION
+    })
+  })
 }
 
 const handleDownloadImportTemplate = () => {
@@ -444,24 +440,22 @@ const handleDownloadImportTemplate = () => {
 }
 
 const handleImportSeedData = async () => {
-  const loading = ElLoading.service({
-    lock: true,
-    text: '正在导入供应商汇总表数据，请稍候…',
-    background: 'rgba(255, 255, 255, 0.7)'
-  })
-
-  try {
+  await runWithLoading(async () => {
     const response = await fetch('/data/platform-customer-seed.json')
     if (!response.ok) {
       throw new Error('内置汇总表数据不可用')
     }
     const imported = (await response.json()) as PlatformCustomerImportRow[]
     applyImportedCustomers(imported, '汇总表导入')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '汇总表导入失败')
-  } finally {
-    loading.close()
-  }
+  }, {
+    text: '正在导入供应商汇总表数据，请稍候…',
+    minDurationMs: 1500
+  }).catch(error => {
+    ElMessage.error({
+      message: error instanceof Error ? error.message : '汇总表导入失败',
+      duration: LOADING_RESULT_MESSAGE_DURATION
+    })
+  })
 }
 
 const handleSizeChange = (size: number) => {
@@ -486,20 +480,16 @@ const handleCurrentChange = (page: number) => {
     <div class="search-card">
       <div class="search-row">
         <el-form :model="searchForm" inline class="search-form">
-          <el-form-item label="公司代码">
-            <el-input v-model="searchForm.companyCode" placeholder="公司代码" clearable style="width: 120px;" />
+          <el-form-item label="医享平台编号">
+            <el-input v-model="searchForm.companyCode" placeholder="医享平台编号" clearable style="width: 140px;" />
           </el-form-item>
-          <el-form-item label="公司名称">
-            <el-input v-model="searchForm.companyName" placeholder="公司名称" clearable style="width: 180px;" />
-          </el-form-item>
-          <el-form-item label="拼音缩写">
-            <el-input v-model="searchForm.pinyin" placeholder="拼音缩写" clearable style="width: 120px;" />
-          </el-form-item>
-          <el-form-item label="电话">
-            <el-input v-model="searchForm.phone" placeholder="电话" clearable style="width: 120px;" />
-          </el-form-item>
-          <el-form-item label="联系人">
-            <el-input v-model="searchForm.contact" placeholder="联系人" clearable style="width: 100px;" />
+          <el-form-item class="keyword-input">
+            <el-input
+              v-model="searchForm.keyword"
+              placeholder="公司名称 / 拼音缩写 / 电话 / 联系人"
+              clearable
+              style="width: 320px;"
+            />
           </el-form-item>
           <el-form-item label="省">
             <el-input v-model="searchForm.province" placeholder="省" clearable style="width: 80px;" />

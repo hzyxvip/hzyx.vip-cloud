@@ -61,7 +61,9 @@ const permissionModules = ref([
       { code: 'purchase_edit', name: '编辑采购订单', checked: false },
       { code: 'purchase_delete', name: '删除采购订单', checked: false },
       { code: 'purchase_audit', name: '审核采购订单', checked: false },
-      { code: 'purchase_inbound', name: '采购入库', checked: false }
+      { code: 'purchase_confirm', name: '确定采购订单', checked: false },
+      { code: 'purchase_inbound', name: '采购入库', checked: false },
+      { code: 'purchase_inbound_confirm', name: '确定采购入库', checked: false }
     ]
   },
   {
@@ -74,7 +76,9 @@ const permissionModules = ref([
       { code: 'sales_edit', name: '编辑销售订单', checked: false },
       { code: 'sales_delete', name: '删除销售订单', checked: false },
       { code: 'sales_audit', name: '审核销售订单', checked: false },
-      { code: 'sales_outbound', name: '销售出库', checked: false }
+      { code: 'sales_confirm', name: '确定销售订单', checked: false },
+      { code: 'sales_outbound', name: '销售出库', checked: false },
+      { code: 'sales_outbound_confirm', name: '确定销售出库', checked: false }
     ]
   },
   {
@@ -84,7 +88,9 @@ const permissionModules = ref([
     permissions: [
       { code: 'warehouse_view', name: '查看库存', checked: false },
       { code: 'warehouse_in', name: '入库操作', checked: false },
+      { code: 'warehouse_in_confirm', name: '确定入库单', checked: false },
       { code: 'warehouse_out', name: '出库操作', checked: false },
+      { code: 'warehouse_out_confirm', name: '确定出库单', checked: false },
       { code: 'warehouse_transfer', name: '调拨操作', checked: false },
       { code: 'warehouse_check', name: '盘点操作', checked: false }
     ]
@@ -108,20 +114,21 @@ const permissionModules = ref([
       { code: 'system_user', name: '用户管理', checked: false },
       { code: 'system_role', name: '角色管理', checked: false },
       { code: 'system_permission', name: '权限管理', checked: false },
-      { code: 'system_log', name: '日志查看', checked: false }
+      { code: 'system_log', name: '日志查看', checked: false },
+      { code: 'document_confirm', name: '确定其他单据', checked: false }
     ]
   }
 ])
 
 const rolePermissions = ref<Record<number, string[]>>({
-  1: ['unit_view', 'unit_add', 'unit_edit', 'unit_delete', 'unit_sync', 'product_view', 'product_add', 'product_edit', 'product_delete', 'product_audit', 'purchase_view', 'purchase_add', 'purchase_edit', 'purchase_delete', 'purchase_audit', 'purchase_inbound', 'sales_view', 'sales_add', 'sales_edit', 'sales_delete', 'sales_audit', 'sales_outbound', 'warehouse_view', 'warehouse_in', 'warehouse_out', 'warehouse_transfer', 'warehouse_check', 'finance_view', 'finance_receipt', 'finance_payment', 'finance_report', 'system_user', 'system_role', 'system_permission', 'system_log'],
+  1: ['unit_view', 'unit_add', 'unit_edit', 'unit_delete', 'unit_sync', 'product_view', 'product_add', 'product_edit', 'product_delete', 'product_audit', 'purchase_view', 'purchase_add', 'purchase_edit', 'purchase_delete', 'purchase_audit', 'purchase_confirm', 'purchase_inbound', 'purchase_inbound_confirm', 'sales_view', 'sales_add', 'sales_edit', 'sales_delete', 'sales_audit', 'sales_confirm', 'sales_outbound', 'sales_outbound_confirm', 'warehouse_view', 'warehouse_in', 'warehouse_in_confirm', 'warehouse_out', 'warehouse_out_confirm', 'warehouse_transfer', 'warehouse_check', 'finance_view', 'finance_receipt', 'finance_payment', 'finance_report', 'document_confirm', 'system_user', 'system_role', 'system_permission', 'system_log'],
   2: ['unit_view', 'unit_add', 'unit_edit', 'unit_delete', 'unit_sync', 'product_view', 'product_add', 'product_edit', 'product_delete', 'product_audit', 'system_user', 'system_role'],
   3: ['unit_view', 'unit_add', 'unit_edit', 'product_view', 'product_add', 'product_edit', 'purchase_view', 'purchase_add', 'purchase_edit', 'sales_view', 'sales_add', 'sales_edit', 'warehouse_view', 'finance_view', 'system_user'],
-  4: ['purchase_view', 'purchase_add', 'purchase_edit', 'purchase_inbound', 'warehouse_view'],
-  5: ['sales_view', 'sales_add', 'sales_edit', 'sales_outbound', 'warehouse_view'],
+  4: ['purchase_view', 'purchase_add', 'purchase_edit', 'purchase_confirm', 'purchase_inbound', 'purchase_inbound_confirm', 'warehouse_view'],
+  5: ['sales_view', 'sales_add', 'sales_edit', 'sales_confirm', 'sales_outbound', 'sales_outbound_confirm', 'warehouse_view'],
   6: ['warehouse_view', 'warehouse_in', 'warehouse_out', 'warehouse_transfer', 'warehouse_check'],
   7: ['finance_view', 'finance_receipt', 'finance_payment', 'finance_report'],
-  8: ['purchase_audit', 'sales_audit', 'product_audit'],
+  8: ['purchase_audit', 'purchase_confirm', 'sales_audit', 'sales_confirm', 'sales_outbound_confirm', 'purchase_inbound_confirm', 'product_audit', 'document_confirm'],
   9: ['unit_view', 'product_view', 'purchase_view', 'sales_view', 'warehouse_view', 'finance_view']
 })
 

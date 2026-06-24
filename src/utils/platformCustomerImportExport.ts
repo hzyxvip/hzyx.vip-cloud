@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx'
 import {
+  formatPlatformCustomerCode,
   formatToday,
   type PlatformCustomer
 } from '@/utils/platformCustomerStore'
@@ -131,10 +132,10 @@ export function parsePlatformCustomerImportFile(file: File): Promise<PlatformCus
 }
 
 function createImportCode(existingCodes: Set<string>, seq: number): string {
-  let code = `PC${String(100000 + seq).slice(-6)}`
+  let code = formatPlatformCustomerCode(seq)
   while (existingCodes.has(code)) {
     seq += 1
-    code = `PC${String(100000 + seq).slice(-6)}`
+    code = formatPlatformCustomerCode(seq)
   }
   existingCodes.add(code)
   return code

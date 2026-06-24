@@ -2,8 +2,10 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
 
 const router = useRouter()
+const warehouseOptions = activeWarehouseOptions
 
 const defaultItems = [
   { id: 1, fromWarehouse: '', toWarehouse: '', productCode: '', productName: '', spec: '', batchNo: '', quantity: 0, unit: '', price: 0, amount: 0, remark: '' }
@@ -146,6 +148,7 @@ const handleCancel = () => {
 }
 
 onMounted(() => {
+  refreshWarehouseOptions()
   form.documentNo = `TRIN${Date.now()}`
 })
 </script>
@@ -228,18 +231,14 @@ onMounted(() => {
             <el-table-column label="调出仓库" width="120">
               <template #default="scope">
                 <el-select v-model="scope.row.fromWarehouse" placeholder="选择仓库" style="width: 100%;">
-                  <el-option label="北京仓库" value="beijing" />
-                  <el-option label="上海仓库" value="shanghai" />
-                  <el-option label="广州仓库" value="guangzhou" />
+                  <el-option v-for="w in warehouseOptions" :key="w.value" :label="w.label" :value="w.value" />
                 </el-select>
               </template>
             </el-table-column>
             <el-table-column label="调入仓库" width="120">
               <template #default="scope">
                 <el-select v-model="scope.row.toWarehouse" placeholder="选择仓库" style="width: 100%;">
-                  <el-option label="北京仓库" value="beijing" />
-                  <el-option label="上海仓库" value="shanghai" />
-                  <el-option label="广州仓库" value="guangzhou" />
+                  <el-option v-for="w in warehouseOptions" :key="w.value" :label="w.label" :value="w.value" />
                 </el-select>
               </template>
             </el-table-column>

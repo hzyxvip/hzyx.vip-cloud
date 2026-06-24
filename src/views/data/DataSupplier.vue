@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import '@/styles/data-list-table.scss'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTableStyle } from '@/composables/useTableStyle'
@@ -27,16 +28,13 @@ const tableData = ref<SupplierMaster[]>([])
 const currentPage = ref(1)
 const pageSize = ref(20)
 
-const timePresets = [
-  { label: '当月', value: 'thisMonth' },
-  { label: '今日', value: 'today' },
-  { label: '昨日', value: 'yesterday' },
-  { label: '本周', value: 'thisWeek' },
-  { label: '上月', value: 'lastMonth' },
-  { label: '近三个月', value: 'last3Months' },
-  { label: '近半年', value: 'halfYear' },
-  { label: '近一年', value: 'lastYear' }
-]
+const searchForm = ref({
+  keyword: '',
+  dateRange: [] as Date[],
+  supplierType: [] as string[],
+  auditStatus: [] as string[],
+  status: [] as string[]
+})
 
 const auditStatusOptions = [
   { label: '未审核', value: 'notAudited' },
@@ -62,54 +60,10 @@ const statusLabels: Record<string, { text: string; color: string }> = {
   disabled: { text: '停用', color: 'danger' }
 }
 
-const getDateRange = (preset: string): [Date, Date] | null => {
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-
-  switch (preset) {
-    case 'thisMonth':
-      return [new Date(today.getFullYear(), today.getMonth(), 1), today]
-    case 'today':
-      return [today, today]
-    case 'yesterday': {
-      const yesterday = new Date(today)
-      yesterday.setDate(yesterday.getDate() - 1)
-      return [yesterday, yesterday]
-    }
-    case 'thisWeek': {
-      const weekStart = new Date(today)
-      weekStart.setDate(today.getDate() - today.getDay())
-      return [weekStart, today]
-    }
-    case 'lastMonth':
-      return [
-        new Date(today.getFullYear(), today.getMonth() - 1, 1),
-        new Date(today.getFullYear(), today.getMonth(), 0)
-      ]
-    case 'last3Months':
-      return [new Date(today.getFullYear(), today.getMonth() - 3, 1), today]
-    case 'halfYear':
-      return [new Date(today.getFullYear(), today.getMonth() - 6, 1), today]
-    case 'lastYear':
-      return [new Date(today.getFullYear() - 1, today.getMonth(), today.getDate()), today]
-    default:
-      return null
-  }
-}
-
-const searchForm = ref({
-  keyword: '',
-  selectedPreset: 'thisMonth' as string,
-  dateRange: [] as Date[],
-  supplierType: [] as string[],
-  auditStatus: [] as string[],
-  status: [] as string[]
-})
-
 const { columnWidths, handleHeaderDragend } = useTableStyle('supplier-list', [
   { key: 'index', label: '行号', defaultWidth: 56 },
   { key: 'select', label: '', defaultWidth: 42 },
-  { key: 'id', label: '供应商编号', defaultWidth: 120 },
+  { key: 'id', label: '医享平台编号', defaultWidth: 120 },
   { key: 'name', label: '供应商名称', defaultWidth: 180 },
   { key: 'contact', label: '联系人', defaultWidth: 100 },
   { key: 'phone', label: '联系电话', defaultWidth: 120 },
@@ -146,12 +100,6 @@ const saveSearchForm = () => {
       showAdvancedFilter: showAdvancedFilter.value
     })
   )
-}
-
-const handlePresetChange = (val: string) => {
-  const range = getDateRange(val)
-  if (range) searchForm.value.dateRange = range
-  saveSearchForm()
 }
 
 watch(
@@ -294,22 +242,20 @@ const handleSearch = () => {
 const handleReset = () => {
   searchForm.value = {
     keyword: '',
-    selectedPreset: 'thisMonth',
     dateRange: [],
     supplierType: [],
     auditStatus: [],
     status: []
   }
-  const range = getDateRange('thisMonth')
-  if (range) searchForm.value.dateRange = range
   currentPage.value = 1
   localStorage.removeItem(SEARCH_FORM_KEY)
 }
 
 const handleRefresh = () => {
-  handleReset()
   loadSupplierListData()
   loadCollaborationFlags()
+  currentPage.value = 1
+  clearTableSelection()
   ElMessage.success('数据已刷新')
 }
 
@@ -338,13 +284,11 @@ const {
   handleBatchAudit
 } = usePartnerListBatchAudit(tableData, selectedRows, clearTableSelection, {
   entityLabel: '供应商',
-  batchSetAudit: batchSetSupplierAuditStatus
+  batchSetAudit: batchSetSupplierAuditStatus,
+  onAfterAudit: loadSupplierListData
 })
 
 onMounted(() => {
-  const range = getDateRange('thisMonth')
-  if (range) searchForm.value.dateRange = range
-
   const saved = localStorage.getItem(SEARCH_FORM_KEY)
   if (saved) {
     try {
@@ -352,12 +296,12 @@ onMounted(() => {
       Object.assign(searchForm.value, parsed)
       if (parsed.dateRange?.length) {
         searchForm.value.dateRange = parsed.dateRange.map((d: string) => new Date(d))
-      } else if (range) {
-        searchForm.value.dateRange = range
+      } else {
+        searchForm.value.dateRange = []
       }
       showAdvancedFilter.value = parsed.showAdvancedFilter ?? false
     } catch {
-      if (range) searchForm.value.dateRange = range
+      searchForm.value.dateRange = []
     }
   }
 
@@ -369,23 +313,12 @@ onMounted(() => {
 <template>
   <div class="page-container">
     <div class="page-header">
-      <h1>供应商资料</h1>
+      <h1>供应商列表</h1>
     </div>
 
     <div class="search-card">
       <div class="search-row">
         <el-form :model="searchForm" inline class="search-form">
-          <el-form-item label="业务时段">
-            <el-select
-              v-model="searchForm.selectedPreset"
-              placeholder="时间段"
-              clearable
-              style="width: 100px;"
-              @change="handlePresetChange"
-            >
-              <el-option v-for="preset in timePresets" :key="preset.value" :label="preset.label" :value="preset.value" />
-            </el-select>
-          </el-form-item>
           <el-form-item label="时间范围">
             <el-date-picker
               v-model="searchForm.dateRange"
@@ -400,7 +333,7 @@ onMounted(() => {
           <el-form-item class="keyword-input">
             <el-input
               v-model="searchForm.keyword"
-              placeholder="编号/名称/联系人/电话/地址/统一社会信用代码"
+              placeholder="医享平台编号/名称/联系人/电话/地址/统一社会信用代码"
               clearable
               style="width: 320px;"
               @keyup.enter="handleSearch"
@@ -482,7 +415,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <div class="table-card">
+    <div class="table-card data-list-table-card">
       <el-table
         ref="tableRef"
         :data="pagedData"
@@ -496,7 +429,7 @@ onMounted(() => {
       >
         <el-table-column type="index" label="行号" :index="indexMethod" :width="columnWidths.index" align="center" />
         <el-table-column type="selection" :width="columnWidths.select" fixed="left" />
-        <el-table-column prop="id" label="供应商编号" :width="columnWidths.id">
+        <el-table-column prop="id" label="医享平台编号" :width="columnWidths.id">
           <template #default="{ row }">
             <span class="code-link" @click="handleCodeClick(row)">{{ row.code || row.id }}</span>
           </template>
@@ -601,16 +534,6 @@ onMounted(() => {
       margin-bottom: 0;
       margin-right: 0;
     }
-
-    :deep(.el-input__wrapper),
-    :deep(.el-select .el-input__wrapper),
-    :deep(.el-date-editor.el-input__wrapper) {
-      box-shadow: none !important;
-      border: none !important;
-      border-bottom: 1px solid #e4e7ed !important;
-      border-radius: 0 !important;
-      background: transparent !important;
-    }
   }
 
   .button-group {
@@ -668,34 +591,6 @@ onMounted(() => {
   border-radius: 12px;
   padding: 20px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  overflow-x: auto;
-
-  :deep(.common-table.el-table) {
-    --table-line-color: #d9d9d9;
-    --table-row-odd-bg: #f0f7ff;
-    --table-row-even-bg: #f5f5f5;
-    --table-row-hover-bg: #fff3cd;
-    --table-header-bg: #f5f7fa;
-
-    th.el-table__cell {
-      background: var(--table-header-bg) !important;
-      color: #344054;
-      font-weight: 600;
-      text-align: center !important;
-    }
-
-    .el-table__body-wrapper tr:nth-child(odd) > td.el-table__cell {
-      background-color: var(--table-row-odd-bg) !important;
-    }
-
-    .el-table__body-wrapper tr:nth-child(even) > td.el-table__cell {
-      background-color: var(--table-row-even-bg) !important;
-    }
-
-    .el-table__body-wrapper tr:hover > td.el-table__cell {
-      background-color: var(--table-row-hover-bg) !important;
-    }
-  }
 }
 
 .code-link {

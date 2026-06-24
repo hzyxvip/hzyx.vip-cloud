@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
-const tableData = ref([{ id: 'TR202401001', fromWarehouse: '北京仓库', toWarehouse: '上海仓库', date: '2024-01-15', status: 'pending' }])
+const tableData = ref([{ id: 'TR202401001', fromWarehouse: '公司库', toWarehouse: '公司库', date: '2024-01-15', status: 'pending' }])
 </script>
 
 <template>

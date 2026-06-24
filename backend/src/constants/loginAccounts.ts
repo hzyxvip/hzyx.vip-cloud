@@ -18,6 +18,16 @@ export const DEMO_COMPANY_SEED = {
   status: '启用'
 } as const
 
+export const MANUFACTURER_COMPANY_SEED = {
+  code: 'MFG',
+  name: '医疗器械生产有限公司',
+  companyType: 'manufacturer',
+  address: '浙江省宁波市鄞州区创新大道88号',
+  phone: '0574-66668888',
+  taxNo: '91330200MA2HXXXXXX',
+  status: '启用'
+} as const
+
 export const PLATFORM_ADMIN_ACCOUNT = {
   username: 'admin',
   password: 'admin123',
@@ -31,5 +41,24 @@ export const DEMO_TENANT_ACCOUNT = {
   realName: '演示管理员',
   role: 'company_admin'
 } as const
+
+export const MANUFACTURER_TENANT_ACCOUNT = {
+  username: 'factory',
+  password: 'factory123',
+  realName: '生产厂家管理员',
+  role: 'company_admin'
+} as const
+
+export type SeedLoginAccount =
+  | typeof PLATFORM_ADMIN_ACCOUNT
+  | typeof DEMO_TENANT_ACCOUNT
+  | typeof MANUFACTURER_TENANT_ACCOUNT
+
+/** 种子账号用户名 → 演示密码（登录页快捷填入、后台展示用） */
+export const SEED_LOGIN_PASSWORD_BY_USERNAME: Record<string, string> = {
+  [PLATFORM_ADMIN_ACCOUNT.username]: PLATFORM_ADMIN_ACCOUNT.password,
+  [DEMO_TENANT_ACCOUNT.username]: DEMO_TENANT_ACCOUNT.password,
+  [MANUFACTURER_TENANT_ACCOUNT.username]: MANUFACTURER_TENANT_ACCOUNT.password
+}
 
 export const PLATFORM_BOSS_ROLES = ['admin', 'platform_admin'] as const

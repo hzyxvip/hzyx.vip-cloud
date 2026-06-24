@@ -7,9 +7,11 @@ import PartnerLicenseSections from '@/components/partner/PartnerLicenseSections.
 import { DEFAULT_PARTNER_PROFILE_TAB } from '@/constants/partnerProfileTabs'
 import { getCustomerById, type CustomerDocument } from '@/utils/customerStore'
 import { normalizePartnerDocuments } from '@/utils/partnerLicenseDocuments'
+import { useLayoutNavigateBack } from '@/composables/useLayoutNavigateBack'
 
 const router = useRouter()
 const route = useRoute()
+const layoutNavigateBack = useLayoutNavigateBack()
 
 const activeTab = ref(DEFAULT_PARTNER_PROFILE_TAB)
 
@@ -86,7 +88,7 @@ const handleEdit = () => {
 }
 
 const handleBack = () => {
-  router.push('/data/customer')
+  layoutNavigateBack()
 }
 </script>
 

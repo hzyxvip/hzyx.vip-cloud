@@ -1,0 +1,27 @@
+---
+description: 医享平台编号（YY#####）正式上线约束 — 已用号段永不复用
+globs:
+  - src/utils/partnerPlatformCode.ts
+  - src/utils/customerStore.ts
+  - src/utils/supplierStore.ts
+  - src/utils/platformCustomerStore.ts
+  - src/views/data/DataCustomer*.vue
+  - src/views/data/DataSupplier*.vue
+  - src/views/platform/PlatformCustomer*.vue
+---
+
+# 医享平台编号 — 生产环境硬性规则
+
+## 测试阶段
+- 编号格式 `YY00000` 起，与资料绑定后不在列表中整体重排。
+- 界面上的医享平台编号只读，由系统分配或平台导入带入。
+
+## 正式上线（必须遵守）
+**用过的 YY 编号永久退役，不得再分配给其它客户/供应商/平台客户**，即使原档案已删除，避免对象搞错引发纠纷。
+
+实现要点：
+1. 删除档案时调用 `rememberRetiredPlatformPartnerCodes()` 写入 `retiredPlatformPartnerCodes`。
+2. 发新号时通过 `buildUsedPlatformPartnerCodeSet()` 合并「在册编号 + 已退役编号」。
+3. 上线后退役表应迁到服务端 DB 并做唯一约束/API 校验，不可仅依赖浏览器 localStorage。
+
+修改编号逻辑时务必保持上述约束，不得为方便测试而允许复用已分配过的号段。

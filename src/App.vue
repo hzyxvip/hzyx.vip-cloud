@@ -1,25 +1,30 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
+import { clearAuthSession, getAuthToken } from '@/utils/authSession'
+import { elementPlusZhCn } from '@/utils/localeSetup'
 
 const router = useRouter()
 
 router.beforeEach((to, from, next) => {
-  const token = localStorage.getItem('token')
-  
-  if (!token && to.path !== '/login' && to.path !== '/register' && to.path !== '/forget-password') {
-    next('/login')
-  } else if (token && to.path === '/login') {
-    if (from.path !== '/dashboard') {
-      next('/dashboard')
-    } else {
-      next()
-    }
-  } else {
-    next()
+  const token = getAuthToken()
+  const publicPaths = ['/login', '/register', '/forget-password']
+
+  if (token && to.path === '/login') {
+    next('/dashboard')
+    return
   }
+
+  if (!token && !publicPaths.includes(to.path)) {
+    next('/login')
+    return
+  }
+
+  next()
 })
 </script>
 
 <template>
-  <router-view />
+  <el-config-provider :locale="elementPlusZhCn">
+    <router-view />
+  </el-config-provider>
 </template>

@@ -1,10 +1,21 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, ArrowDown, ArrowUp, Plus, Download, Upload } from '@element-plus/icons-vue'
+import { Search, Plus, Download, Upload } from '@element-plus/icons-vue'
 import * as XLSX from 'xlsx'
-import { warehouses, locations, locationStore, refreshData, getCurrentCompany, type Location } from '@/utils/dataStore'
+import { warehouses, locations, locationStore, loadLocationsFromApi, loadWarehousesFromApi, getCurrentCompany, type Location } from '@/utils/dataStore'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { useStockBatchModifyActions } from '@/composables/useStockBatchModifyActions'
+import {
+  LOCATION_BATCH_MODIFY_COLUMNS,
+  getLocationBatchModifySelectOptions
+} from '@/utils/stockBatchModifyOptions'
+import {
+  buildBatchLocationDeleteConfirm,
+  buildLocationDeleteConfirm
+} from '@/utils/stockDeleteGuard'
+import '@/styles/product-list-table.scss'
+import '@/styles/data-list-page.scss'
 
 const searchKeyword = ref('')
 const showActiveOnly = ref(true)
@@ -13,8 +24,8 @@ const pageSize = ref(20)
 const dialogVisible = ref(false)
 const isEditing = ref(false)
 const selectedIds = ref<number[]>([])
-const selectAll = ref(false)
 const showFilter = ref(false)
+const tableRef = ref()
 const selectedWarehouse = ref('全部')
 
 interface EditForm {
@@ -39,7 +50,6 @@ const editForm = ref<EditForm>({
 
 const { columnWidths, handleHeaderDragend } = useTableStyle('location-data', [
   { key: 'selection', label: '', defaultWidth: 50 },
-  { key: 'action', label: '操作', defaultWidth: 80 },
   { key: 'code', label: '仓位编码', defaultWidth: 120 },
   { key: 'name', label: '仓位名称', defaultWidth: 150 },
   { key: 'warehouse', label: '对应仓库', defaultWidth: 150 },
@@ -188,8 +198,9 @@ const handleSaveAndNew = () => {
 }
 
 const handleDelete = (row: typeof locations.value[0]) => {
-  ElMessageBox.confirm(`确定删除仓位 "${row.name}" 吗？`, '提示', {
-    confirmButtonText: '确定',
+  const confirm = buildLocationDeleteConfirm(row)
+  ElMessageBox.confirm(confirm.message, confirm.title, {
+    confirmButtonText: '确定删除',
     cancelButtonText: '取消',
     type: 'warning'
   }).then(() => {
@@ -199,59 +210,56 @@ const handleDelete = (row: typeof locations.value[0]) => {
 }
 
 const handleToggleStatus = (row: typeof locations.value[0]) => {
-  const newStatus = row.status === '启用' ? '停用' : '启用'
-  locationStore.update(row.id, { status: newStatus })
-  ElMessage.success(newStatus === '启用' ? '已启用' : '已停用')
+  locationStore.update(row.id, { status: row.status })
+  ElMessage.success(row.status === '启用' ? '已启用' : '已停用')
 }
 
 const handleBatchEnable = () => {
   if (selectedIds.value.length === 0) {
-    ElMessage.warning('请选择要启用的仓位')
+    ElMessage.warning('请选择要启用的库位')
     return
   }
   selectedIds.value.forEach(id => {
     locationStore.update(id, { status: '启用' })
   })
-  ElMessage.success(`成功启用 ${selectedIds.value.length} 个仓位`)
-  selectedIds.value = []
-  selectAll.value = false
+  ElMessage.success(`成功启用 ${selectedIds.value.length} 个库位`)
+  clearTableSelection()
 }
 
 const handleBatchDisable = () => {
   if (selectedIds.value.length === 0) {
-    ElMessage.warning('请选择要停用的仓位')
+    ElMessage.warning('请选择要停用的库位')
     return
   }
   selectedIds.value.forEach(id => {
     locationStore.update(id, { status: '停用' })
   })
-  ElMessage.success(`成功停用 ${selectedIds.value.length} 个仓位`)
-  selectedIds.value = []
-  selectAll.value = false
+  ElMessage.success(`成功停用 ${selectedIds.value.length} 个库位`)
+  clearTableSelection()
 }
 
 const handleBatchDelete = () => {
   if (selectedIds.value.length === 0) {
-    ElMessage.warning('请选择要删除的仓位')
+    ElMessage.warning('请选择要删除的库位')
     return
   }
-  ElMessageBox.confirm(`确定删除选中的 ${selectedIds.value.length} 个仓位吗？`, '提示', {
-    confirmButtonText: '确定',
+  const confirm = buildBatchLocationDeleteConfirm(selectedIds.value, locations.value)
+  if (!confirm.ids.length) return
+  ElMessageBox.confirm(confirm.message, confirm.title, {
+    confirmButtonText: '确定删除',
     cancelButtonText: '取消',
     type: 'warning'
   }).then(() => {
-    selectedIds.value.forEach(id => locationStore.delete(id))
-    ElMessage.success(`成功删除 ${selectedIds.value.length} 个仓位`)
-    selectedIds.value = []
-    selectAll.value = false
+    confirm.ids.forEach(id => locationStore.delete(id))
+    ElMessage.success(`成功删除 ${confirm.ids.length} 个库位`)
+    clearTableSelection()
   }).catch(() => {})
 }
 
-const handleRefresh = () => {
-  refreshData()
+const handleRefresh = async () => {
+  await Promise.all([loadLocationsFromApi(), loadWarehousesFromApi()])
   currentPage.value = 1
-  selectedIds.value = []
-  selectAll.value = false
+  clearTableSelection()
   ElMessage.success('刷新成功')
 }
 
@@ -279,27 +287,43 @@ const exportToExcel = () => {
   ElMessage.success('导出成功')
 }
 
-const handleSelectAll = () => {
-  if (selectAll.value) {
-    selectedIds.value = paginatedData.value.map(row => row.id)
-  } else {
-    selectedIds.value = []
-  }
+const handleSelectionChange = (rows: Location[]) => {
+  selectedIds.value = rows.map(row => row.id)
 }
 
-const handleSelectRow = (id: number) => {
-  const index = selectedIds.value.indexOf(id)
-  if (index > -1) {
-    selectedIds.value.splice(index, 1)
-  } else {
-    selectedIds.value.push(id)
-  }
-  selectAll.value = selectedIds.value.length === paginatedData.value.length
+const clearTableSelection = () => {
+  selectedIds.value = []
+  tableRef.value?.clearSelection()
 }
+
+const {
+  showBatchModifyDialog,
+  batchModifyColumn,
+  batchModifyValue,
+  batchModifiableColumns,
+  batchModifyColumnDef,
+  batchModifySelectOptions,
+  openBatchModifyDialog,
+  confirmBatchModify
+} = useStockBatchModifyActions({
+  entityLabel: '库位',
+  columns: LOCATION_BATCH_MODIFY_COLUMNS,
+  selectedIds,
+  getSelectOptions: (key) => getLocationBatchModifySelectOptions(key, activeWarehouses.value.map(item => item.name)),
+  applyUpdate: (id, prop, value) => {
+    locationStore.update(id, { [prop]: value })
+  },
+  clearSelection: clearTableSelection
+})
+
+onMounted(() => {
+  loadLocationsFromApi()
+  loadWarehousesFromApi()
+})
 </script>
 
 <template>
-  <div class="location-page">
+  <div class="location-page data-list-page">
     <!-- 左侧仓库树 -->
     <div class="left-sidebar">
       <div class="sidebar-header">
@@ -332,89 +356,87 @@ const handleSelectRow = (id: number) => {
         <h1>仓位</h1>
       </div>
 
-      <!-- 搜索和操作栏 -->
-      <div class="toolbar">
-        <div class="toolbar-left">
-          <el-input
-            v-model="searchKeyword"
-            placeholder="搜索仓位编码或名称或仓库或区域"
-            style="width: 320px"
-            clearable
-            @keyup.enter="handleSearch"
-          >
-            <template #prefix>
-              <el-icon><Search /></el-icon>
-            </template>
-          </el-input>
-          <el-button class="btn-gray" @click="showFilter = !showFilter">
-            <el-icon><component :is="showFilter ? ArrowUp : ArrowDown" /></el-icon>
-            展开过滤
-          </el-button>
-          <el-select v-model="showActiveOnly" style="width: 100px" @change="currentPage = 1">
-            <el-option :value="true" label="显示在用" />
-            <el-option :value="false" label="全部" />
-          </el-select>
+      <div class="search-card">
+        <div class="search-row">
+          <el-form inline class="search-form list-search-form">
+            <el-form-item>
+              <el-input
+                v-model="searchKeyword"
+                placeholder="搜索仓位编码或名称或仓库或区域"
+                style="width: 320px"
+                clearable
+                @keyup.enter="handleSearch"
+              >
+                <template #prefix>
+                  <el-icon><Search /></el-icon>
+                </template>
+              </el-input>
+            </el-form-item>
+            <el-form-item label="显示范围">
+              <el-select v-model="showActiveOnly" style="width: 100px" @change="currentPage = 1">
+                <el-option :value="true" label="显示在用" />
+                <el-option :value="false" label="全部" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+          <div class="button-group">
+            <el-button type="primary" class="btn-teal" @click="handleSearch">查询</el-button>
+            <el-button @click="handleRefresh">刷新</el-button>
+            <el-button type="primary" class="btn-teal" @click="handleReset">重置</el-button>
+            <el-button type="primary" class="btn-teal" @click="handleAdd">新增</el-button>
+            <el-button type="primary" class="btn-teal" @click="showFilter = !showFilter">
+              {{ showFilter ? '隐藏过滤' : '展开过滤' }}
+            </el-button>
+            <el-button @click="exportToExcel">导出</el-button>
+          </div>
         </div>
-        <div class="toolbar-right">
-          <el-button type="success" @click="handleAdd">
-            <el-icon><Plus /></el-icon>新增
-          </el-button>
-          <el-button class="btn-gray" @click="exportToExcel">
-            <el-icon><Download /></el-icon>导出
-          </el-button>
-          <el-button class="btn-gray">
-            <el-icon><Upload /></el-icon>引入
-          </el-button>
+        <div v-show="showFilter" class="search-advanced">
+          <el-form inline>
+            <el-form-item label="所属仓库">
+              <el-select v-model="selectedWarehouse" style="width: 200px" @change="handleSearch">
+                <el-option label="全部仓库" value="全部" />
+                <el-option v-for="w in activeWarehouses" :key="w.id" :label="w.name" :value="w.name" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="状态">
+              <el-select v-model="showActiveOnly" style="width: 120px">
+                <el-option :value="true" label="启用" />
+                <el-option :value="false" label="全部" />
+              </el-select>
+            </el-form-item>
+          </el-form>
         </div>
       </div>
 
-      <!-- 高级筛选 -->
-      <div v-show="showFilter" class="filter-panel">
-        <el-form :inline="true">
-          <el-form-item label="所属仓库">
-            <el-select v-model="selectedWarehouse" style="width: 200px" @change="handleSearch">
-              <el-option label="全部仓库" value="全部" />
-              <el-option v-for="w in activeWarehouses" :key="w.id" :label="w.name" :value="w.name" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="状态">
-            <el-select v-model="showActiveOnly" style="width: 120px">
-              <el-option :value="true" label="启用" />
-              <el-option :value="false" label="全部" />
-            </el-select>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" @click="handleSearch">查询</el-button>
-            <el-button @click="handleReset">重置</el-button>
-          </el-form-item>
-        </el-form>
+      <div class="action-bar">
+        <div class="action-bar-left">
+          已选中 <strong>{{ selectedIds.length }}</strong> 条
+        </div>
+        <div class="action-bar-controls">
+          <el-button type="primary" link size="small" @click="handleBatchEnable">启用</el-button>
+          <el-button type="primary" link size="small" @click="handleBatchDisable">停用</el-button>
+          <el-button type="primary" link size="small" @click="openBatchModifyDialog">修改</el-button>
+          <el-button type="primary" link size="small" @click="handleBatchDelete">删除</el-button>
+        </div>
+        <div class="action-bar-extra">
+          <el-button class="btn-teal" type="primary" size="small" @click="handleAdd">新增仓位</el-button>
+        </div>
       </div>
 
-      <!-- 批量操作 -->
-      <div class="batch-bar">
-        <el-button class="btn-gray" size="small" @click="handleBatchEnable">启用</el-button>
-        <el-button class="btn-gray" size="small" @click="handleBatchDisable">禁用</el-button>
-        <el-button class="btn-gray" size="small" @click="handleBatchDelete">删除</el-button>
-        <el-button class="btn-gray" size="small">复制</el-button>
-      </div>
-
-      <!-- 表格 -->
-      <div class="table-card">
+      <div class="table-card product-list-table-card">
+        <div class="table-scroll product-list-table-scroll">
         <el-table
+          ref="tableRef"
           :data="paginatedData"
+          class="common-table"
           border
-          stripe
           size="small"
           :fit="true"
           :row-key="(row: Location) => row.id"
           @header-dragend="handleHeaderDragend"
+          @selection-change="handleSelectionChange"
         >
-          <el-table-column type="selection" :width="columnWidths.selection" :selectable="(row: Location) => row.status !== '停用'" @select-all="handleSelectAll" @select="(_val: any, row: Location) => handleSelectRow(row.id)" />
-          <el-table-column label="操作" :width="columnWidths.action" align="center">
-            <template #default="scope">
-              <el-button type="text" size="small" @click="handleEdit(scope.row)">编辑</el-button>
-            </template>
-          </el-table-column>
+          <el-table-column type="selection" :width="columnWidths.selection" />
           <el-table-column prop="code" label="仓位编码" :width="columnWidths.code" />
           <el-table-column prop="name" label="仓位名称" :width="columnWidths.name" />
           <el-table-column prop="warehouse" label="对应仓库" :width="columnWidths.warehouse" />
@@ -425,9 +447,9 @@ const handleSelectRow = (id: number) => {
             </template>
           </el-table-column>
         </el-table>
+        </div>
 
-        <!-- 分页 -->
-        <div class="pagination-wrapper">
+        <div class="pagination">
           <el-pagination
             v-model:current-page="currentPage"
             v-model:page-size="pageSize"
@@ -436,12 +458,56 @@ const handleSelectRow = (id: number) => {
             layout="total, sizes, prev, pager, next, jumper"
             size="small"
             @size-change="currentPage = 1"
-          >
-            <template #total>共 {{ total }} 条</template>
-          </el-pagination>
+          />
         </div>
       </div>
     </div>
+
+    <!-- 修改 -->
+    <el-dialog
+      v-model="showBatchModifyDialog"
+      title="修改（库位）"
+      width="480px"
+      draggable
+      :close-on-click-modal="false"
+    >
+      <el-form label-width="80px" class="list-search-form">
+        <el-form-item label="修改列：">
+          <el-select v-model="batchModifyColumn" placeholder="选择列" style="width: 100%" filterable>
+            <el-option
+              v-for="col in batchModifiableColumns"
+              :key="col.key"
+              :label="col.label"
+              :value="col.key"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="新值：">
+          <el-select
+            v-if="batchModifySelectOptions"
+            v-model="batchModifyValue"
+            :placeholder="`请选择${batchModifyColumnDef?.label || ''}`"
+            style="width: 100%"
+            filterable
+          >
+            <el-option
+              v-for="opt in batchModifySelectOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+          <el-input v-else v-model="batchModifyValue" placeholder="请输入新值" clearable />
+        </el-form-item>
+        <p class="batch-modify-tip">
+          将修改已选 {{ selectedIds.length }} 条库位的「{{ batchModifyColumnDef?.label || '对应字段' }}」
+        </p>
+      </el-form>
+      <template #footer>
+        <el-button @click="showBatchModifyDialog = false">取消</el-button>
+        <el-button type="primary" @click="confirmBatchModify">确定</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 新增/编辑弹窗 -->
     <el-dialog :title="isEditing ? '编辑仓位' : '新增仓位'" v-model="dialogVisible" width="500px" destroy-on-close>
@@ -483,13 +549,11 @@ const handleSelectRow = (id: number) => {
 .location-page {
   display: flex;
   height: calc(100vh - 60px);
-  background: #F5F7FA;
+  background: #f5f7fa;
 }
 
 .left-sidebar {
   width: 200px;
-  background: #fff;
-  border-right: 1px solid #e4e7ed;
   padding: 16px;
 
   .sidebar-header {
@@ -512,12 +576,12 @@ const handleSelectRow = (id: number) => {
 
 .right-content {
   flex: 1;
-  padding: 20px;
+  padding: 16px 20px;
   overflow-y: auto;
 }
 
 .page-header {
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 
   h1 {
     font-size: 20px;
@@ -527,83 +591,11 @@ const handleSelectRow = (id: number) => {
   }
 }
 
-.toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: #fff;
-  border-radius: 8px;
-  margin-bottom: 12px;
-
-  .toolbar-left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .toolbar-right {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-}
-
-.filter-panel {
-  padding: 16px;
-  background: #fff;
-  border-radius: 8px;
-  margin-bottom: 12px;
-}
-
-.batch-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  background: #fff;
-  border-radius: 8px 8px 0 0;
-  border-bottom: 1px solid #e4e7ed;
-}
-
-.table-card {
-  background: #fff;
-  border-radius: 0 0 8px 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-
-  :deep(.el-table__header-wrapper th) {
-    background: #f5f7fa;
-    color: #344054;
-    font-weight: 600;
-    text-align: center !important;
-  }
-  :deep(.el-table__row:nth-child(odd)) {
-    background-color: #F0F9F7;
-  }
-  
-  :deep(.el-table__row:nth-child(even)) {
-    background-color: #FFFFFF;
-  }
-  
-  :deep(.el-table__body tr:hover > td) {
-    background-color: #D4EDE6 !important;
-  }
-}
-
-.pagination-wrapper {
-  display: flex;
-  justify-content: flex-end;
-  padding: 16px;
-}
-
-.btn-gray {
-  --el-button-text-color: #666666 !important;
-  --el-button-bg-color: transparent !important;
-  --el-button-border-color: #d9d9d9 !important;
-
-  &:hover {
-    --el-button-text-color: #409eff !important;
-    --el-button-border-color: #409eff !important;
-  }
+.batch-modify-tip {
+  margin: 0;
+  padding-left: 80px;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.5;
 }
 </style>

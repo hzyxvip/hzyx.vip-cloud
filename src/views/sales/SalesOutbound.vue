@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { print, preview, type SalesOutboundData } from '@/utils/printService'
+import { printSalesOutbound, type SalesOutboundData } from '@/utils/printService'
+import { loadPrintSettings } from '@/utils/printSettings'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance } from 'element-plus'
 import { useTableStyle } from '@/composables/useTableStyle'
@@ -9,7 +10,8 @@ import {
   ArrowLeft, ArrowRight, DArrowLeft, DArrowRight,
   MoreFilled, Plus, Minus, CopyDocument, Setting
 } from '@element-plus/icons-vue'
-import { warehouses, locations } from '@/utils/dataStore'
+import { warehouses, locations, loadLocationsFromApi, loadWarehousesFromApi, getCurrentCompany } from '@/utils/dataStore'
+import { getDefaultWarehouseValue, refreshWarehouseOptions } from '@/utils/warehouseSettings'
 import { getCompanyInfo } from '@/utils/companyConfig'
 import { loadProductList, findProductsByCompositeQuery, type ProductMaster } from '@/utils/productStore'
 import {
@@ -24,6 +26,16 @@ import {
   showComplianceResult
 } from '@/utils/complianceService'
 import { onSalesOutboundAudited } from '@/utils/platformCollaborationService'
+import {
+  enrichCustomerFieldsFromMaster,
+  hydrateCustomerListFromServer,
+  loadActiveCustomerList,
+  applyCustomerMasterToTarget,
+  type CustomerMaster
+} from '@/utils/customerStore'
+import { useDocumentConfirm } from '@/composables/useDocumentConfirm'
+import { CONFIRM_STATUS_CONFIRMED, CONFIRM_STATUS_UNCONFIRMED } from '@/utils/documentFunctionSettings'
+import { generateDocumentNo } from '@/utils/documentNumberSettings'
 import {
   arrowKeyToDirection,
   findFieldKeyFromElement,
@@ -41,8 +53,20 @@ import {
   scheduleAfterSelectClose,
   shouldNavigateOnArrow as shouldNavigateOnArrowBase
 } from '@/utils/erpFormKeyboard'
+import {
+  loadBatchNoFormat,
+  saveBatchNoFormat,
+  applyProductionDateToItemRow,
+  markBatchNoManual,
+  markExpiryManual,
+  reapplyBatchNoFormatToItems,
+  type BatchNoFormat
+} from '@/utils/productBatchExpiry'
+import BatchNoFormatPicker from '@/components/common/BatchNoFormatPicker.vue'
+import BatchNoCell from '@/components/common/BatchNoCell.vue'
 
 const OUTBOUND_STORAGE_KEY = 'salesOutboundRecords'
+const OPERATION_LOG_KEY = 'sales-outbound-operation-logs'
 const HEADER_CONFIG_KEY = 'sales-outbound-field-config'
 const HEADER_ORDER_KEY = 'sales-outbound-field-order'
 const ITEM_COLUMN_CONFIG_KEY = 'sales-outbound-item-column-config'
@@ -154,7 +178,7 @@ const HEADER_FIELD_DEFINITIONS: HeaderFieldOption[] = [
   { key: 'outboundDate', label: '出库日期', type: 'date', required: true },
   { key: 'salesOrderNo', label: '销售订单号', type: 'select', options: 'salesOrderOptions' },
   { key: 'warehouse', label: '仓库', type: 'select', options: 'warehouseOptions', required: true },
-  { key: 'customer', label: '客户', type: 'input', required: true },
+  { key: 'customer', label: '客户', type: 'select', options: 'customerOptions', required: true },
   { key: 'customerCode', label: '客户编码', type: 'input', disabled: true },
   { key: 'contact', label: '联系人', type: 'input' },
   { key: 'phone', label: '联系电话', type: 'input' },
@@ -295,9 +319,21 @@ const transportOptions = [
 
 const warehouseOptions = computed(() =>
   warehouses.value
-    .filter(w => w.status === '启用')
+    .filter(w => w.companyId === getCurrentCompany() && w.status === '启用')
     .map(w => ({ label: w.name, value: w.name }))
 )
+
+const ensureOutboundWarehouseDefault = () => {
+  if (String(form.value.warehouse || '').trim()) return
+  refreshWarehouseOptions()
+  const defaultVal = getDefaultWarehouseValue(warehouseOptions.value.map(opt => ({
+    label: opt.label,
+    value: opt.value
+  })))
+  const fallback = defaultVal || warehouseOptions.value[0]?.value || warehouses.value[0]?.name || ''
+  if (!fallback) return
+  handleWarehouseChange(fallback)
+}
 
 const salesOrderOptions = computed(() => {
   const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]') as Record<string, unknown>[]
@@ -313,8 +349,19 @@ const salesOrderOptions = computed(() => {
   }))
 })
 
+const customerList = ref<CustomerMaster[]>([])
+
+const customerOptions = computed(() =>
+  customerList.value.map(item => ({
+    label: item.name,
+    value: item.name,
+    code: item.code || item.id
+  }))
+)
+
 const getOptions = (optionsKey?: string) => {
   if (optionsKey === 'salesOrderOptions') return salesOrderOptions.value
+  if (optionsKey === 'customerOptions') return customerOptions.value
   if (optionsKey === 'warehouseOptions') return warehouseOptions.value
   if (optionsKey === 'transportOptions') return transportOptions
   if (optionsKey === 'logisticsCompanies') return logisticsCompanies
@@ -332,6 +379,7 @@ const getStatusTagType = (key: string, value: string) => {
 
 const basicInfoCollapsed = ref(false)
 const itemsCollapsed = ref(false)
+const batchNoFormat = ref<BatchNoFormat>(loadBatchNoFormat())
 
 const itemsTableRef = ref<TableInstance>()
 const itemsTableWrapRef = ref<HTMLElement>()
@@ -639,12 +687,54 @@ const form = ref({
   signStatus: '未签收',
   signPerson: '',
   signDate: '',
-  logisticsStatus: ''
+  logisticsStatus: '',
+  status: 'pending',
+  closeStatus: 'notClosed',
+  auditor: '',
+  auditTime: ''
 })
+
+const addOperationLog = (outboundId: string, operationType: string, operator: string, remark: string) => {
+  const logs = JSON.parse(localStorage.getItem(OPERATION_LOG_KEY) || '[]')
+  logs.unshift({
+    id: Date.now(),
+    outboundId,
+    operationType,
+    operator,
+    operationTime: new Date().toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-'),
+    remark
+  })
+  localStorage.setItem(OPERATION_LOG_KEY, JSON.stringify(logs.slice(0, 500)))
+}
+
+const formatLocalDateTime = () =>
+  new Date().toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-')
+
+const {
+  confirmEnabled: salesOutboundConfirmEnabled,
+  canConfirm: canConfirmSalesOutbound,
+  handleConfirm,
+  requireConfirmedBeforeAudit: requireSalesOutboundConfirmed,
+  resetConfirmStatus: resetSalesOutboundConfirm,
+  autoConfirmIfNeeded: autoConfirmSalesOutboundIfNeeded
+} = useDocumentConfirm(
+  'sales_outbound',
+  () => form.value.confirmStatus,
+  value => { form.value.confirmStatus = value },
+  {
+    permissionCode: 'sales_outbound_confirm',
+    validate: () => validateForm() && runOutboundComplianceCheck(),
+    onPersist: () => { handleSave() }
+  }
+)
 
 const outboundItems = ref<OutboundItem[]>([])
 
-const isEditable = computed(() => form.value.confirmStatus === '未确认')
+const isEditable = computed(() => form.value.confirmStatus === CONFIRM_STATUS_UNCONFIRMED)
+
+const confirmStatusTagType = computed(() =>
+  form.value.confirmStatus === CONFIRM_STATUS_CONFIRMED ? 'success' : 'warning'
+)
 
 const isFieldEditable = (field: HeaderFieldOption) => {
   if (field.disabled || field.type === 'status') return false
@@ -727,6 +817,35 @@ const applyLocalProductToItem = (target: OutboundItem, product: ProductMaster) =
   target.storageCondition = product.storageCondition || ''
   target._fromPlatform = Boolean(product.fromPlatform)
   target._platformProductCode = String(product.platformProductCode || '')
+  if (target.mfgDate) {
+    applyProductionDateToItemRow(target as Record<string, any>, product, batchNoFormat.value)
+  }
+}
+
+const applyBatchExpiryFromProductionDate = (
+  row: OutboundItem,
+  product?: ProductMaster | Record<string, unknown>
+) => {
+  if (row.mfgDate) {
+    applyProductionDateToItemRow(row as Record<string, any>, product, batchNoFormat.value)
+  }
+}
+
+const handleBatchNoFormatChange = (format: BatchNoFormat) => {
+  saveBatchNoFormat(format)
+  reapplyBatchNoFormatToItems(outboundItems.value as Record<string, any>[], format)
+}
+
+const handleProductionDateChange = (row: OutboundItem) => {
+  applyProductionDateToItemRow(row as Record<string, any>, undefined, batchNoFormat.value)
+}
+
+const handleBatchNoInput = (row: OutboundItem) => {
+  markBatchNoManual(row as Record<string, any>, batchNoFormat.value)
+}
+
+const handleExpiryDateChange = (row: OutboundItem) => {
+  markExpiryManual(row as Record<string, any>)
 }
 
 const buildItemProductSearchQuery = (item: Record<string, unknown>): string => {
@@ -805,6 +924,7 @@ const applySuggestionToItem = (target: OutboundItem, suggestion: ItemProductSugg
   if (suggestion.source === 'platform') {
     applyPlatformProductToSalesItem(target as Record<string, unknown>, suggestion.raw as PlatformProduct)
     target.unitPrice = Number(suggestion.lastPrice)
+    applyBatchExpiryFromProductionDate(target)
     calcRowAmount(target)
     return
   }
@@ -836,6 +956,7 @@ const handleItemProductSearch = (item: OutboundItem, options: { silent?: boolean
     if (platform) {
       applyPlatformProductToSalesItem(item as Record<string, unknown>, platform)
       item.unitPrice = Number(platform.unitPrice ?? 0)
+      applyBatchExpiryFromProductionDate(item)
       item.productLocked = true
       calcRowAmount(item)
       return
@@ -889,6 +1010,7 @@ const confirmBatchAdd = () => {
     const row = createEmptyItemRow()
     applyLocalProductToItem(row, product)
     row.productLocked = true
+    applyBatchExpiryFromProductionDate(row, product)
     calcRowAmount(row)
     outboundItems.value.push(row)
   })
@@ -1019,7 +1141,7 @@ const handleFieldEnterCapture = (field: HeaderFieldOption, e: KeyboardEvent) => 
     handleDateFieldEnter(field, e)
     return
   }
-  if (field.type === 'select' || field.key === 'salesOrderNo' || field.key === 'warehouse') {
+  if (field.type === 'select' || field.key === 'salesOrderNo' || field.key === 'warehouse' || field.key === 'customer') {
     handleSelectFieldEnter(field, e)
     return
   }
@@ -1159,12 +1281,7 @@ const handleItemsTableKeydown = (e: KeyboardEvent) => {
   navigateItemsTable(direction)
 }
 
-const generateOutboundNo = () => {
-  const now = new Date()
-  const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
-  const random = String(Math.floor(Math.random() * 9000 + 1000))
-  return `XH-${dateStr}-${random}`
-}
+const generateOutboundNo = () => generateDocumentNo('sales_outbound')
 
 const handleWarehouseChange = (warehouseName: string) => {
   form.value.warehouse = warehouseName
@@ -1190,17 +1307,44 @@ const handleLocationChange = (item: OutboundItem, locationCode: string) => {
 const handleSalesOrderChange = (orderNo: string) => {
   const order = salesOrderOptions.value.find(o => o.value === orderNo)
   if (order) {
-    form.value.customer = order.customer
-    form.value.customerCode = order.customerCode
-    form.value.contact = order.contact
-    form.value.phone = order.phone
-    form.value.address = order.receiveAddress
+    const customerFields = {
+      customer: order.customer,
+      customerCode: order.customerCode,
+      contact: order.contact,
+      phone: order.phone,
+      address: order.receiveAddress
+    }
+    enrichCustomerFieldsFromMaster(customerFields)
+    form.value.customer = customerFields.customer
+    form.value.customerCode = customerFields.customerCode
+    form.value.contact = customerFields.contact
+    form.value.phone = customerFields.phone
+    form.value.address = customerFields.address
     if (order.warehouse) {
       handleWarehouseChange(order.warehouse)
+    } else {
+      ensureOutboundWarehouseDefault()
+    }
+
+    const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]') as Record<string, unknown>[]
+    const fullOrder = orders.find(o =>
+      String(o.id) === orderNo || String(o.orderNo) === orderNo
+    )
+    if (fullOrder && Array.isArray(fullOrder.detailItems) && fullOrder.detailItems.length > 0) {
+      outboundItems.value = (fullOrder.detailItems as Record<string, unknown>[]).map(mapOrderItemToOutbound)
+      nextItemId = Math.max(...outboundItems.value.map(i => i.id || 0), 0) + 1
+      syncItemsTableLayout()
     }
   } else {
     form.value.customer = ''
     form.value.customerCode = ''
+  }
+}
+
+const handleCustomerChange = (customerName: string) => {
+  const customer = customerList.value.find(item => item.name === customerName)
+  if (customer) {
+    applyCustomerMasterToTarget(form.value, customer)
   }
 }
 
@@ -1253,22 +1397,45 @@ const itemSummaryMethod = ({ columns, data }: { columns: any[]; data: OutboundIt
   return sums
 }
 
+const getValidItems = () =>
+  outboundItems.value.filter(item =>
+    (String(item.productCode || '').trim() || String(item.productName || '').trim())
+    && Number(item.quantity) > 0
+  )
+
 const runOutboundComplianceCheck = () => {
-  const result = validateOutboundItems(outboundItems.value, { blockExpired: true })
+  const result = validateOutboundItems(getValidItems(), { blockExpired: true })
   return showComplianceResult(result)
 }
 
-const buildRecordData = () => ({
-  ...form.value,
-  id: form.value.outboundNo,
-  items: outboundItems.value,
-  createDate: form.value.createDate || new Date().toISOString().slice(0, 10),
-  creator: form.value.creator || '当前用户',
-  operator: form.value.creator || '当前用户',
-  date: String(form.value.outboundDate || form.value.createDate || new Date().toISOString().slice(0, 10)),
-  itemCount: `${outboundItems.value.length}种`,
-  totalQuantity: String(outboundItems.value.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0))
-})
+const resolveDocStatus = () => {
+  if (form.value.closeStatus === 'closed' || form.value.status === 'cancelled') return 'cancelled'
+  if (form.value.auditStatus === '已审核') return 'completed'
+  if (form.value.confirmStatus === CONFIRM_STATUS_CONFIRMED) return 'processing'
+  return 'pending'
+}
+
+const buildRecordData = () => {
+  const validItems = getValidItems()
+  const amount = Number(totalNetAmount.value) || 0
+  return {
+    ...form.value,
+    id: form.value.outboundNo,
+    items: validItems,
+    outboundItems: validItems,
+    warehouse: form.value.warehouseName || form.value.warehouse,
+    createDate: form.value.createDate || new Date().toISOString().slice(0, 10),
+    creator: form.value.creator || '当前用户',
+    operator: form.value.creator || '当前用户',
+    date: String(form.value.outboundDate || form.value.createDate || new Date().toISOString().slice(0, 10)),
+    itemCount: `${validItems.length}种`,
+    totalQuantity: String(validItems.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)),
+    amount: amount.toFixed(2),
+    totalNetAmount: amount,
+    status: resolveDocStatus(),
+    closeStatus: form.value.closeStatus || 'notClosed'
+  }
+}
 
 const validateForm = () => {
   if (!form.value.outboundNo) {
@@ -1283,8 +1450,8 @@ const validateForm = () => {
     ElMessage.warning('请输入客户名称')
     return false
   }
-  if (outboundItems.value.length === 0) {
-    ElMessage.warning('请添加出库商品')
+  if (getValidItems().length === 0) {
+    ElMessage.warning('请至少添加一行有效商品明细')
     return false
   }
   return true
@@ -1306,16 +1473,21 @@ const handleSave = (): boolean => {
   }
 
   localStorage.setItem(OUTBOUND_STORAGE_KEY, JSON.stringify(existingRecords))
+  addOperationLog(
+    form.value.outboundNo,
+    existingIndex > -1 ? 'edit' : 'create',
+    form.value.creator || '当前用户',
+    existingIndex > -1 ? '编辑销售出库单' : '创建销售出库单'
+  )
   ElMessage.success('销售出库单保存成功')
   return true
 }
 
 const resetFormForNew = () => {
-  const warehouse = warehouses.value[0]
   form.value = {
     outboundNo: generateOutboundNo(),
-    warehouse: warehouse?.name || '',
-    warehouseName: warehouse?.name || '',
+    warehouse: '',
+    warehouseName: '',
     outboundDate: new Date().toISOString().slice(0, 10),
     deliveryDate: '',
     customer: '',
@@ -1328,7 +1500,7 @@ const resetFormForNew = () => {
     remark: '',
     creator: '当前用户',
     createDate: new Date().toISOString().slice(0, 10),
-    confirmStatus: '未确认',
+    confirmStatus: CONFIRM_STATUS_UNCONFIRMED,
     auditStatus: '未审核',
     paymentStatus: '未收款',
     salesOrderNo: '',
@@ -1338,9 +1510,14 @@ const resetFormForNew = () => {
     signStatus: '未签收',
     signPerson: '',
     signDate: '',
-    logisticsStatus: ''
+    logisticsStatus: '',
+    status: 'pending',
+    closeStatus: 'notClosed',
+    auditor: '',
+    auditTime: ''
   }
   outboundItems.value = []
+  ensureOutboundWarehouseDefault()
   addItem()
 }
 
@@ -1349,31 +1526,40 @@ const handleSaveAndNew = () => {
   resetFormForNew()
 }
 
-const handleConfirm = () => {
-  if (form.value.confirmStatus === '已确认') {
-    ElMessage.info('出库单已确认')
+const handleSaveAndAudit = () => {
+  if (!validateForm()) return
+  if (form.value.auditStatus === '已审核') {
+    ElMessage.info('出库单已审核')
     return
   }
-  if (!validateForm()) return
-  if (!runOutboundComplianceCheck()) return
-  form.value.confirmStatus = '已确认'
-  handleSave()
-  ElMessage.success('出库单已确认')
+  if (!handleSave()) return
+  if (!autoConfirmSalesOutboundIfNeeded()) return
+  handleAudit()
 }
 
-const handleAudit = () => {
-  if (form.value.confirmStatus !== '已确认') {
-    ElMessage.warning('请先确认出库单')
-    return
-  }
+const handleAudit = async () => {
+  if (!requireSalesOutboundConfirmed()) return
   if (form.value.auditStatus === '已审核') {
     ElMessage.info('出库单已审核')
     return
   }
   if (!runOutboundComplianceCheck()) return
 
+  try {
+    await ElMessageBox.confirm(
+      '审核后将锁定单据明细，并可能触发平台协同入库，确定审核吗？',
+      '审核确认',
+      { confirmButtonText: '确定审核', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+
   form.value.auditStatus = '已审核'
-  outboundItems.value.forEach(item => {
+  form.value.auditor = form.value.creator || '当前用户'
+  form.value.auditTime = formatLocalDateTime()
+  form.value.status = 'completed'
+  getValidItems().forEach(item => {
     const traceKey = item.batchNo || item.productCode
     appendUdiTraceChain(traceKey, {
       nodeType: 'outbound',
@@ -1386,6 +1572,7 @@ const handleAudit = () => {
     })
   })
   handleSave()
+  addOperationLog(form.value.outboundNo, 'audit', form.value.auditor, '审核销售出库单')
 
   const result = onSalesOutboundAudited({
     outboundNo: form.value.outboundNo,
@@ -1393,14 +1580,14 @@ const handleAudit = () => {
     customer: form.value.customer,
     customerCode: form.value.customerCode,
     warehouse: form.value.warehouseName || form.value.warehouse,
-    items: outboundItems.value,
-    outboundItems: outboundItems.value
+    items: getValidItems(),
+    outboundItems: getValidItems()
   })
 
   if (result.skipped) {
     ElMessage.success('出库单已审核')
   } else if (result.inbounds.length > 0) {
-    ElMessage.success(`出库单已审核，已自动生成 ${result.inbounds.length} 张采购入库单`)
+    ElMessage.success('出库单已审核，已自动生成对应采购入库单')
   } else {
     ElMessage.success('出库单已审核')
   }
@@ -1414,7 +1601,12 @@ const handleAuditToggle = () => {
       type: 'warning'
     }).then(() => {
       form.value.auditStatus = '未审核'
+      form.value.status = 'pending'
+      form.value.auditor = ''
+      form.value.auditTime = ''
+      resetSalesOutboundConfirm()
       handleSave()
+      addOperationLog(form.value.outboundNo, 'unaudit', form.value.creator || '当前用户', '反审核销售出库单')
       ElMessage.success('反审核成功')
     }).catch(() => {})
     return
@@ -1427,18 +1619,25 @@ const handleDelivery = () => {
     ElMessage.warning('请先审核出库单')
     return
   }
-  if (!form.value.logisticsCompany) {
-    ElMessage.warning('请选择物流公司')
-    return
-  }
-  if (!form.value.logisticsNo) {
-    ElMessage.warning('请输入物流单号')
-    return
+  const isSelfPickup = form.value.transport === 'self' || form.value.logisticsCompany === 'self'
+  if (!isSelfPickup) {
+    if (!form.value.logisticsCompany) {
+      ElMessage.warning('请选择物流公司')
+      return
+    }
+    if (!form.value.logisticsNo) {
+      ElMessage.warning('请输入物流单号')
+      return
+    }
   }
   form.value.deliveryStatus = '已发货'
-  form.value.logisticsStatus = 'inTransit'
+  form.value.logisticsStatus = isSelfPickup ? 'signed' : 'inTransit'
   form.value.deliveryDate = new Date().toISOString().slice(0, 10)
+  if (isSelfPickup) {
+    form.value.logisticsCompany = form.value.logisticsCompany || 'self'
+  }
   handleSave()
+  addOperationLog(form.value.outboundNo, 'delivery', form.value.creator || '当前用户', '销售出库单发货')
   ElMessage.success('出库单已发货，物流信息已更新')
 }
 
@@ -1476,11 +1675,14 @@ const handleCancel = () => {
 
 const buildPrintData = (): SalesOutboundData => {
   const company = getCompanyInfo()
+  const salesDate = form.value.outboundDate || form.value.deliveryDate || new Date().toISOString().slice(0, 10)
+  const storageFromItems = outboundItems.value.find(item => item.storageCondition)?.storageCondition
   return {
     companyName: company.name,
     companyAddress: company.address,
     companyPhone: company.phone,
-    deliveryDate: form.value.deliveryDate || new Date().toISOString().slice(0, 10),
+    deliveryDate: form.value.deliveryDate || salesDate,
+    salesDate,
     buyerName: form.value.customer,
     buyerAddress: form.value.address,
     buyerPhone: form.value.phone,
@@ -1488,6 +1690,12 @@ const buildPrintData = (): SalesOutboundData => {
     warehouseName: form.value.warehouseName || form.value.warehouse,
     receiver: form.value.contact,
     receiverPhone: form.value.phone,
+    licenseNo: company.medicalDeviceLicense,
+    salesperson: form.value.creator,
+    shipAddress: company.address,
+    receiveAddress: form.value.address,
+    signPerson: form.value.signPerson,
+    storageConditionText: storageFromItems || '常温：空气相对湿度不超过80%且无腐蚀物质清浊，通风良好。',
     items: outboundItems.value.map(item => ({
       productCode: item.productCode,
       bidType: item.bidType,
@@ -1503,44 +1711,116 @@ const buildPrintData = (): SalesOutboundData => {
       expiryDate: item.expiryDate,
       registrationNo: item.registrationNo,
       productionLicenseNo: item.productionLicenseNo,
-      storageCondition: item.storageCondition
+      storageCondition: item.storageCondition,
+      sterilizationBatchNo: '/',
+      auxiliaryQty: `${item.quantity}${item.unit || ''}`
     })),
     totalAmount: Number(totalNetAmount.value),
     qualityStatus: '合格'
   }
 }
 
-const handlePrint = () => {
+const runSalesOutboundPrint = (previewMode: boolean) => {
   if (outboundItems.value.length === 0) {
     ElMessage.warning('请先添加商品')
     return
   }
   try {
-    print('salesOutbound', buildPrintData())
+    printSalesOutbound(buildPrintData(), previewMode)
   } catch (error) {
-    ElMessage.error('打印失败：' + (error as Error).message)
+    ElMessage.error((previewMode ? '预览' : '打印') + '失败：' + (error as Error).message)
   }
+}
+
+const handlePrint = () => {
+  const settings = loadPrintSettings()
+  runSalesOutboundPrint(settings.previewBeforePrint)
+}
+
+const handlePrintDirect = () => {
+  runSalesOutboundPrint(false)
 }
 
 const handlePrintPreview = () => {
-  if (outboundItems.value.length === 0) {
-    ElMessage.warning('请先添加商品')
-    return
-  }
-  try {
-    preview('salesOutbound', buildPrintData())
-  } catch (error) {
-    ElMessage.error('预览失败：' + (error as Error).message)
-  }
+  runSalesOutboundPrint(true)
 }
 
-const handleMore = (command: string) => {
-  const map: Record<string, string> = {
-    copy: '复制单据',
-    export: '导出',
-    close: '关闭出库单'
+const handleMore = async (command: string) => {
+  if (command === 'copy') {
+    if (getValidItems().length === 0) {
+      ElMessage.warning('请先添加有效商品明细后再复制')
+      return
+    }
+    const newNo = generateOutboundNo()
+    const copied = {
+      ...buildRecordData(),
+      outboundNo: newNo,
+      id: newNo,
+      confirmStatus: CONFIRM_STATUS_UNCONFIRMED,
+      auditStatus: '未审核',
+      status: 'pending',
+      closeStatus: 'notClosed',
+      auditor: '',
+      auditTime: '',
+      deliveryStatus: '未发货',
+      signStatus: '未签收',
+      signPerson: '',
+      signDate: '',
+      logisticsStatus: '',
+      logisticsCompany: '',
+      logisticsNo: '',
+      createDate: new Date().toISOString().slice(0, 10),
+      outboundDate: new Date().toISOString().slice(0, 10)
+    }
+    const records = JSON.parse(localStorage.getItem(OUTBOUND_STORAGE_KEY) || '[]')
+    records.push(copied)
+    localStorage.setItem(OUTBOUND_STORAGE_KEY, JSON.stringify(records))
+    addOperationLog(newNo, 'copy', form.value.creator || '当前用户', `复制自 ${form.value.outboundNo}`)
+    ElMessage.success('已复制为新出库单')
+    router.push({ path: '/sales/outbound', query: { id: newNo } })
+    return
   }
-  ElMessage.success(map[command] || '操作成功')
+
+  if (command === 'close') {
+    if (form.value.auditStatus === '已审核') {
+      ElMessage.warning('已审核出库单请前往出库记录页关闭')
+      return
+    }
+    try {
+      await ElMessageBox.confirm('关闭后单据将作废，确定关闭吗？', '关闭确认', {
+        confirmButtonText: '确定关闭',
+        cancelButtonText: '取消',
+        type: 'warning'
+      })
+    } catch {
+      return
+    }
+    form.value.closeStatus = 'closed'
+    form.value.status = 'cancelled'
+    handleSave()
+    addOperationLog(form.value.outboundNo, 'close', form.value.creator || '当前用户', '关闭销售出库单')
+    ElMessage.success('出库单已关闭')
+    return
+  }
+
+  if (command === 'export') {
+    if (!form.value.outboundNo) {
+      ElMessage.warning('请先保存出库单')
+      return
+    }
+    const payload = buildRecordData()
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${form.value.outboundNo}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('出库单已导出')
+    return
+  }
+
+  ElMessage.info('操作成功')
 }
 
 const mapOrderItemToOutbound = (item: Record<string, unknown>, idx: number): OutboundItem => {
@@ -1583,6 +1863,9 @@ const loadOutboundRecord = (recordId: string) => {
   if (!record) return false
 
   Object.assign(form.value, record)
+  enrichCustomerFieldsFromMaster(form.value)
+  form.value.status = form.value.status || (form.value.auditStatus === '已审核' ? 'completed' : 'pending')
+  form.value.closeStatus = form.value.closeStatus || 'notClosed'
   if (Array.isArray(record.items)) {
     outboundItems.value = record.items as OutboundItem[]
     nextItemId = Math.max(...outboundItems.value.map(i => i.id || 0), 0) + 1
@@ -1598,13 +1881,23 @@ const loadSalesOrderReference = (orderId: string) => {
   if (!order) return
 
   form.value.salesOrderNo = String(order.id || order.orderNo || '')
-  form.value.customer = String(order.customer || '')
-  form.value.customerCode = String(order.customerCode || '')
-  form.value.contact = String(order.contact || '')
-  form.value.phone = String(order.phone || '')
-  form.value.address = String(order.receiveAddress || '')
+  const customerFields = {
+    customer: String(order.customer || ''),
+    customerCode: String(order.customerCode || ''),
+    contact: String(order.contact || ''),
+    phone: String(order.phone || ''),
+    address: String(order.receiveAddress || '')
+  }
+  enrichCustomerFieldsFromMaster(customerFields)
+  form.value.customer = customerFields.customer
+  form.value.customerCode = customerFields.customerCode
+  form.value.contact = customerFields.contact
+  form.value.phone = customerFields.phone
+  form.value.address = customerFields.address
   if (order.warehouse) {
     handleWarehouseChange(String(order.warehouse))
+  } else {
+    ensureOutboundWarehouseDefault()
   }
 
   if (Array.isArray(order.detailItems) && order.detailItems.length > 0) {
@@ -1614,39 +1907,42 @@ const loadSalesOrderReference = (orderId: string) => {
 }
 
 onMounted(() => {
-  const warehouse = warehouses.value[0]
-  if (warehouse && !form.value.warehouse) {
-    form.value.warehouse = warehouse.name
-    form.value.warehouseName = warehouse.name
-  }
+  void (async () => {
+    await Promise.all([loadWarehousesFromApi(), loadLocationsFromApi(), hydrateCustomerListFromServer()])
+    customerList.value = loadActiveCustomerList()
+    refreshWarehouseOptions()
 
-  form.value.creator = form.value.creator || '当前用户'
-  form.value.createDate = form.value.createDate || new Date().toISOString().slice(0, 10)
-  form.value.outboundDate = form.value.outboundDate || new Date().toISOString().slice(0, 10)
+    form.value.creator = form.value.creator || '当前用户'
+    form.value.createDate = form.value.createDate || new Date().toISOString().slice(0, 10)
+    form.value.outboundDate = form.value.outboundDate || new Date().toISOString().slice(0, 10)
 
-  const recordId = route.query.id as string
-  if (recordId) {
-    if (!loadOutboundRecord(recordId)) {
-      ElMessage.warning('未找到对应出库单')
+    const recordId = route.query.id as string
+    if (recordId) {
+      if (!loadOutboundRecord(recordId)) {
+        ElMessage.warning('未找到对应出库单')
+      }
+    } else {
+      const orderId = route.query.orderId as string
+      if (orderId) {
+        loadSalesOrderReference(orderId)
+      }
+      if (!form.value.outboundNo) {
+        form.value.outboundNo = generateOutboundNo()
+      }
     }
-  } else {
-    const orderId = route.query.orderId as string
-    if (orderId) {
-      loadSalesOrderReference(orderId)
-    }
-    if (!form.value.outboundNo) {
-      form.value.outboundNo = generateOutboundNo()
-    }
-  }
 
-  if (outboundItems.value.length === 0) {
-    addItem()
-  }
+    ensureOutboundWarehouseDefault()
 
-  nextTick(() => {
-    bindItemsTableResizeObserver()
-    syncItemsTableLayout()
-  })
+    if (outboundItems.value.length === 0) {
+      addItem()
+    }
+
+    nextTick(() => {
+      bindItemsTableResizeObserver()
+      syncItemsTableLayout()
+    })
+  })()
+
   window.addEventListener('resize', debouncedSyncItemsTableLayout)
 })
 
@@ -1682,19 +1978,33 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
     <div class="page-title-bar">
       <div class="title-left">
         <h2>销售出库单</h2>
-        <div class="audit-badge" v-if="form.auditStatus === '已审核'">
-          <el-tag type="danger" effect="plain" size="small" class="audit-tag-seal">已审核</el-tag>
+        <div class="status-badges">
+          <div v-if="salesOutboundConfirmEnabled" class="audit-badge">
+            <el-tag :type="confirmStatusTagType" effect="plain" size="small">
+              {{ form.confirmStatus || CONFIRM_STATUS_UNCONFIRMED }}
+            </el-tag>
+          </div>
+          <div v-if="form.auditStatus === '已审核'" class="audit-badge">
+            <el-tag type="danger" effect="plain" size="small" class="audit-tag-seal">已审核</el-tag>
+          </div>
         </div>
       </div>
       <div class="title-actions">
         <el-button type="primary" size="small" @click="handleSave">保存</el-button>
+        <el-button
+          type="primary"
+          size="small"
+          plain
+          :disabled="form.auditStatus === '已审核'"
+          @click="handleSaveAndAudit"
+        >保存并审核</el-button>
         <el-button type="primary" size="small" plain @click="handleSaveAndNew">保存并新增</el-button>
         <el-button
-          v-if="form.confirmStatus === '未确认'"
+          v-if="canConfirmSalesOutbound"
           size="small"
           type="success"
           @click="handleConfirm"
-        >确认</el-button>
+        >确定</el-button>
         <el-button
           size="small"
           :type="form.auditStatus === '已审核' ? 'warning' : 'success'"
@@ -1717,7 +2027,7 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item @click="handlePrintPreview">打印预览</el-dropdown-item>
-              <el-dropdown-item @click="handlePrint">直接打印</el-dropdown-item>
+              <el-dropdown-item @click="handlePrintDirect">直接打印</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -1797,7 +2107,21 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
                 :disabled="!isFieldEditable(field)"
                 @change="handleWarehouseChange"
               >
-                <el-option v-for="w in warehouses" :key="w.id" :label="w.name" :value="w.name" />
+                <el-option v-for="w in warehouseOptions" :key="w.value" :label="w.label" :value="w.value" />
+              </el-select>
+
+              <el-select
+                v-else-if="field.key === 'customer'"
+                v-model="form.customer"
+                filterable
+                default-first-option
+                placeholder="请选择客户"
+                size="small"
+                style="width: 100%;"
+                :disabled="!isFieldEditable(field)"
+                @change="handleCustomerChange"
+              >
+                <el-option v-for="c in customerList" :key="c.id" :label="c.name" :value="c.name" />
               </el-select>
 
               <el-tag
@@ -1880,6 +2204,11 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
       <div class="section-body items-section" v-show="!itemsCollapsed">
         <div class="items-toolbar">
           <p class="product-query-hint">商品查询：编码、名称、规格、厂家，空格隔开，不限顺序。</p>
+          <BatchNoFormatPicker
+            v-model="batchNoFormat"
+            :disabled="!isEditable"
+            @change="handleBatchNoFormatChange"
+          />
           <div class="toolbar-right">
             <el-button size="small" plain :disabled="!isEditable" @click="openBatchAdd">批量选择</el-button>
             <el-button size="small" plain :disabled="!isEditable" @click="addItem">添加行</el-button>
@@ -2127,7 +2456,14 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
                   @change="calcRowAmount(row)"
                 />
                 <span v-else-if="col.key === 'netAmount'" class="amount-text">{{ formatMoney(row.netAmount) }}</span>
-                <el-input v-else-if="col.key === 'batchNo'" v-model="row.batchNo" size="small" :disabled="!isEditable" />
+                <BatchNoCell
+                  v-else-if="col.key === 'batchNo'"
+                  :row="row"
+                  :global-format="batchNoFormat"
+                  :disabled="!isEditable"
+                  @format-change="handleProductionDateChange(row)"
+                  @batch-input="handleBatchNoInput(row)"
+                />
                 <div
                   v-else-if="col.key === 'mfgDate'"
                   class="cell-date-wrap"
@@ -2140,6 +2476,7 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
                     size="small"
                     class="cell-date"
                     :disabled="!isEditable"
+                    @change="handleProductionDateChange(row)"
                   />
                 </div>
                 <div
@@ -2155,6 +2492,7 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
                     class="cell-date"
                     clearable
                     :disabled="!isEditable"
+                    @change="handleExpiryDateChange(row)"
                   />
                 </div>
                 <el-input v-else-if="col.key === 'storageCondition'" v-model="row.storageCondition" size="small" :disabled="!isEditable" />
@@ -2349,6 +2687,13 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
     margin: 0;
   }
 
+  .status-badges {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   .audit-badge {
     display: flex;
     align-items: center;
@@ -2504,6 +2849,12 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
       padding: 4px 0;
     }
   }
+}
+
+.batch-cell-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .items-toolbar {

@@ -42,8 +42,7 @@ import {
   applyTenantLicenseVisibilityScope,
   buildTenantLicenseSettingsSections,
   isTenantLicenseDeletable,
-  isTenantLicenseKey,
-  TENANT_LICENSE_RULE_TIP
+  isTenantLicenseKey
 } from '@/utils/tenantCompanyLicenseService'
 import type { PartnerDocument } from '@/types/partnerProfile'
 
@@ -187,7 +186,7 @@ const addSectionOptions = computed(() =>
 
 const tenantAddDialogTitle = computed(() => {
   if (editingLicenseKey.value) return '修改证照'
-  return props.tenantMode ? '新增证照' : '新增证照'
+  return props.tenantMode ? '新增自定义证照' : '新增证照'
 })
 
 const closeDrawer = () => {
@@ -746,12 +745,11 @@ defineExpose({
           <span>{{ categoryBlockTitle }}</span>
           <div v-if="!readonly" class="quick-actions">
             <el-button
-              v-if="!tenantMode"
               type="primary"
               :icon="Plus"
               size="small"
               @click="openAddDialog()"
-            >添加项</el-button>
+            >{{ tenantMode ? '新增自定义证照' : '添加项' }}</el-button>
             <el-button
               v-if="!tenantMode"
               size="small"
@@ -777,7 +775,7 @@ defineExpose({
           </div>
         </div>
         <div class="block-hint">
-          <template v-if="tenantMode">勾选需要的平台证照即可引用到企业证照列表；取消勾选将隐匿（已填写内容保留）；本企业自定义证照可修改或删除</template>
+          <template v-if="tenantMode">勾选平台证照即可引用；模板中没有的证照可点「新增自定义证照」；取消勾选将隐匿（已填写内容保留）；本企业自定义证照可修改或删除</template>
           <template v-else>勾选证照后可批量修改或删除；拖拽左侧手柄可调整排序，与证照展示页同步；关闭隐匿开关后，该证照不在列表中显示</template>
         </div>
 

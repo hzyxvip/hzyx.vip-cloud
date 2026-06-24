@@ -20,7 +20,15 @@ import {
   syncSalesOrderItemsToLocalProducts,
   isNormalCustomerCompany
 } from '@/utils/customerProductService'
-import { onSalesOrderAudited } from '@/utils/platformCollaborationService'
+import {
+  hydrateCustomerListFromServer,
+  loadActiveCustomerList,
+  type CustomerMaster
+} from '@/utils/customerStore'
+import { onSalesOrderAudited, backfillSalesOrderExternalNos, resolveSalesOrderExternalNo } from '@/utils/platformCollaborationService'
+import { useDocumentConfirm } from '@/composables/useDocumentConfirm'
+import { CONFIRM_STATUS_CONFIRMED, CONFIRM_STATUS_UNCONFIRMED, normalizeConfirmStatus } from '@/utils/documentFunctionSettings'
+import { generateDocumentNo } from '@/utils/documentNumberSettings'
 import {
   arrowKeyToDirection,
   findFieldKeyFromElement,
@@ -37,6 +45,26 @@ import {
   scheduleAfterSelectClose,
   shouldNavigateOnArrow as shouldNavigateOnArrowBase
 } from '@/utils/erpFormKeyboard'
+import {
+  loadBatchNoFormat,
+  applyProductionDateToItemRow,
+  calcProductExpiryDate,
+  resolveProductForRow,
+  clearRowBatchNoFormat,
+  hasConfirmedBatchNoFormat,
+  markBatchNoManual,
+  markExpiryManual,
+  getDefaultBatchFormatFocusKey
+} from '@/utils/productBatchExpiry'
+import BatchNoCellKeyboard from '@/components/purchase/BatchNoCellKeyboard.vue'
+import {
+  activeWarehouseOptions,
+  getDefaultWarehouseValue,
+  refreshWarehouseOptions,
+  resolveWarehouseLabel,
+  shouldSkipWarehouseField
+} from '@/utils/warehouseSettings'
+import { loadWarehousesFromApi } from '@/utils/dataStore'
 
 const router = useRouter()
 const route = useRoute()
@@ -114,7 +142,7 @@ type ItemProductSuggestion = {
 interface HeaderFieldOption {
   key: string
   label: string
-  type: 'input' | 'select' | 'date' | 'datetime' | 'number' | 'textarea'
+  type: 'input' | 'select' | 'date' | 'datetime' | 'number' | 'textarea' | 'status'
   required?: boolean
   disabled?: boolean
   fullWidth?: boolean
@@ -127,7 +155,7 @@ interface HeaderFieldOption {
 }
 
 const DEFAULT_HEADER_FIELDS = [
-  'orderNo', 'date', 'customer', 'customerCode',
+  'orderNo', 'date', 'confirmStatus', 'customer', 'customerCode',
   'warehouse', 'deliveryDate', 'contact', 'phone', 'remark',
   'auditor', 'auditTime'
 ]
@@ -135,6 +163,7 @@ const DEFAULT_HEADER_FIELDS = [
 const HEADER_FIELD_DEFINITIONS: HeaderFieldOption[] = [
   { key: 'orderNo', label: '订单号', type: 'input', disabled: true },
   { key: 'date', label: '下单日期', type: 'date', required: true },
+  { key: 'confirmStatus', label: '确定状态', type: 'status', disabled: true },
   { key: 'customer', label: '客户', type: 'select', options: 'customerOptions', required: true },
   { key: 'customerCode', label: '客户编码', type: 'input', disabled: true },
   { key: 'warehouse', label: '仓库', type: 'select', options: 'warehouseOptions' },
@@ -154,10 +183,30 @@ const HEADER_FIELD_DEFINITIONS: HeaderFieldOption[] = [
   { key: 'printCount', label: '打印次数', type: 'number', min: 0, disabled: true }
 ]
 
-const warehouseOptions = [
-  { label: '北京仓库', value: 'beijing' },
-  { label: '上海仓库', value: 'shanghai' }
-]
+const warehouseOptions = activeWarehouseOptions
+
+const applySingleWarehouseDefault = () => {
+  const sole = warehouseOptions.value[0]
+  if (!sole) return
+  form.value.warehouse = sole.value
+}
+
+const ensureDefaultWarehouse = () => {
+  if (String(form.value.warehouse || '').trim()) return
+  const defaultVal = getDefaultWarehouseValue(warehouseOptions.value)
+  if (!defaultVal) return
+  form.value.warehouse = defaultVal
+}
+
+const initWarehouseDefaults = async () => {
+  await loadWarehousesFromApi()
+  refreshWarehouseOptions()
+  if (shouldSkipWarehouseField.value) {
+    applySingleWarehouseDefault()
+  } else {
+    ensureDefaultWarehouse()
+  }
+}
 
 const showFieldSelector = ref(false)
 const fieldOptions = ref<HeaderFieldOption[]>([...HEADER_FIELD_DEFINITIONS])
@@ -256,7 +305,7 @@ const confirmFieldSelection = () => {
 
 initHeaderFieldConfig()
 
-const customerList = ref<any[]>([])
+const customerList = ref<CustomerMaster[]>([])
 
 const customerOptions = computed(() =>
   customerList.value.map(c => ({ label: c.name, value: c.name, code: c.code || '' }))
@@ -264,7 +313,7 @@ const customerOptions = computed(() =>
 
 const getOptions = (optionsKey?: string) => {
   if (optionsKey === 'customerOptions') return customerOptions.value
-  if (optionsKey === 'warehouseOptions') return warehouseOptions
+  if (optionsKey === 'warehouseOptions') return warehouseOptions.value
   return []
 }
 
@@ -561,7 +610,7 @@ const { columnWidths: itemColumnWidths, handleHeaderDragend: handleItemsHeaderDr
   { key: 'quantity', label: '数量', defaultWidth: 88 },
   { key: 'price', label: '单价', defaultWidth: 96 },
   { key: 'amount', label: '金额', defaultWidth: 100 },
-  { key: 'batchNo', label: '生产批号', defaultWidth: 110 },
+  { key: 'batchNo', label: '生产批号', defaultWidth: 118 },
   { key: 'productionDate', label: '生产日期', defaultWidth: 100 },
   { key: 'expiryDate', label: '有效期至', defaultWidth: 100 },
   { key: 'storageCondition', label: '贮存条件', defaultWidth: 120 },
@@ -642,10 +691,29 @@ const form = ref({
   externalNo: '',
   printCount: 0,
   auditStatus: 'notAudited' as 'notAudited' | 'audited',
+  confirmStatus: CONFIRM_STATUS_UNCONFIRMED,
   auditor: '',
   auditTime: '',
   items: [] as OrderItem[]
 })
+
+const {
+  confirmEnabled: salesOrderConfirmEnabled,
+  canConfirm: canConfirmSalesOrder,
+  handleConfirm: handleConfirmSalesOrder,
+  requireConfirmedBeforeAudit: requireSalesOrderConfirmed,
+  resetConfirmStatus: resetSalesOrderConfirm,
+  autoConfirmIfNeeded: autoConfirmSalesOrderIfNeeded
+} = useDocumentConfirm(
+  'sales_order',
+  () => form.value.confirmStatus,
+  value => { form.value.confirmStatus = value },
+  {
+    permissionCode: 'sales_confirm',
+    validate: () => validateForm(),
+    onPersist: () => persistOrder()
+  }
+)
 
 const showPlatformHint = computed(() => isNormalCustomerCompany())
 
@@ -669,6 +737,54 @@ const applyLocalProductToItem = (target: OrderItem, product: ProductMaster) => {
   target.storageCondition = product.storageCondition || ''
   target._fromPlatform = Boolean(product.fromPlatform)
   target._platformProductCode = String(product.platformProductCode || '')
+  if (target.productionDate) {
+    applyProductionDateToItemRow(target as Record<string, any>, product, loadBatchNoFormat())
+  }
+}
+
+const applyBatchExpiryFromProductionDate = (
+  row: OrderItem,
+  product?: ProductMaster | Record<string, unknown>
+) => {
+  if (row.productionDate) {
+    applyProductionDateToItemRow(row as Record<string, any>, product, loadBatchNoFormat())
+  }
+}
+
+const syncExpiryFromProductionDate = (row: OrderItem, product?: ProductMaster) => {
+  const rowData = row as Record<string, any>
+  if (rowData._expiryManual || !row.productionDate) return
+  const master = product ?? resolveProductForRow(rowData)
+  const expiry = calcProductExpiryDate(String(row.productionDate), master)
+  if (expiry) row.expiryDate = expiry
+}
+
+const handleProductionDateChange = (row: OrderItem) => {
+  syncExpiryFromProductionDate(row)
+  if (hasConfirmedBatchNoFormat(row as Record<string, any>)) {
+    applyProductionDateToItemRow(
+      row as Record<string, any>,
+      resolveProductForRow(row as Record<string, unknown>),
+      loadBatchNoFormat()
+    )
+  }
+}
+
+const handleBatchFormatChange = (row: OrderItem) => {
+  applyProductionDateToItemRow(
+    row as Record<string, any>,
+    resolveProductForRow(row as Record<string, unknown>),
+    loadBatchNoFormat()
+  )
+  syncExpiryFromProductionDate(row, resolveProductForRow(row as Record<string, unknown>))
+}
+
+const handleBatchNoInput = (row: OrderItem) => {
+  markBatchNoManual(row as Record<string, any>, loadBatchNoFormat())
+}
+
+const handleExpiryDateChange = (row: OrderItem) => {
+  markExpiryManual(row as Record<string, any>)
 }
 
 const buildItemProductSearchQuery = (item: Record<string, unknown>): string => {
@@ -747,9 +863,141 @@ const clearProductLock = (row: OrderItem) => {
   row.productLocked = false
 }
 
+const PRODUCT_LOOKUP_COLS = ['productCode', 'productName', 'spec', 'manufacturer']
+const PRODUCT_BASIC_INFO_COLS = [
+  'productName', 'spec', 'manufacturer', 'registrationNo', 'productionLicenseNo'
+]
+const LOCKED_SKIP_FOCUS_COLS = new Set([
+  'productName', 'spec', 'manufacturer', 'registrationNo', 'productionLicenseNo'
+])
+
+const isItemColumnReadonly = (row: OrderItem, colKey: string) =>
+  isRowProductLocked(row) && LOCKED_SKIP_FOCUS_COLS.has(colKey)
+
+const getEffectiveFocusCols = (row: OrderItem, cols: string[]) =>
+  isRowProductLocked(row) ? cols.filter(k => !LOCKED_SKIP_FOCUS_COLS.has(k)) : cols
+
+const getPrevItemFocusColKey = (
+  currentColKey: string,
+  row: OrderItem,
+  cols: string[]
+): string | null => {
+  const effectiveCols = getEffectiveFocusCols(row, cols)
+  const effIdx = effectiveCols.indexOf(currentColKey)
+  if (effIdx > 0) return effectiveCols[effIdx - 1]
+  return null
+}
+
+const getNextItemFocusColKey = (
+  currentColKey: string,
+  row: OrderItem,
+  cols: string[]
+): string | null => {
+  const effectiveCols = getEffectiveFocusCols(row, cols)
+  const effIdx = effectiveCols.indexOf(currentColKey)
+  if (effIdx < 0) return effectiveCols[0] ?? null
+
+  if (isRowProductLocked(row)) {
+    const skipAfterProduct = [...PRODUCT_LOOKUP_COLS, ...PRODUCT_BASIC_INFO_COLS]
+    if (skipAfterProduct.includes(currentColKey)) {
+      if (effectiveCols.includes('quantity')) return 'quantity'
+      return effectiveCols[effIdx + 1] ?? null
+    }
+  }
+
+  if (effIdx < effectiveCols.length - 1) return effectiveCols[effIdx + 1]
+  return null
+}
+
+const closeProductSuggestForRow = (row: OrderItem) => {
+  const refs = getRowAutocompleteRefs(row as Record<string, unknown>)
+  Object.values(refs).forEach((ac: any) => ac?.close?.())
+}
+
+const isTextInputFocused = () => {
+  const el = document.activeElement
+  return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+}
+
+const findItemRowIndex = (row: OrderItem) => form.value.items.indexOf(row)
+
+const isProductAutocompleteTarget = (target: EventTarget | null) =>
+  !!(target as HTMLElement)?.closest('.items-detail-table .el-autocomplete')
+
+const isProductSuggestOpen = () => {
+  const popper = document.querySelector('.product-suggest-popper') as HTMLElement | null
+  if (!popper) return false
+  const style = window.getComputedStyle(popper)
+  return style.display !== 'none' && style.visibility !== 'hidden'
+}
+
+const findSuggestRowFromTarget = (target: HTMLElement): OrderItem | null => {
+  const tr = target.closest('.items-detail-table tbody tr.el-table__row')
+  if (!tr) return null
+  const tableEl = itemsTableRef.value?.$el as HTMLElement | undefined
+  const rows = tableEl?.querySelectorAll('.el-table__body-wrapper tbody tr.el-table__row')
+  const rowIndex = rows ? Array.from(rows).indexOf(tr as Element) : -1
+  if (rowIndex < 0 || rowIndex >= form.value.items.length) return null
+  return form.value.items[rowIndex]
+}
+
+const findSuggestContextFromTarget = (target: HTMLElement) => {
+  const row = findSuggestRowFromTarget(target)
+  if (!row) return null
+  const autocompleteRoot = target.closest('.el-autocomplete')
+  if (!autocompleteRoot) return null
+  const refs = getRowAutocompleteRefs(row as Record<string, unknown>)
+  const ac = Object.values(refs).find((item: any) => item?.$el === autocompleteRoot)
+  if (!ac) return null
+  return { row, ac }
+}
+
+const getAcSuggestions = (ac: any): ItemProductSuggestion[] =>
+  ac?.suggestions?.value ?? ac?.suggestions ?? []
+
+const getAcHighlightIndex = (ac: any): number =>
+  ac?.highlightedIndex?.value ?? ac?.highlightedIndex ?? -1
+
+const handleProductSuggestKeyboard = (e: KeyboardEvent): boolean => {
+  if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(e.key)) return false
+
+  const ctx = findSuggestContextFromTarget(e.target as HTMLElement)
+  if (!ctx) return false
+  const { row, ac } = ctx
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    const query = buildItemProductSearchQuery(row as Record<string, unknown>)
+    const suggestions = getAcSuggestions(ac)
+    if (!suggestions.length && query.trim()) {
+      ac.getData(query)
+      nextTick(() => ac.highlight(0))
+    } else {
+      ac.highlight(getAcHighlightIndex(ac) + 1)
+    }
+    return true
+  }
+
+  if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    ac.highlight(getAcHighlightIndex(ac) - 1)
+    return true
+  }
+
+  if (e.key === 'Enter') {
+    if (!isProductSuggestOpen()) return false
+    e.preventDefault()
+    ac.handleKeyEnter()
+    return true
+  }
+
+  return false
+}
+
 const applySuggestionToItem = (target: OrderItem, suggestion: ItemProductSuggestion) => {
   if (suggestion.source === 'platform') {
     applyPlatformProductToSalesItem(target as Record<string, unknown>, suggestion.raw as PlatformProduct)
+    applyBatchExpiryFromProductionDate(target)
     return
   }
   applyLocalProductToItem(target, suggestion.raw as ProductMaster)
@@ -760,18 +1008,29 @@ const handleItemProductSuggestionSelect = (row: OrderItem, suggestion: ItemProdu
   applySuggestionToItem(row, suggestion)
   row.productLocked = true
   calcRowAmount(row)
+  const ctx = findSuggestContextFromTarget(document.activeElement as HTMLElement)
+  ctx?.ac?.close?.()
+  nextTick(() => {
+    focusAfterProductLocked(findItemRowIndex(row))
+  })
 }
 
-const handleItemProductSearch = (item: OrderItem, options: { silent?: boolean } = {}) => {
+type ProductSearchResult = 'locked' | 'ambiguous' | 'not_found' | 'noop'
+
+const handleItemProductSearch = (
+  item: OrderItem,
+  options: { silent?: boolean } = {}
+): ProductSearchResult => {
   const searchText = buildItemProductSearchQuery(item)
-  if (!searchText) return
+  if (!searchText) return 'noop'
 
   const localMatches = findProductsByCompositeQuery(searchText, loadProductList())
   if (localMatches.length === 1) {
     applyLocalProductToItem(item, localMatches[0])
     item.productLocked = true
+    item._skipProductBlurSearch = true
     calcRowAmount(item)
-    return
+    return 'locked'
   }
 
   const code = String(item.productCode || '').trim()
@@ -779,17 +1038,29 @@ const handleItemProductSearch = (item: OrderItem, options: { silent?: boolean } 
     const platform = findPlatformProductByCode(code)
     if (platform) {
       applyPlatformProductToSalesItem(item as Record<string, unknown>, platform)
+      applyBatchExpiryFromProductionDate(item)
       item.productLocked = true
+      item._skipProductBlurSearch = true
       calcRowAmount(item)
-      return
+      return 'locked'
     }
   }
 
   if (localMatches.length > 1 && !options.silent) {
     ElMessage.warning('匹配到多个商品，请补充编码/名称/规格/厂家条件')
-  } else if (code && !item.productName && !options.silent) {
+    return 'ambiguous'
+  }
+  if (code && !item.productName && !options.silent) {
     ElMessage.warning('未找到匹配商品，请检查编码/名称/规格/厂家')
   }
+  return code && !item.productName ? 'not_found' : 'noop'
+}
+
+const handleLockedItemColumnFocus = (row: OrderItem, colKey: string) => {
+  if (!isItemColumnReadonly(row, colKey)) return
+  const rowIndex = findItemRowIndex(row)
+  if (rowIndex < 0) return
+  nextTick(() => focusNextItemCell(rowIndex, colKey))
 }
 
 const handleItemProductBlur = (item: OrderItem) => {
@@ -832,6 +1103,7 @@ const confirmBatchAdd = () => {
     const row = createEmptyItemRow()
     applyLocalProductToItem(row, product)
     row.productLocked = true
+    applyBatchExpiryFromProductionDate(row, product)
     calcRowAmount(row)
     form.value.items.push(row)
   })
@@ -871,7 +1143,11 @@ const handleItemDateKeydown = (e: KeyboardEvent, row: OrderItem, colKey: string)
 }
 
 const shouldNavigateOnArrow = (e: KeyboardEvent) =>
-  shouldNavigateOnArrowBase(e, { isItemDatePickerTarget })
+  shouldNavigateOnArrowBase(e, {
+    isProductAutocompleteTarget,
+    productSuggestOpen: isProductSuggestOpen,
+    isItemDatePickerTarget
+  })
 
 const getFocusableHeaderFields = () =>
   sortedVisibleFields.value.filter(field => !field.disabled)
@@ -976,7 +1252,7 @@ const focusableItemColumnKeys = computed(() =>
   itemTableColumnKeys.value.filter(key => key !== 'index' && key !== 'amount')
 )
 
-const focusItemCell = (rowIndex: number, colKey: string) => {
+const focusItemCell = (rowIndex: number, colKey: string, fromColKey?: string) => {
   nextTick(() => {
     const tableEl = itemsTableRef.value?.$el as HTMLElement | undefined
     if (!tableEl) return
@@ -986,6 +1262,35 @@ const focusItemCell = (rowIndex: number, colKey: string) => {
     const colIndex = itemTableColumnKeys.value.indexOf(colKey)
     if (colIndex < 0) return
     const cell = row.querySelectorAll('td.el-table__cell')[colIndex] as HTMLElement | undefined
+
+    if (colKey === 'batchNo') {
+      const rowData = form.value.items[rowIndex] as Record<string, any>
+      if (rowData) {
+        if (fromColKey === 'productionDate') {
+          rowData._batchFormatPickerOpen = true
+          rowData.batchNo = ''
+          clearRowBatchNoFormat(rowData)
+          rowData._batchNoManual = false
+        } else if (
+          rowData._batchFormatPickerOpen === false &&
+          String(rowData.batchNo || '').trim()
+        ) {
+          const input = cell?.querySelector('.batch-no-cell-kb .el-input__inner') as HTMLInputElement | null
+          input?.focus()
+          input?.select?.()
+          return
+        } else {
+          rowData._batchFormatPickerOpen = true
+        }
+      }
+      nextTick(() => {
+        const focusKey = getDefaultBatchFormatFocusKey()
+        const firstFormat = cell?.querySelector(`[data-batch-format="${focusKey}"]`) as HTMLButtonElement | null
+        firstFormat?.focus()
+      })
+      return
+    }
+
     focusCellControl(cell)
   })
 }
@@ -996,20 +1301,24 @@ const navigateItemsTableFrom = (
   direction: 'up' | 'down' | 'left' | 'right'
 ) => {
   const cols = focusableItemColumnKeys.value
-  const colIdx = cols.indexOf(colKey)
-  if (colIdx < 0) return
+  const row = form.value.items[rowIndex]
+  if (!row) return
+  const effectiveCols = getEffectiveFocusCols(row, cols)
+  let focusColKey = effectiveCols.includes(colKey) ? colKey : effectiveCols[0]
+  let colIdx = effectiveCols.indexOf(focusColKey)
+  if (colIdx < 0) colIdx = 0
 
   if (direction === 'left') {
-    if (colIdx > 0) focusItemCell(rowIndex, cols[colIdx - 1])
+    if (colIdx > 0) focusItemCell(rowIndex, effectiveCols[colIdx - 1])
     return
   }
   if (direction === 'right') {
-    if (colIdx < cols.length - 1) focusItemCell(rowIndex, cols[colIdx + 1])
+    if (colIdx < effectiveCols.length - 1) focusItemCell(rowIndex, effectiveCols[colIdx + 1])
     return
   }
   if (direction === 'up') {
     if (rowIndex > 0) {
-      focusItemCell(rowIndex - 1, colKey)
+      focusItemCell(rowIndex - 1, focusColKey)
     } else {
       const fields = getFocusableHeaderFields()
       if (fields.length) focusFieldByKey(fields[fields.length - 1].key)
@@ -1017,7 +1326,7 @@ const navigateItemsTableFrom = (
     return
   }
   if (direction === 'down' && rowIndex < form.value.items.length - 1) {
-    focusItemCell(rowIndex + 1, colKey)
+    focusItemCell(rowIndex + 1, focusColKey)
   }
 }
 
@@ -1028,10 +1337,11 @@ const navigateItemsTable = (direction: 'up' | 'down' | 'left' | 'right') => {
 }
 
 const focusNextItemCell = (rowIndex: number, currentColKey: string) => {
+  const row = form.value.items[rowIndex]
   const cols = focusableItemColumnKeys.value
-  const idx = cols.indexOf(currentColKey)
-  if (idx >= 0 && idx < cols.length - 1) {
-    focusItemCell(rowIndex, cols[idx + 1])
+  const nextKey = getNextItemFocusColKey(currentColKey, row, cols)
+  if (nextKey) {
+    focusItemCell(rowIndex, nextKey, currentColKey)
     return
   }
   if (rowIndex < form.value.items.length - 1) {
@@ -1040,6 +1350,23 @@ const focusNextItemCell = (rowIndex: number, currentColKey: string) => {
   }
   addItem()
   nextTick(() => focusItemCell(form.value.items.length - 1, cols[0]))
+}
+
+const focusAfterProductLocked = (rowIndex: number) => {
+  if (rowIndex < 0) return
+  const row = form.value.items[rowIndex]
+  if (!row) return
+  row._skipProductBlurSearch = true
+  closeProductSuggestForRow(row)
+
+  const applyFocus = () => focusNextItemCell(rowIndex, 'productCode')
+
+  nextTick(() => {
+    applyFocus()
+    requestAnimationFrame(() => {
+      if (!isTextInputFocused()) applyFocus()
+    })
+  })
 }
 
 const findItemsTableFocus = () => {
@@ -1056,41 +1383,78 @@ const findItemsTableFocus = () => {
   return { row: rowIndex, colKey }
 }
 
+const isBatchNoFormatTarget = (target: EventTarget | null) =>
+  !!(target as HTMLElement)?.closest('.batch-no-cell-kb [data-batch-format]')
+
+const isBatchNoInputTarget = (target: EventTarget | null) =>
+  !!(target as HTMLElement)?.closest('.batch-no-cell-kb .el-input__inner')
+
 const handleItemsTableKeydown = (e: KeyboardEvent) => {
+  if (isProductAutocompleteTarget(e.target) && handleProductSuggestKeyboard(e)) {
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
+
   if (handleItemSelectKeyboard(e)) return
   if (isItemDatePickerTarget(e.target)) return
 
   if (e.key === 'Enter') {
+    if (isProductSuggestOpen()) return
+    if (isBatchNoFormatTarget(e.target)) return
+
+    if (isDatePickerPanelOpen()) {
+      const pos = findItemsTableFocus()
+      if (pos) {
+        e.preventDefault()
+        e.stopPropagation()
+        scheduleAfterDatePickerClose(() => focusNextItemCell(pos.row, pos.colKey))
+      }
+      return
+    }
+
     const pos = findItemsTableFocus()
     if (!pos) return
     const row = form.value.items[pos.row]
-    const advance = () => {
+
+    const advanceItemCell = () => {
       e.preventDefault()
       e.stopPropagation()
-      if (row && ['productCode', 'productName', 'spec', 'manufacturer'].includes(pos.colKey)) {
-        handleItemProductSearch(row)
+      if (row) {
+        if (
+          isRowProductLocked(row) &&
+          [...PRODUCT_LOOKUP_COLS, ...PRODUCT_BASIC_INFO_COLS].includes(pos.colKey)
+        ) {
+          focusAfterProductLocked(pos.row)
+          return
+        }
+        if (PRODUCT_LOOKUP_COLS.includes(pos.colKey)) {
+          const result = handleItemProductSearch(row)
+          if (result === 'locked') {
+            closeProductSuggestForRow(row)
+            focusAfterProductLocked(pos.row)
+            return
+          }
+        }
       }
       focusNextItemCell(pos.row, pos.colKey)
     }
 
-    if (isDatePickerPanelOpen() && isItemDatePickerTarget(e.target)) {
-      scheduleAfterDatePickerClose(advance)
-      return
-    }
-    if (isDatePickerPanelOpen()) return
-
     if (isSelectDropdownOpen() && isItemSelectTarget(e.target)) {
-      scheduleAfterSelectClose(advance)
+      scheduleAfterSelectClose(advanceItemCell)
       return
     }
     if (isSelectDropdownOpen()) return
 
-    advance()
+    advanceItemCell()
     return
   }
 
   const direction = arrowKeyToDirection(e.key)
   if (!direction) return
+  if (isDatePickerPanelOpen()) return
+  if (isBatchNoFormatTarget(e.target)) return
+  if (isBatchNoInputTarget(e.target) && (direction === 'up' || direction === 'down')) return
   if (!shouldNavigateOnArrow(e)) return
   if (!findItemsTableFocus() && !((e.target as HTMLElement).closest('.items-detail-table'))) return
 
@@ -1099,22 +1463,10 @@ const handleItemsTableKeydown = (e: KeyboardEvent) => {
   navigateItemsTable(direction)
 }
 
-const generateOrderNo = () => {
-  const now = new Date()
-  const year = now.getFullYear()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  const random = String(Math.floor(Math.random() * 1000)).padStart(3, '0')
-  return `SO${year}${month}${day}${random}`
-}
+const generateOrderNo = () => generateDocumentNo('sales_order')
 
 const formatLocalDateTime = () =>
   new Date().toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-')
-
-const warehouseLabels: Record<string, string> = {
-  beijing: '北京仓库',
-  shanghai: '上海仓库'
-}
 
 const applyOrderToForm = (order: Record<string, unknown>) => ({
   orderNo: String(order.id || ''),
@@ -1132,42 +1484,55 @@ const applyOrderToForm = (order: Record<string, unknown>) => ({
   creator: String(order.creator || order.operator || '当前用户'),
   createTime: String(order.createTime || ''),
   docSource: String(order.docSource || ''),
-  externalNo: String(order.externalNo || ''),
+  externalNo: resolveSalesOrderExternalNo(order),
   printCount: Number(order.printCount) || 0,
   auditStatus: (order.auditStatus === 'audited' ? 'audited' : 'notAudited') as 'notAudited' | 'audited',
+  confirmStatus: normalizeConfirmStatus(order.confirmStatus),
   auditor: String(order.auditor || ''),
   auditTime: String(order.auditTime || ''),
-  items: (order.detailItems as OrderItem[]) || []
+  items: ((order.detailItems as OrderItem[]) || []).map(item => ({
+    ...item,
+    productLocked: item.productLocked ?? Boolean(item.productCode && item.productName)
+  }))
 })
 
 onMounted(() => {
-  const now = new Date()
-  form.value.date = now.toISOString().slice(0, 10)
-  form.value.orderNo = generateOrderNo()
-  form.value.createTime = formatLocalDateTime()
+  void (async () => {
+    backfillSalesOrderExternalNos()
+    await initWarehouseDefaults()
+    await hydrateCustomerListFromServer()
 
-  const customers = JSON.parse(localStorage.getItem('customers') || '[]')
-  customerList.value = customers
+    const now = new Date()
+    form.value.date = now.toISOString().slice(0, 10)
+    form.value.orderNo = generateOrderNo()
+    form.value.createTime = formatLocalDateTime()
 
-  const editId = route.params.id as string
-  if (editId) {
-    isEdit.value = true
-    orderId.value = editId
-    const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
-    const order = orders.find((o: { id: string }) => o.id === editId)
-    if (order) {
-      form.value = applyOrderToForm(order)
+    customerList.value = loadActiveCustomerList()
+
+    const editId = route.params.id as string
+    if (editId) {
+      isEdit.value = true
+      orderId.value = editId
+      const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
+      const order = orders.find((o: { id: string }) => o.id === editId)
+      if (order) {
+        form.value = applyOrderToForm(order)
+        ensureDefaultWarehouse()
+      }
+    } else {
+      ensureDefaultWarehouse()
     }
-  }
 
-  if (form.value.items.length === 0) {
-    addItem()
-  }
+    if (form.value.items.length === 0) {
+      addItem()
+    }
 
-  nextTick(() => {
-    bindItemsTableResizeObserver()
-    syncItemsTableLayout()
-  })
+    nextTick(() => {
+      bindItemsTableResizeObserver()
+      syncItemsTableLayout()
+    })
+  })()
+
   window.addEventListener('resize', debouncedSyncItemsTableLayout)
 })
 
@@ -1258,7 +1623,10 @@ const addOperationLog = (oid: string, operationType: string, operator: string, r
   localStorage.setItem('sales-operation-logs', JSON.stringify(logs))
 }
 
-const buildOrderData = () => ({
+const buildOrderData = () => {
+  ensureDefaultWarehouse()
+  const warehouseLabel = resolveWarehouseLabel(form.value.warehouse) || form.value.warehouse
+  return {
   id: form.value.orderNo,
   customer: form.value.customer,
   customerCode: form.value.customerCode,
@@ -1266,6 +1634,7 @@ const buildOrderData = () => ({
   amount: `¥${totalAmount.value.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}`,
   status: form.value.auditStatus === 'audited' ? 'processing' : 'pending',
   auditStatus: form.value.auditStatus,
+  confirmStatus: form.value.confirmStatus,
   auditor: form.value.auditor,
   auditTime: form.value.auditTime,
   executeStatus: 'notExecuted',
@@ -1283,13 +1652,14 @@ const buildOrderData = () => ({
   docSource: form.value.docSource,
   externalNo: form.value.externalNo,
   printCount: form.value.printCount,
-  warehouse: form.value.warehouse,
+  warehouse: warehouseLabel,
   deliveryDate: form.value.deliveryDate,
   contact: form.value.contact,
   phone: form.value.phone,
   remark: form.value.remark,
   detailItems: form.value.items
-})
+  }
+}
 
 const persistOrder = () => {
   const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
@@ -1305,8 +1675,13 @@ const persistOrder = () => {
 }
 
 const validateForm = () => {
+  ensureDefaultWarehouse()
   if (!form.value.customer) {
     ElMessage.warning('请选择客户')
+    return false
+  }
+  if (!form.value.warehouse) {
+    ElMessage.warning('请选择仓库')
     return false
   }
   if (form.value.items.length === 0) {
@@ -1364,6 +1739,7 @@ const handleSubmit = (options: { navigate?: boolean; resetAfter?: boolean } = {}
       externalNo: '',
       printCount: 0,
       auditStatus: 'notAudited',
+      confirmStatus: CONFIRM_STATUS_UNCONFIRMED,
       auditor: '',
       auditTime: '',
       items: []
@@ -1378,6 +1754,33 @@ const handleSaveAndNew = () => {
   handleSubmit({ navigate: false, resetAfter: true })
 }
 
+const confirmStatusTagType = computed(() =>
+  form.value.confirmStatus === CONFIRM_STATUS_CONFIRMED ? 'success' : 'warning'
+)
+
+const handleSaveAndAudit = () => {
+  if (!validateForm()) return
+  if (form.value.auditStatus === 'audited') {
+    ElMessage.info('订单已审核')
+    return
+  }
+
+  persistOrder()
+  if (isEdit.value) {
+    addOperationLog(form.value.orderNo, 'edit', '当前用户', '编辑销售订单')
+    ElMessage.success('销售订单保存成功')
+  } else {
+    addOperationLog(form.value.orderNo, 'create', '当前用户', '创建销售订单')
+    ElMessage.success('销售订单创建成功')
+    isEdit.value = true
+    orderId.value = form.value.orderNo
+  }
+  syncProductsIfNeeded()
+
+  if (!autoConfirmSalesOrderIfNeeded()) return
+  handleAuditToggle()
+}
+
 const handleAuditToggle = () => {
   if (!validateForm()) return
 
@@ -1390,12 +1793,15 @@ const handleAuditToggle = () => {
       form.value.auditStatus = 'notAudited'
       form.value.auditor = ''
       form.value.auditTime = ''
+      resetSalesOrderConfirm()
       persistOrder()
       addOperationLog(form.value.orderNo, 'unaudit', '当前用户', '反审核销售订单')
       ElMessage.success('反审核成功')
     }).catch(() => {})
     return
   }
+
+  if (!requireSalesOrderConfirmed()) return
 
   ElMessageBox.confirm('确定要审核该销售订单吗？', '审核确认', {
     confirmButtonText: '确定',
@@ -1425,7 +1831,7 @@ const buildPrintData = () => ({
   customerPhone: form.value.phone,
   contact: form.value.contact,
   documentNo: form.value.orderNo,
-  warehouseName: warehouseLabels[form.value.warehouse] || form.value.warehouse,
+  warehouseName: resolveWarehouseLabel(form.value.warehouse) || form.value.warehouse,
   remark: form.value.remark,
   items: form.value.items.map(row => ({
     productCode: row.productCode,
@@ -1493,16 +1899,36 @@ const handleMore = (command: string) => {
     <div class="page-title-bar">
       <div class="title-left">
         <h2>销售订单</h2>
-        <div class="audit-badge" v-if="form.auditStatus === 'audited'">
-          <el-tag type="danger" effect="plain" size="small" class="audit-tag-seal">已审核</el-tag>
-          <span v-if="form.auditor || form.auditTime" class="audit-meta">
-            {{ form.auditor }}<template v-if="form.auditor && form.auditTime"> · </template>{{ form.auditTime }}
-          </span>
+        <div class="status-badges">
+          <div v-if="salesOrderConfirmEnabled" class="audit-badge">
+            <el-tag :type="confirmStatusTagType" effect="plain" size="small">
+              {{ form.confirmStatus || CONFIRM_STATUS_UNCONFIRMED }}
+            </el-tag>
+          </div>
+          <div v-if="form.auditStatus === 'audited'" class="audit-badge">
+            <el-tag type="danger" effect="plain" size="small" class="audit-tag-seal">已审核</el-tag>
+            <span v-if="form.auditor || form.auditTime" class="audit-meta">
+              {{ form.auditor }}<template v-if="form.auditor && form.auditTime"> · </template>{{ form.auditTime }}
+            </span>
+          </div>
         </div>
       </div>
       <div class="title-actions">
         <el-button type="primary" size="small" @click="handleSubmit()">保存</el-button>
+        <el-button
+          type="primary"
+          size="small"
+          plain
+          :disabled="form.auditStatus === 'audited'"
+          @click="handleSaveAndAudit"
+        >保存并审核</el-button>
         <el-button type="primary" size="small" plain @click="handleSaveAndNew">保存并新增</el-button>
+        <el-button
+          v-if="canConfirmSalesOrder"
+          size="small"
+          type="success"
+          @click="handleConfirmSalesOrder"
+        >确定</el-button>
         <el-button
           size="small"
           :type="form.auditStatus === 'audited' ? 'warning' : 'success'"
@@ -1774,11 +2200,13 @@ const handleMore = (command: string) => {
                   popper-class="product-suggest-popper"
                   :debounce="150"
                   :trigger-on-focus="false"
+                  :readonly="isItemColumnReadonly(row, 'productName')"
                   highlight-first-item
                   :fetch-suggestions="(_q, cb) => fetchItemProductSuggestions(row, cb)"
                   @select="(item: ItemProductSuggestion) => handleItemProductSuggestionSelect(row, item)"
                   @blur="handleItemProductBlur(row)"
                   @input="clearProductLock(row)"
+                  @focus="handleLockedItemColumnFocus(row, 'productName')"
                 >
                   <template #header>
                     <div class="product-suggest-item is-header">
@@ -1810,11 +2238,13 @@ const handleMore = (command: string) => {
                   popper-class="product-suggest-popper"
                   :debounce="150"
                   :trigger-on-focus="false"
+                  :readonly="isItemColumnReadonly(row, 'spec')"
                   highlight-first-item
                   :fetch-suggestions="(_q, cb) => fetchItemProductSuggestions(row, cb)"
                   @select="(item: ItemProductSuggestion) => handleItemProductSuggestionSelect(row, item)"
                   @blur="handleItemProductBlur(row)"
                   @input="clearProductLock(row)"
+                  @focus="handleLockedItemColumnFocus(row, 'spec')"
                 >
                   <template #header>
                     <div class="product-suggest-item is-header">
@@ -1846,11 +2276,13 @@ const handleMore = (command: string) => {
                   popper-class="product-suggest-popper"
                   :debounce="150"
                   :trigger-on-focus="false"
+                  :readonly="isItemColumnReadonly(row, 'manufacturer')"
                   highlight-first-item
                   :fetch-suggestions="(_q, cb) => fetchItemProductSuggestions(row, cb)"
                   @select="(item: ItemProductSuggestion) => handleItemProductSuggestionSelect(row, item)"
                   @blur="handleItemProductBlur(row)"
                   @input="clearProductLock(row)"
+                  @focus="handleLockedItemColumnFocus(row, 'manufacturer')"
                 >
                   <template #header>
                     <div class="product-suggest-item is-header">
@@ -1873,8 +2305,20 @@ const handleMore = (command: string) => {
                     </div>
                   </template>
                 </el-autocomplete>
-                <el-input v-else-if="col.key === 'registrationNo'" v-model="row.registrationNo" size="small" />
-                <el-input v-else-if="col.key === 'productionLicenseNo'" v-model="row.productionLicenseNo" size="small" />
+                <el-input
+                  v-else-if="col.key === 'registrationNo'"
+                  v-model="row.registrationNo"
+                  size="small"
+                  :readonly="isItemColumnReadonly(row, 'registrationNo')"
+                  @focus="handleLockedItemColumnFocus(row, 'registrationNo')"
+                />
+                <el-input
+                  v-else-if="col.key === 'productionLicenseNo'"
+                  v-model="row.productionLicenseNo"
+                  size="small"
+                  :readonly="isItemColumnReadonly(row, 'productionLicenseNo')"
+                  @focus="handleLockedItemColumnFocus(row, 'productionLicenseNo')"
+                />
                 <el-input-number
                   v-else-if="col.key === 'quantity'"
                   v-model="row.quantity"
@@ -1897,7 +2341,13 @@ const handleMore = (command: string) => {
                   @change="calcRowAmount(row)"
                 />
                 <span v-else-if="col.key === 'amount'" class="amount-text">{{ formatMoney(row.amount) }}</span>
-                <el-input v-else-if="col.key === 'batchNo'" v-model="row.batchNo" size="small" />
+                <BatchNoCellKeyboard
+                  v-else-if="col.key === 'batchNo'"
+                  :row="row"
+                  :global-format="loadBatchNoFormat()"
+                  @format-change="handleBatchFormatChange(row)"
+                  @batch-input="handleBatchNoInput(row)"
+                />
                 <div
                   v-else-if="col.key === 'productionDate'"
                   class="cell-date-wrap"
@@ -1909,6 +2359,7 @@ const handleMore = (command: string) => {
                     value-format="YYYY-MM-DD"
                     size="small"
                     class="cell-date"
+                    @change="handleProductionDateChange(row)"
                   />
                 </div>
                 <div
@@ -1923,6 +2374,7 @@ const handleMore = (command: string) => {
                     size="small"
                     class="cell-date"
                     clearable
+                    @change="handleExpiryDateChange(row)"
                   />
                 </div>
                 <el-input v-else-if="col.key === 'storageCondition'" v-model="row.storageCondition" size="small" />
@@ -2106,6 +2558,13 @@ const handleMore = (command: string) => {
     margin: 0;
   }
 
+  .status-badges {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   .audit-badge {
     display: flex;
     align-items: center;
@@ -2261,6 +2720,12 @@ const handleMore = (command: string) => {
       padding: 4px 0;
     }
   }
+}
+
+.batch-cell-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .items-toolbar {

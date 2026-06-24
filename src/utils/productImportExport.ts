@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx'
-import type { ProductMaster } from '@/utils/productStore'
+import { allocateProductId, type ProductMaster, getProductDisplayName, getProductIdentityKey } from '@/utils/productStore'
 
 export const PRODUCT_EXPORT_LIMIT = 50
 
@@ -9,6 +9,7 @@ const EXPORT_HEADERS: Array<{ key: string; label: string }> = [
   { key: 'spec', label: '规格型号' },
   { key: 'measureUnit', label: '单位' },
   { key: 'manufacturer', label: '生产厂家' },
+  { key: 'registrant', label: '注册人/备案人' },
   { key: 'brand', label: '品牌' },
   { key: 'category', label: '商品分类' },
   { key: 'type', label: '商品类型' },
@@ -40,7 +41,10 @@ const IMPORT_HEADER_ALIASES: Record<string, string> = {
   批准文号: 'licenseNo',
   税收编码_医保: 'medicalCode',
   医保编码: 'medicalCode',
-  单位: 'measureUnit'
+  单位: 'measureUnit',
+  注册人: 'registrant',
+  备案人: 'registrant',
+  '注册人/备案人': 'registrant'
 }
 
 const resolveImportHeaderKey = (header: string): string | undefined => {
@@ -95,6 +99,7 @@ export function downloadProductImportTemplate(fileNamePrefix: string) {
       name: '示例商品名称',
       spec: '示例规格型号',
       manufacturer: '示例生产厂家',
+      registrant: '示例注册人/备案人',
       brand: '示例品牌',
       category: '医用材料',
       type: '耗材',
@@ -141,6 +146,7 @@ const normalizeImportedRow = (row: Record<string, unknown>): ProductMaster | nul
     name,
     spec: String(mapped.spec || ''),
     manufacturer: String(mapped.manufacturer || ''),
+    registrant: String(mapped.registrant || mapped.manufacturer || ''),
     brand: String(mapped.brand || ''),
     category: String(mapped.category || ''),
     type: String(mapped.type || ''),
@@ -196,35 +202,81 @@ export function mergeImportedProducts(
   imported: ProductMaster[]
 ): { list: ProductMaster[]; added: number; updated: number; skipped: number } {
   const list = [...current]
-  const codeIndex = new Map(list.map((item, index) => [item.code, index]))
+  const codeIndex = new Map(list.map((item, index) => [String(item.code || '').trim(), index]))
+  const identityIndex = new Map<string, number>()
+  list.forEach((item, index) => {
+    if (!getProductDisplayName(item)) return
+    identityIndex.set(getProductIdentityKey(item), index)
+  })
+
+  const seenImportIdentities = new Set<string>()
   let added = 0
   let updated = 0
   let skipped = 0
 
   imported.forEach(item => {
-    const code = item.code.trim()
-    if (!code || !item.name.trim()) {
+    const code = String(item.code || '').trim()
+    if (!code || !getProductDisplayName(item)) {
+      skipped++
+      return
+    }
+
+    const identityKey = getProductIdentityKey(item)
+    const existingIdentityIndex = identityIndex.get(identityKey)
+    const existingByIdentity =
+      existingIdentityIndex != null ? list[existingIdentityIndex] : undefined
+
+    if (existingByIdentity && String(existingByIdentity.code || '').trim() !== code) {
+      skipped++
+      seenImportIdentities.add(identityKey)
+      return
+    }
+
+    if (seenImportIdentities.has(identityKey)) {
       skipped++
       return
     }
 
     const existingIndex = codeIndex.get(code)
     if (existingIndex != null) {
-      list[existingIndex] = {
+      const merged = {
         ...list[existingIndex],
         ...item,
         id: list[existingIndex].id
       }
+      const mergedIdentityKey = getProductIdentityKey(merged)
+      const conflictIndex = identityIndex.get(mergedIdentityKey)
+      if (
+        conflictIndex != null &&
+        conflictIndex !== existingIndex &&
+        getProductIdentityKey(list[conflictIndex]) === mergedIdentityKey
+      ) {
+        skipped++
+        return
+      }
+
+      list[existingIndex] = merged
+      identityIndex.set(mergedIdentityKey, existingIndex)
       updated++
+      seenImportIdentities.add(identityKey)
+      return
+    }
+
+    if (existingByIdentity) {
+      skipped++
+      seenImportIdentities.add(identityKey)
       return
     }
 
     const record: ProductMaster = {
       ...item,
-      id: item.id || Date.now() + Math.floor(Math.random() * 1000)
+      id: allocateProductId(list, item.id)
     }
     list.push(record)
-    codeIndex.set(code, list.length - 1)
+    const newIndex = list.length - 1
+    codeIndex.set(code, newIndex)
+    identityIndex.set(identityKey, newIndex)
+    seenImportIdentities.add(identityKey)
     added++
   })
 

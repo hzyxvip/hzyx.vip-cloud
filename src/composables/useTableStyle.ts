@@ -52,12 +52,16 @@ export function useTableStyle(tableName: string, columns: ColumnConfig[]) {
     }
   }
 
+  const getColumnWidth = (key: string, fallback = 120) =>
+    columnWidths.value[key] ?? columns.find(c => c.key === key)?.defaultWidth ?? fallback
+
   onMounted(() => {
     loadColumnWidths()
   })
 
   return {
     columnWidths,
+    getColumnWidth,
     handleHeaderDragend
   }
 }

@@ -47,13 +47,13 @@ const loading = ref(false)
 const mockOrderData: Record<string, any> = {
   'SO202606001': {
     id: 'SO202606001',
-    customer: '广州中心医院',
-    customerCode: 'GZZXYYYY001',
-    warehouse: 'beijing',
+    customer: '广西可盟医疗科技有限公司',
+    customerCode: 'GX01671',
+    warehouse: '公司库',
     date: '2026-06-15',
     deliveryDate: '2026-06-20',
-    contact: '李经理',
-    phone: '020-88888888',
+    contact: '吴精华',
+    phone: '',
     remark: '紧急订单',
     items: [
       { productCode: 'P001', productName: '一次性注射器', spec: '5ml', unit: '支', quantity: '1000', price: '2.50', amount: '2500.00' },
@@ -73,13 +73,13 @@ const mockOrderData: Record<string, any> = {
   },
   'SO202606002': {
     id: 'SO202606002',
-    customer: '上海长征医院',
-    customerCode: 'SZCZYYY002',
-    warehouse: 'shanghai',
+    customer: '广西可盟医疗科技有限公司',
+    customerCode: 'GX01671',
+    warehouse: '公司库',
     date: '2026-06-14',
     deliveryDate: '2026-06-19',
-    contact: '赵经理',
-    phone: '021-66666666',
+    contact: '吴精华',
+    phone: '',
     remark: '',
     items: [
       { productCode: 'P003', productName: '防护服', spec: '连体式', unit: '套', quantity: '200', price: '120.00', amount: '24000.00' }
@@ -98,13 +98,13 @@ const mockOrderData: Record<string, any> = {
   },
   'SO202606003': {
     id: 'SO202606003',
-    customer: '北京协和医院',
-    customerCode: 'BJXHYYY003',
-    warehouse: 'beijing',
+    customer: '广西可盟医疗科技有限公司',
+    customerCode: 'GX01671',
+    warehouse: '公司库',
     date: '2026-06-13',
     deliveryDate: '2026-06-18',
-    contact: '钱经理',
-    phone: '010-99999999',
+    contact: '吴精华',
+    phone: '',
     remark: '需要发票',
     items: [
       { productCode: 'P004', productName: '心电监护仪', spec: '多参数', unit: '台', quantity: '5', price: '15000.00', amount: '75000.00' }
@@ -121,11 +121,6 @@ const mockOrderData: Record<string, any> = {
     productName: '监护仪',
     spec: '多参数'
   }
-}
-
-const warehouseLabels: Record<string, string> = {
-  'beijing': '北京仓库',
-  'shanghai': '上海仓库'
 }
 
 const statusLabels: Record<string, { text: string; color: string }> = {
@@ -193,7 +188,7 @@ const handlePrint = () => {
     customerPhone: orderData.value.phone,
     contact: orderData.value.contact,
     documentNo: orderData.value.id,
-    warehouseName: warehouseLabels[orderData.value.warehouse] || orderData.value.warehouse,
+    warehouseName: orderData.value.warehouse,
     remark: orderData.value.remark,
     items: orderData.value.items.map((item: any) => ({
       productCode: item.productCode,
@@ -232,7 +227,7 @@ const handlePrintPreview = () => {
     customerPhone: orderData.value.phone,
     contact: orderData.value.contact,
     documentNo: orderData.value.id,
-    warehouseName: warehouseLabels[orderData.value.warehouse] || orderData.value.warehouse,
+    warehouseName: orderData.value.warehouse,
     remark: orderData.value.remark,
     items: orderData.value.items.map((item: any) => ({
       productCode: item.productCode,
@@ -301,7 +296,7 @@ const handlePrintPreview = () => {
           </div>
           <div class="info-item">
             <span class="label">仓库：</span>
-            <span class="value">{{ warehouseLabels[orderData.warehouse] || orderData.warehouse }}</span>
+            <span class="value">{{ orderData.warehouse }}</span>
           </div>
           <div class="info-item">
             <span class="label">联系人：</span>

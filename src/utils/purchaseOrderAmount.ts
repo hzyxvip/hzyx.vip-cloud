@@ -6,11 +6,7 @@ export interface PurchaseOrderLine {
   quantity?: number | string
   unitPrice?: number | string
   discountRate?: number | string
-  taxRate?: number | string
   amount?: number | string
-  taxAmount?: number | string
-  taxIncludedAmount?: number | string
-  taxIncludedUnitPrice?: number | string
   auxUnitRatio?: number | string
   auxQuantity?: number | string
   retailPrice?: number | string
@@ -23,16 +19,12 @@ export interface PurchaseOrderAmountInput {
   discountRate?: number | string
   discountAmount?: number | string
   purchaseExpenses?: { amount?: number | string }[]
-  /** 单价是否为含税价录入，默认 false（不含税单价） */
-  unitPriceIncludesTax?: boolean
 }
 
 export interface PurchaseOrderAmountResult {
   lineCount: number
   totalQuantity: number
   lineAmountTotal: number
-  totalTaxAmount: number
-  taxIncludedAmount: number
   receivableAmount: number
   dealAmount: number
 }
@@ -47,62 +39,25 @@ export const isValidOrderLine = (row: PurchaseOrderLine): boolean => {
   return hasProduct && qty > 0
 }
 
-/** 计算单行金额并写回 row */
-export const calcLineAmounts = (
-  row: PurchaseOrderLine,
-  unitPriceIncludesTax = false
-): PurchaseOrderLine => {
+/** 计算单行金额：金额 = 数量 × 单价 × (1 - 折扣率%) */
+export const calcLineAmounts = (row: PurchaseOrderLine): PurchaseOrderLine => {
   const quantity = Number(row.quantity) || 0
-  let unitPrice = Number(row.unitPrice) || 0
   const discountRate = Number(row.discountRate) || 0
-  const taxRate = Number(row.taxRate ?? 13)
   const discountFactor = 1 - discountRate / 100
-
-  const storedTaxIncluded = Number(row.taxIncludedAmount) || 0
+  let unitPrice = Number(row.unitPrice) || 0
   const storedAmount = Number(row.amount) || 0
 
-  // 重载时：有已保存价税合计/金额但单价缺失 → 反推，避免金额被清零
-  if (quantity > 0 && unitPrice <= 0) {
-    if (storedTaxIncluded > 0) {
-      row.taxIncludedAmount = round2(storedTaxIncluded)
-      row.amount = round2(storedTaxIncluded / (1 + taxRate / 100))
-      row.taxAmount = round2(row.taxIncludedAmount - row.amount)
-      row.unitPrice = discountFactor > 0
-        ? round4(row.amount / quantity / discountFactor)
-        : round4(row.amount / quantity)
-      row.taxIncludedUnitPrice = unitPriceIncludesTax
-        ? round4(Number(row.unitPrice) || row.unitPrice)
-        : round4(row.unitPrice * (1 + taxRate / 100))
-      row.auxQuantity = round3(quantity * (Number(row.auxUnitRatio) || 1))
-      row.retailTotal = round2((Number(row.retailPrice) || 0) * quantity)
-      return row
-    }
-    if (storedAmount > 0) {
-      row.amount = round2(storedAmount)
-      row.taxAmount = round2(row.amount * taxRate / 100)
-      row.taxIncludedAmount = round2(row.amount + row.taxAmount)
-      row.unitPrice = discountFactor > 0
-        ? round4(row.amount / quantity / discountFactor)
-        : round4(row.amount / quantity)
-      row.taxIncludedUnitPrice = unitPriceIncludesTax
-        ? round4(row.unitPrice)
-        : round4(row.unitPrice * (1 + taxRate / 100))
-      row.auxQuantity = round3(quantity * (Number(row.auxUnitRatio) || 1))
-      row.retailTotal = round2((Number(row.retailPrice) || 0) * quantity)
-      return row
-    }
-  }
-
-  if (unitPriceIncludesTax) {
-    row.taxIncludedAmount = round2(quantity * unitPrice * discountFactor)
-    row.amount = round2(row.taxIncludedAmount / (1 + taxRate / 100))
-    row.taxAmount = round2(row.taxIncludedAmount - row.amount)
-    row.taxIncludedUnitPrice = round4(unitPrice)
+  if (quantity > 0 && unitPrice <= 0 && storedAmount > 0) {
+    row.amount = round2(storedAmount)
+    unitPrice = discountFactor > 0
+      ? round4(row.amount / quantity / discountFactor)
+      : round4(row.amount / quantity)
+    row.unitPrice = unitPrice
   } else {
     row.amount = round2(quantity * unitPrice * discountFactor)
-    row.taxIncludedUnitPrice = round4(unitPrice * (1 + taxRate / 100))
-    row.taxAmount = round2(row.amount * taxRate / 100)
-    row.taxIncludedAmount = round2(row.amount + row.taxAmount)
+    if (unitPrice > 0) {
+      row.unitPrice = round4(unitPrice)
+    }
   }
 
   row.auxQuantity = round3(quantity * (Number(row.auxUnitRatio) || 1))
@@ -111,25 +66,18 @@ export const calcLineAmounts = (
 }
 
 export const calcPurchaseOrderAmounts = (input: PurchaseOrderAmountInput): PurchaseOrderAmountResult => {
-  const unitPriceIncludesTax = input.unitPriceIncludesTax === true
   const validLines = input.lines.filter(isValidOrderLine)
 
   let totalQuantity = 0
   let lineAmountTotal = 0
-  let totalTaxAmount = 0
-  let taxIncludedAmount = 0
 
   validLines.forEach(line => {
-    calcLineAmounts(line, unitPriceIncludesTax)
+    calcLineAmounts(line)
     totalQuantity += Number(line.quantity) || 0
     lineAmountTotal += Number(line.amount) || 0
-    totalTaxAmount += Number(line.taxAmount) || 0
-    taxIncludedAmount += Number(line.taxIncludedAmount) || 0
   })
 
   lineAmountTotal = round2(lineAmountTotal)
-  totalTaxAmount = round2(totalTaxAmount)
-  taxIncludedAmount = round2(taxIncludedAmount)
 
   const orderDiscountRate = Number(input.discountRate) || 0
   const orderDiscountAmount = Number(input.discountAmount) || 0
@@ -138,19 +86,16 @@ export const calcPurchaseOrderAmounts = (input: PurchaseOrderAmountInput): Purch
     0
   )
 
-  const orderDiscountByRate = round2(taxIncludedAmount * orderDiscountRate / 100)
+  const orderDiscountByRate = round2(lineAmountTotal * orderDiscountRate / 100)
   const receivableAmount = round2(
-    taxIncludedAmount - orderDiscountByRate - orderDiscountAmount + expenseTotal
+    lineAmountTotal - orderDiscountByRate - orderDiscountAmount + expenseTotal
   )
 
   return {
     lineCount: validLines.length,
     totalQuantity,
     lineAmountTotal,
-    totalTaxAmount,
-    taxIncludedAmount,
     receivableAmount,
-    /** 列表/对外展示的成交金额 = 应交金额 */
     dealAmount: receivableAmount
   }
 }
@@ -160,30 +105,6 @@ export const formatMoneyNumber = (val: number) =>
 
 export const formatDealAmountStr = (val: number) => `¥${formatMoneyNumber(val)}`
 
-export const detectUnitPriceIncludesTax = (lines: PurchaseOrderLine[]): boolean => {
-  const valid = lines.filter(isValidOrderLine)
-  if (!valid.length) return false
-  let matchIncluded = 0
-  let matchExcluded = 0
-  valid.forEach(line => {
-    const qty = Number(line.quantity) || 0
-    const price = Number(line.unitPrice) || 0
-    const tax = Number(line.taxRate ?? 13)
-    const disc = 1 - (Number(line.discountRate) || 0) / 100
-    const stored = Number(line.taxIncludedAmount) || Number(line.amount) || 0
-    if (!stored || !price || !qty) return
-    const asIncluded = round2(qty * price * disc)
-    const asExcluded = round2(qty * price * disc * (1 + tax / 100))
-    if (Math.abs(stored - asIncluded) < 0.05 || Math.abs(stored - asIncluded * (1 + tax / 100)) < 0.05) {
-      matchIncluded++
-    }
-    if (Math.abs(stored - asExcluded) < 0.05) {
-      matchExcluded++
-    }
-  })
-  return matchIncluded >= matchExcluded && matchIncluded > 0
-}
-
 /** 从已保存订单对象计算成交金额（列表刷新用） */
 export const calcDealAmountFromOrder = (order: Record<string, unknown>): string => {
   const lines = (order.detailItems || order.items || []) as PurchaseOrderLine[]
@@ -191,19 +112,11 @@ export const calcDealAmountFromOrder = (order: Record<string, unknown>): string 
     return String(order.amount || '¥0.00')
   }
 
-  const unitPriceIncludesTax =
-    order.unitPriceIncludesTax === true
-      ? true
-      : order.unitPriceIncludesTax === false
-        ? false
-        : detectUnitPriceIncludesTax(lines)
-
   const result = calcPurchaseOrderAmounts({
     lines: lines.map(l => ({ ...l })),
     discountRate: order.discountRate,
     discountAmount: order.discountAmount,
-    purchaseExpenses: order.purchaseExpenses as { amount?: number | string }[],
-    unitPriceIncludesTax
+    purchaseExpenses: order.purchaseExpenses as { amount?: number | string }[]
   })
   return formatDealAmountStr(result.dealAmount)
 }

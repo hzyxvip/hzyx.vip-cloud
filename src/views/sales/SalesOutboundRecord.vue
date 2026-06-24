@@ -4,6 +4,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTableStyle } from '@/composables/useTableStyle'
 import { onSalesOutboundAudited } from '@/utils/platformCollaborationService'
+import { CONFIRM_STATUS_CONFIRMED } from '@/utils/documentFunctionSettings'
+import { validateOutboundItems, showComplianceResult } from '@/utils/complianceService'
 
 const router = useRouter()
 const showAdvancedFilter = ref(true)
@@ -176,7 +178,7 @@ const defaultData = [
     salesOrderNo: 'DD-20260618-0020',
     customer: '金华市华厦医疗器材有限公司',
     customerCode: 'GX01014',
-    warehouse: '北京仓库',
+    warehouse: '公司库',
     date: '2026-06-18',
     operator: '胡素琴',
     itemCount: '1种',
@@ -200,7 +202,7 @@ const defaultData = [
     salesOrderNo: 'DD-20260618-0019',
     customer: '宁波市镇海国威医疗器材有限公司',
     customerCode: 'GX00970',
-    warehouse: '上海仓库',
+    warehouse: '公司库',
     date: '2026-06-18',
     operator: '胡素琴',
     itemCount: '2种',
@@ -224,7 +226,7 @@ const defaultData = [
     salesOrderNo: 'DD-20260618-0018',
     customer: '宁波天工医疗器械有限公司',
     customerCode: 'GX00947',
-    warehouse: '广州仓库',
+    warehouse: '公司库',
     date: '2026-06-18',
     operator: '胡素琴',
     itemCount: '3种',
@@ -248,7 +250,7 @@ const defaultData = [
     salesOrderNo: 'DD-20260617-0017',
     customer: '温州市康达医疗器械有限公司',
     customerCode: 'GX00856',
-    warehouse: '北京仓库',
+    warehouse: '公司库',
     date: '2026-06-17',
     operator: '王小明',
     itemCount: '2种',
@@ -324,6 +326,20 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('sales-outbound-reco
   { key: 'status', label: '状态', defaultWidth: 90 },
   { key: 'remark', label: '备注', defaultWidth: 120 }
 ])
+
+const getRowValidItems = (row: Record<string, unknown>) => {
+  const items = (row.items || row.outboundItems || []) as Array<Record<string, unknown>>
+  return items.filter(item =>
+    (String(item.productCode || '').trim() || String(item.productName || '').trim())
+    && Number(item.quantity) > 0
+  )
+}
+
+const isRowConfirmed = (row: Record<string, unknown>) =>
+  row.confirmStatus === CONFIRM_STATUS_CONFIRMED || row.confirmStatus === '已确认'
+
+const formatLocalDateTime = () =>
+  new Date().toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-')
 
 const getRowKey = (row: Record<string, unknown>) => String(row.outboundNo || row.id || '')
 
@@ -425,20 +441,11 @@ const persistOutboundChanges = (outboundId: string, changes: Record<string, unkn
 
 const loadData = () => {
   const savedList = JSON.parse(localStorage.getItem(OUTBOUND_STORAGE_KEY) || '[]')
-  const existingKeys = new Set(defaultData.map(item => getRowKey(item)))
-  const newRows = savedList
-    .filter((row: Record<string, unknown>) => !existingKeys.has(getRowKey(row)))
-    .map(normalizeOutboundRow)
-
-  tableData.value = [
-    ...newRows,
-    ...defaultData.map(row => {
-      const saved = savedList.find(
-        (item: Record<string, unknown>) => getRowKey(item) === getRowKey(row)
-      )
-      return saved ? normalizeOutboundRow({ ...row, ...saved }) : normalizeOutboundRow(row)
-    })
-  ]
+  if (savedList.length > 0) {
+    tableData.value = savedList.map(normalizeOutboundRow)
+    return
+  }
+  tableData.value = defaultData.map(normalizeOutboundRow)
 }
 
 const canDeleteOutbound = (row: Record<string, unknown>) => {
@@ -564,33 +571,51 @@ const handleAudit = () => {
     return
   }
 
+  const unconfirmed = targets.filter(row => row.confirmStatus && !isRowConfirmed(row))
+  if (unconfirmed.length > 0) {
+    ElMessage.warning('存在未确认的出库单，请先在出库单页确认后再审核')
+    return
+  }
+
+  const emptyItems = targets.filter(row => getRowValidItems(row).length === 0)
+  if (emptyItems.length > 0) {
+    ElMessage.warning('存在无有效商品明细的出库单，请打开单据补充后再审核')
+    return
+  }
+
+  for (const row of targets) {
+    const compliance = validateOutboundItems(getRowValidItems(row), { blockExpired: true })
+    if (!compliance.valid) {
+      showComplianceResult(compliance)
+      return
+    }
+  }
+
   ElMessageBox.confirm(`确定要审核选中的 ${targets.length} 条出库单吗？`, '审核确认', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
   }).then(() => {
+    const auditTime = formatLocalDateTime()
     targets.forEach(row => {
       const rowKey = getRowKey(row)
-      const nextStatus =
-        row.status === 'pending' ? 'processing'
-        : row.status === 'processing' ? 'completed'
-        : row.status
+      const validItems = getRowValidItems(row)
       persistOutboundChanges(rowKey, {
         auditStatus: '已审核',
-        status: nextStatus
+        status: 'completed',
+        auditor: '系统管理员',
+        auditTime
       })
       const updated = tableData.value.find(r => getRowKey(r) === rowKey) || row
-      if (updated.status === 'completed') {
-        onSalesOutboundAudited({
-          outboundNo: updated.outboundNo || updated.id,
-          salesOrderNo: updated.salesOrderNo,
-          customer: updated.customer,
-          customerCode: updated.customerCode,
-          warehouse: updated.warehouse,
-          items: updated.items || updated.outboundItems || [],
-          outboundItems: updated.items || updated.outboundItems || []
-        })
-      }
+      onSalesOutboundAudited({
+        outboundNo: updated.outboundNo || updated.id,
+        salesOrderNo: updated.salesOrderNo,
+        customer: updated.customer,
+        customerCode: updated.customerCode,
+        warehouse: updated.warehouse,
+        items: validItems,
+        outboundItems: validItems
+      })
       addOperationLog(rowKey, 'audit', '系统管理员', '审核销售出库单')
     })
     ElMessage.success(`已成功审核 ${targets.length} 条出库单`)
@@ -619,7 +644,9 @@ const handleUnAudit = () => {
       const rowKey = getRowKey(row)
       persistOutboundChanges(rowKey, {
         auditStatus: '未审核',
-        status: row.status === 'processing' || row.status === 'completed' ? 'pending' : row.status
+        status: 'pending',
+        auditor: '',
+        auditTime: ''
       })
       addOperationLog(rowKey, 'unaudit', '系统管理员', '反审核销售出库单')
     })
@@ -741,6 +768,10 @@ const handleToSalesOrder = () => {
 const handleDelivery = () => {
   const row = getSelectedRow()
   if (!row) return
+  if (resolveAuditStatus(row) !== 'audited') {
+    ElMessage.warning('请先审核出库单后再发货')
+    return
+  }
   if (row.deliveryStatus === '已发货') {
     ElMessage.info('出库单已发货')
     return

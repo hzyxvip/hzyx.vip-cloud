@@ -18,6 +18,7 @@ export function usePartnerListBatchAudit<T extends AuditableRow>(
   options: {
     entityLabel: string
     batchSetAudit: (ids: string[], audited: boolean) => T[]
+    onAfterAudit?: () => void
   }
 ) {
   const canAudit = computed(() => isProductAuditor())
@@ -90,6 +91,7 @@ export function usePartnerListBatchAudit<T extends AuditableRow>(
 
       const ids = selectedRows.value.map(row => row.id)
       tableData.value = options.batchSetAudit(ids, !isUnaudit)
+      options.onAfterAudit?.()
       clearTableSelection()
       ElMessage.success(isUnaudit ? `已反审核 ${count} 条` : `已审核 ${count} 条`)
     } catch {

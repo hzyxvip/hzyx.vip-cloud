@@ -1,6 +1,7 @@
 import { PLATFORM_COMPANY_NAME } from '@/constants/platformCompany'
 
 export const DEMO_COMPANY_NAME = '医疗器械经营公司'
+export const MANUFACTURER_COMPANY_NAME = '医疗器械生产有限公司'
 
 export const PLATFORM_ADMIN_ACCOUNT = {
   username: 'admin',
@@ -20,7 +21,25 @@ export const DEMO_TENANT_ACCOUNT = {
   companyCode: 'DEMO'
 } as const
 
-export const LOGIN_DEMO_ACCOUNTS = [
+export const MANUFACTURER_TENANT_ACCOUNT = {
+  username: 'factory',
+  password: 'factory123',
+  realName: '生产厂家管理员',
+  role: 'company_admin',
+  companyName: MANUFACTURER_COMPANY_NAME,
+  companyCode: 'MFG'
+} as const
+
+export type LoginDemoAccount = {
+  key: string
+  label: string
+  username: string
+  password: string
+  hint: string
+  realName?: string
+}
+
+export const LOGIN_DEMO_ACCOUNTS: LoginDemoAccount[] = [
   {
     key: 'platform',
     label: '平台账号',
@@ -31,8 +50,24 @@ export const LOGIN_DEMO_ACCOUNTS = [
     key: 'tenant',
     label: '入驻客户',
     ...DEMO_TENANT_ACCOUNT,
-    hint: `${DEMO_COMPANY_NAME} · 企业管理员`
+    hint: `${DEMO_COMPANY_NAME} · 经营企业`
+  },
+  {
+    key: 'manufacturer',
+    label: '生产厂家',
+    ...MANUFACTURER_TENANT_ACCOUNT,
+    hint: `${MANUFACTURER_COMPANY_NAME} · 生产企业`
   }
-] as const
+] satisfies LoginDemoAccount[]
+
+export const SEED_LOGIN_PASSWORD_BY_USERNAME: Record<string, string> = {
+  [PLATFORM_ADMIN_ACCOUNT.username]: PLATFORM_ADMIN_ACCOUNT.password,
+  [DEMO_TENANT_ACCOUNT.username]: DEMO_TENANT_ACCOUNT.password,
+  [MANUFACTURER_TENANT_ACCOUNT.username]: MANUFACTURER_TENANT_ACCOUNT.password
+}
+
+export function getSeedLoginPassword(username: string): string {
+  return SEED_LOGIN_PASSWORD_BY_USERNAME[username.trim()] || ''
+}
 
 export const REMEMBER_USERNAME_KEY = 'login-remember-username'

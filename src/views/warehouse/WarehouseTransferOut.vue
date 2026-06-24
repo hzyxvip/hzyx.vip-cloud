@@ -2,6 +2,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
 
 const router = useRouter()
 
@@ -23,8 +24,6 @@ const form = reactive({
   freight: 0,
   discountRate: 0,
   discountAmount: 0,
-  taxRate: 13,
-  taxAmount: 0,
   totalAmount: 0,
   paidAmount: 0,
   unpaidAmount: 0,
@@ -45,12 +44,7 @@ const deliveryMethodOptions = [
   { label: '物流配送', value: 'logistics' }
 ]
 
-const warehouseOptions = [
-  { label: '北京仓库', value: 'beijing' },
-  { label: '上海仓库', value: 'shanghai' },
-  { label: '广州仓库', value: 'guangzhou' },
-  { label: '深圳仓库', value: 'shenzhen' }
-]
+const warehouseOptions = activeWarehouseOptions
 
 const locationOptions = [
   { label: 'A区货架1', value: 'A1' },
@@ -74,17 +68,11 @@ const subTotalAmount = computed(() => {
   return items.value.reduce((sum, item) => sum + item.amount, 0)
 })
 
-const totalTaxAmount = computed(() => {
-  return subTotalAmount.value * (form.taxRate / 100)
-})
+const totalAmount = computed(() =>
+  subTotalAmount.value + form.freight - form.discountAmount
+)
 
-const totalWithTax = computed(() => {
-  return subTotalAmount.value + totalTaxAmount.value + form.freight - form.discountAmount
-})
-
-const unpaidAmount = computed(() => {
-  return totalWithTax.value - form.paidAmount
-})
+const unpaidAmount = computed(() => totalAmount.value - form.paidAmount)
 
 const totalQuantity = computed(() => {
   return items.value.reduce((sum, item) => sum + item.outQuantity, 0)
@@ -160,11 +148,9 @@ const handleSave = () => {
     freight: form.freight,
     discountRate: form.discountRate,
     discountAmount: form.discountAmount,
-    taxRate: form.taxRate,
-    taxAmount: totalTaxAmount.value,
-    totalAmount: totalWithTax.value,
+    totalAmount: totalAmount.value,
     paidAmount: form.paidAmount,
-    unpaidAmount: totalWithTax.value - form.paidAmount,
+    unpaidAmount: totalAmount.value - form.paidAmount,
     remark: form.remark,
     items: validItems,
     subTotalAmount: subTotalAmount.value,
@@ -195,7 +181,6 @@ const handleSaveAndNew = () => {
   form.freight = 0
   form.discountRate = 0
   form.discountAmount = 0
-  form.taxRate = 13
   form.paidAmount = 0
   form.remark = ''
   items.value = [{ ...defaultItems[0], id: Date.now() }]
@@ -211,6 +196,7 @@ const handleCancel = () => {
 }
 
 onMounted(() => {
+  refreshWarehouseOptions()
   form.documentNo = `TROUT${Date.now()}`
 })
 </script>
@@ -435,28 +421,22 @@ onMounted(() => {
           <span>金额信息</span>
         </div>
         <div class="form-row">
-          <el-form-item label="不含税金额">
+          <el-form-item label="明细金额">
             <el-input v-model="subTotalAmount" type="number" :precision="2" disabled />
-          </el-form-item>
-          <el-form-item label="税率(%)">
-            <el-input-number v-model="form.taxRate" :min="0" :max="100" :precision="2" controls-position="right" />
-          </el-form-item>
-          <el-form-item label="税额">
-            <el-input v-model="totalTaxAmount" type="number" :precision="2" disabled />
           </el-form-item>
           <el-form-item label="运费">
             <el-input-number v-model="form.freight" :min="0" :precision="2" controls-position="right" />
           </el-form-item>
-        </div>
-        <div class="form-row">
           <el-form-item label="折扣率(%)">
             <el-input-number v-model="form.discountRate" :min="0" :max="100" :precision="2" controls-position="right" />
           </el-form-item>
           <el-form-item label="折扣金额">
             <el-input-number v-model="form.discountAmount" :min="0" :precision="2" controls-position="right" />
           </el-form-item>
-          <el-form-item label="价税合计">
-            <el-input v-model="totalWithTax" type="number" :precision="2" disabled />
+        </div>
+        <div class="form-row">
+          <el-form-item label="金额合计">
+            <el-input v-model="totalAmount" type="number" :precision="2" disabled />
           </el-form-item>
           <el-form-item label="已收金额">
             <el-input-number v-model="form.paidAmount" :min="0" :precision="2" controls-position="right" />

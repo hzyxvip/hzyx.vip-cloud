@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { loadTenantCompanyProfile, saveTenantCompanyProfile } from '@/utils/companyDataService'
 import { shouldWarnOnCloseIntro } from '@/utils/companyPublicDisplayService'
+import { useLayoutNavigateBack } from '@/composables/useLayoutNavigateBack'
 
-const router = useRouter()
+const layoutNavigateBack = useLayoutNavigateBack()
 const saving = ref(false)
 const loading = ref(false)
 const companyIntro = ref('')
@@ -75,13 +75,17 @@ const handleSave = async () => {
 }
 
 onMounted(loadData)
+
+const handleBack = () => {
+  layoutNavigateBack()
+}
 </script>
 
 <template>
   <div class="page-container">
     <div class="page-header">
       <div class="header-left">
-        <el-button :icon="ArrowLeft" @click="router.push('/data/company')">返回</el-button>
+        <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
         <div>
           <h1>企业简介</h1>
           <div class="breadcrumb">首页 / 资料管理 / 基础资料 / 公司资料设定 / 企业简介</div>

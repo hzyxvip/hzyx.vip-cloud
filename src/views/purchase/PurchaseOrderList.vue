@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import '@/styles/product-list-table.scss'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { usePurchaseOrderListColumnSettings } from '@/composables/usePurchaseOrderListColumnSettings'
 import {
   canDeletePurchaseOrder,
   canUnAuditPurchaseOrder,
@@ -10,10 +12,16 @@ import {
   onPurchaseOrderManualCompleted
 } from '@/utils/platformCollaborationService'
 import { calcDealAmountFromOrder } from '@/utils/purchaseOrderAmount'
+import { resolveSupplierPlatformCode } from '@/utils/orderListPartnerCodes'
 import {
   checkPurchaseOrderProductsAudited,
   formatUnapprovedProductsMessage
 } from '@/utils/productStore'
+import {
+  CONFIRM_STATUS_CONFIRMED,
+  CONFIRM_STATUS_UNCONFIRMED,
+  normalizeConfirmStatus
+} from '@/utils/documentFunctionSettings'
 
 const router = useRouter()
 const showAdvancedFilter = ref(true)
@@ -54,6 +62,11 @@ const businessProcessOptions = [
 const auditStatusOptions = [
   { label: '未审核', value: 'notAudited' },
   { label: '已审核', value: 'audited' }
+]
+
+const confirmStatusOptions = [
+  { label: '未确认', value: CONFIRM_STATUS_UNCONFIRMED },
+  { label: '已确认', value: CONFIRM_STATUS_CONFIRMED }
 ]
 
 const executeStatusOptions = [
@@ -139,6 +152,7 @@ const ALL_FILTER_VALUE = '__all__'
 
 type StatusFilterField =
   | 'auditStatus'
+  | 'confirmStatus'
   | 'executeStatus'
   | 'warehouseStatus'
   | 'closeStatus'
@@ -151,6 +165,7 @@ const searchForm = ref({
   selectedPreset: 'thisMonth',
   dateRange: [] as Date[],
   auditStatus: ALL_FILTER_VALUE,
+  confirmStatus: ALL_FILTER_VALUE,
   executeStatus: ALL_FILTER_VALUE,
   warehouseStatus: ALL_FILTER_VALUE,
   closeStatus: ALL_FILTER_VALUE,
@@ -160,6 +175,7 @@ const searchForm = ref({
 
 const filterGroupsRow1 = [
   { field: 'auditStatus' as StatusFilterField, label: '审核状态', options: auditStatusOptions },
+  { field: 'confirmStatus' as StatusFilterField, label: '确定状态', options: confirmStatusOptions },
   { field: 'executeStatus' as StatusFilterField, label: '执行状态', options: executeStatusOptions },
   { field: 'warehouseStatus' as StatusFilterField, label: '入库状态', options: warehouseStatusOptions }
 ]
@@ -194,6 +210,11 @@ const defaultData = [
 const auditStatusLabels: Record<string, string> = {
   notAudited: '未审核',
   audited: '已审核'
+}
+
+const confirmStatusLabels: Record<string, string> = {
+  [CONFIRM_STATUS_UNCONFIRMED]: '未确认',
+  [CONFIRM_STATUS_CONFIRMED]: '已确认'
 }
 
 const executeStatusLabels: Record<string, string> = {
@@ -234,11 +255,14 @@ const statusLabels: Record<string, { text: string; color: string }> = {
 
 const { columnWidths, handleHeaderDragend } = useTableStyle('purchase-order-list', [
   { key: 'orderNo', label: '订单号', defaultWidth: 150 },
+  { key: 'projectName', label: '项目名称', defaultWidth: 140 },
   { key: 'supplier', label: '供应商', defaultWidth: 180 },
+  { key: 'supplierPlatformCode', label: '医享平台供应商编号', defaultWidth: 150 },
   { key: 'date', label: '下单日期', defaultWidth: 110 },
   { key: 'itemCount', label: '商品种类', defaultWidth: 90 },
   { key: 'amount', label: '成交金额', defaultWidth: 120 },
   { key: 'auditStatus', label: '审核状态', defaultWidth: 90 },
+  { key: 'confirmStatus', label: '确定状态', defaultWidth: 90 },
   { key: 'executeStatus', label: '执行状态', defaultWidth: 100 },
   { key: 'warehouseStatus', label: '入库状态', defaultWidth: 100 },
   { key: 'closeStatus', label: '关闭状态', defaultWidth: 100 },
@@ -247,12 +271,28 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('purchase-order-list
   { key: 'status', label: '状态', defaultWidth: 90 }
 ])
 
+const {
+  showColumnSelector,
+  columnOptions,
+  selectedColumns,
+  sortedVisibleColumns,
+  tableColumnRenderKey,
+  openColumnSettings,
+  handleColumnDragStart,
+  handleColumnDragOver,
+  handleColumnDrop,
+  confirmColumnSelection
+} = usePurchaseOrderListColumnSettings('purchase-order-list')
+
 const loadData = () => {
   const normalizeSavedOrder = (o: Record<string, unknown>) => ({
     ...o,
     orderNo: o.orderNo || o.id,
+    projectName: String(o.projectName || ''),
+    supplierPlatformCode: resolveSupplierPlatformCode(o),
     itemCount: o.itemCount || parseInt(String(o.items || '0'), 10) || 0,
     auditStatus: o.auditStatus || 'notAudited',
+    confirmStatus: normalizeConfirmStatus(o.confirmStatus),
     receiveStatus: o.receiveStatus || 'notReceived',
     status: o.status || 'pending',
     amount: calcDealAmountFromOrder(o)
@@ -284,11 +324,11 @@ const persistOrderChanges = (orderId: string, changes: Record<string, any>) => {
   const row = tableData.value.find(r => r.id === orderId)
   if (row) Object.assign(row, changes)
 
-  const index = orders.findIndex((o: any) => o.id === orderId)
+  const index = orders.findIndex((o: any) => o.id === orderId || o.orderNo === orderId)
   if (index > -1) {
     orders[index] = { ...orders[index], ...changes }
   } else if (row) {
-    orders.unshift({ ...row })
+    orders.unshift({ ...row, ...changes })
   }
   localStorage.setItem('purchase-orders', JSON.stringify(orders))
 }
@@ -316,6 +356,7 @@ const filteredData = computed(() => {
     }
 
     if (!matchStatusFilter(row.auditStatus, searchForm.value.auditStatus)) return false
+    if (!matchStatusFilter(row.confirmStatus, searchForm.value.confirmStatus)) return false
     if (!matchStatusFilter(row.executeStatus, searchForm.value.executeStatus)) return false
     if (!matchStatusFilter(row.warehouseStatus, searchForm.value.warehouseStatus)) return false
     if (!matchStatusFilter(row.closeStatus, searchForm.value.closeStatus)) return false
@@ -648,6 +689,7 @@ const loadSearchForm = () => {
       const parsed = JSON.parse(saved)
       Object.assign(searchForm.value, parsed)
       searchForm.value.auditStatus = migrateSavedFilter(parsed.auditStatus)
+      searchForm.value.confirmStatus = migrateSavedFilter(parsed.confirmStatus)
       searchForm.value.executeStatus = migrateSavedFilter(parsed.executeStatus)
       searchForm.value.warehouseStatus = migrateSavedFilter(parsed.warehouseStatus)
       searchForm.value.closeStatus = migrateSavedFilter(parsed.closeStatus)
@@ -663,6 +705,7 @@ const loadSearchForm = () => {
 
 watch(() => [
   searchForm.value.auditStatus,
+  searchForm.value.confirmStatus,
   searchForm.value.executeStatus,
   searchForm.value.warehouseStatus,
   searchForm.value.closeStatus,
@@ -678,6 +721,7 @@ const resetSearchForm = () => {
     selectedPreset: 'thisMonth',
     dateRange: range,
     auditStatus: ALL_FILTER_VALUE,
+    confirmStatus: ALL_FILTER_VALUE,
     executeStatus: ALL_FILTER_VALUE,
     warehouseStatus: ALL_FILTER_VALUE,
     closeStatus: ALL_FILTER_VALUE,
@@ -792,14 +836,20 @@ onMounted(() => {
         <el-button type="primary" link size="small" @click="handleBatchModify">批量修改</el-button>
         <el-button type="primary" link size="small" @click="handleToPurchaseInbound">转采购入库单</el-button>
         <el-button type="primary" link size="small" @click="handleToSalesOrder">转销售订单</el-button>
+        <el-button type="primary" link size="small" @click="openColumnSettings">列表设置</el-button>
       </div>
       <div class="action-bar-extra">
-        <el-button type="primary" class="btn-teal" size="small" @click="handleCreate">新增</el-button>
+        <el-button type="primary" class="btn-teal" size="small" @click="handleCreate">新增采购订单</el-button>
       </div>
     </div>
 
-    <div class="table-card">
+    <div class="table-card product-list-table-card">
+      <div v-if="sortedVisibleColumns.length === 0" class="header-empty-tip">
+        请点击「列表设置」选择要显示的列
+      </div>
+      <div v-else class="table-scroll product-list-table-scroll">
       <el-table
+        :key="tableColumnRenderKey"
         :data="pagedData"
         class="common-table"
         border
@@ -808,63 +858,80 @@ onMounted(() => {
         @selection-change="handleSelectionChange"
       >
         <el-table-column type="selection" width="50" />
-        <el-table-column label="订单号" :width="columnWidths.orderNo">
+        <el-table-column
+          v-for="col in sortedVisibleColumns"
+          :key="col.key"
+          :prop="col.prop"
+          :label="col.label"
+          :width="columnWidths[col.key]"
+          :align="col.align"
+          :header-align="col.headerAlign || col.align || 'center'"
+        >
           <template #default="{ row }">
-            <span class="code-link" @click="handleOrderNoClick(row)">{{ row.orderNo }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="supplier" label="供应商" :width="columnWidths.supplier" />
-        <el-table-column prop="date" label="下单日期" :width="columnWidths.date" />
-        <el-table-column prop="itemCount" label="商品种类" :width="columnWidths.itemCount" align="center" />
-        <el-table-column prop="amount" label="成交金额" :width="columnWidths.amount" align="right" />
-        <el-table-column label="审核状态" :width="columnWidths.auditStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.auditStatus === 'audited' ? 'success' : 'info'">
+            <span
+              v-if="col.key === 'orderNo'"
+              class="code-link"
+              @click="handleOrderNoClick(row)"
+            >{{ row.orderNo }}</span>
+            <span v-else-if="col.key === 'projectName'">{{ row.projectName || '—' }}</span>
+            <span v-else-if="col.key === 'supplierPlatformCode'">{{ row.supplierPlatformCode || '—' }}</span>
+            <el-tag
+              v-else-if="col.key === 'auditStatus'"
+              size="small"
+              :type="row.auditStatus === 'audited' ? 'success' : 'info'"
+            >
               {{ auditStatusLabels[row.auditStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="执行状态" :width="columnWidths.executeStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.executeStatus === 'allExecuted' ? 'success' : row.executeStatus === 'partiallyExecuted' ? 'warning' : 'info'">
+            <el-tag
+              v-else-if="col.key === 'confirmStatus'"
+              size="small"
+              :type="row.confirmStatus === CONFIRM_STATUS_CONFIRMED ? 'success' : 'warning'"
+            >
+              {{ confirmStatusLabels[row.confirmStatus] || CONFIRM_STATUS_UNCONFIRMED }}
+            </el-tag>
+            <el-tag
+              v-else-if="col.key === 'executeStatus'"
+              size="small"
+              :type="row.executeStatus === 'allExecuted' ? 'success' : row.executeStatus === 'partiallyExecuted' ? 'warning' : 'info'"
+            >
               {{ executeStatusLabels[row.executeStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="入库状态" :width="columnWidths.warehouseStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.warehouseStatus === 'allInWarehoused' ? 'success' : row.warehouseStatus === 'partiallyInWarehoused' ? 'warning' : 'info'">
+            <el-tag
+              v-else-if="col.key === 'warehouseStatus'"
+              size="small"
+              :type="row.warehouseStatus === 'allInWarehoused' ? 'success' : row.warehouseStatus === 'partiallyInWarehoused' ? 'warning' : 'info'"
+            >
               {{ warehouseStatusLabels[row.warehouseStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="关闭状态" :width="columnWidths.closeStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.closeStatus === 'closed' ? 'danger' : row.closeStatus === 'manualClosed' ? 'warning' : 'info'">
+            <el-tag
+              v-else-if="col.key === 'closeStatus'"
+              size="small"
+              :type="row.closeStatus === 'closed' ? 'danger' : row.closeStatus === 'manualClosed' ? 'warning' : 'info'"
+            >
               {{ closeStatusLabels[row.closeStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="预付单据" :width="columnWidths.prepaymentStatus" align="center">
-          <template #default="{ row }">
-            <span>{{ prepaymentLabels[row.prepaymentStatus] || '-' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="接单状态" :width="columnWidths.receiveStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.receiveStatus === 'received' ? 'success' : 'info'">
+            <span v-else-if="col.key === 'prepaymentStatus'">
+              {{ prepaymentLabels[row.prepaymentStatus] || '-' }}
+            </span>
+            <el-tag
+              v-else-if="col.key === 'receiveStatus'"
+              size="small"
+              :type="row.receiveStatus === 'received' ? 'success' : 'info'"
+            >
               {{ receiveStatusLabels[row.receiveStatus] || '未接单' }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" :width="columnWidths.status" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusLabels[row.status]?.color || 'info'">
+            <el-tag
+              v-else-if="col.key === 'status'"
+              size="small"
+              :type="statusLabels[row.status]?.color || 'info'"
+            >
               {{ statusLabels[row.status]?.text || row.status }}
             </el-tag>
+            <span v-else>{{ col.prop ? row[col.prop] : '' }}</span>
           </template>
         </el-table-column>
       </el-table>
+      </div>
 
       <div class="pagination">
         <el-pagination
@@ -877,6 +944,32 @@ onMounted(() => {
       </div>
     </div>
   </div>
+
+  <el-dialog v-model="showColumnSelector" title="采购订单列表设置" width="720px" draggable>
+    <div class="field-selector">
+      <p class="sort-tip">勾选需要在列表中显示的列，拖拽可调整顺序</p>
+      <el-checkbox-group v-model="selectedColumns">
+        <el-row :gutter="10">
+          <el-col :span="8" v-for="(col, index) in columnOptions" :key="col.key">
+            <div
+              class="field-item"
+              draggable="true"
+              @dragstart="(event) => handleColumnDragStart(event, index)"
+              @dragover="handleColumnDragOver"
+              @drop="(event) => handleColumnDrop(event, index)"
+            >
+              <span class="field-order">{{ index + 1 }}.</span>
+              <el-checkbox :label="col.key" :disabled="col.required">{{ col.label }}</el-checkbox>
+            </div>
+          </el-col>
+        </el-row>
+      </el-checkbox-group>
+    </div>
+    <template #footer>
+      <el-button @click="showColumnSelector = false">取消</el-button>
+      <el-button type="primary" @click="confirmColumnSelection">确定</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style lang="scss" scoped>
@@ -932,11 +1025,11 @@ onMounted(() => {
     border-top: 1px dashed #e4e7ed;
 
     .filter-row {
-      display: flex;
-      align-items: flex-start;
-      gap: 24px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px 24px;
+      align-items: center;
       margin-bottom: 12px;
-      flex-wrap: wrap;
 
       &:last-child {
         margin-bottom: 0;
@@ -945,23 +1038,26 @@ onMounted(() => {
 
     .filter-item {
       display: flex;
-      align-items: flex-start;
-      gap: 10px;
-      flex: 1;
-      min-width: 280px;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
     }
 
     .filter-label {
       font-size: 13px;
       color: #666;
-      min-width: 72px;
+      width: 64px;
       flex-shrink: 0;
+      text-align: right;
+      line-height: 28px;
     }
 
     .filter-tags {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
+      align-items: center;
+      min-width: 0;
     }
 
     .filter-tag {
@@ -1057,15 +1153,50 @@ onMounted(() => {
   border-radius: 4px;
   padding: 16px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
 
-  :deep(.el-table__header-wrapper th) {
-    background: #f5f7fa;
-    color: #344054;
-    font-weight: 600;
+.header-empty-tip {
+  padding: 40px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 14px;
+}
+
+.field-selector {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 10px 0;
+
+  .sort-tip {
+    color: #909399;
+    font-size: 12px;
+    margin-bottom: 10px;
+    padding: 0 10px;
   }
-  :deep(.el-table__row:nth-child(odd)) {
-    background-color: #f0f9f7;
+
+  .field-item {
+    cursor: move;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    &:hover {
+      background: #f5f7fa;
+    }
+
+    .field-order {
+      color: #909399;
+      font-size: 12px;
+      min-width: 20px;
+    }
   }
+}
+
+.table-scroll {
+  overflow-x: auto;
 }
 
 .code-link {

@@ -1,0 +1,125 @@
+/* 资料管理列表页：搜索区 / 操作栏（对齐采购订单列表） */
+.data-list-page {
+  .btn-teal {
+    --el-button-bg-color: #00bfa5;
+    --el-button-border-color: #00bfa5;
+    --el-button-hover-bg-color: #00a896;
+    --el-button-hover-border-color: #00a896;
+    --el-button-active-bg-color: #008f7a;
+    --el-button-active-border-color: #008f7a;
+  }
+
+  .search-card {
+    background: #fff;
+    border: 1px solid #d0d5dd;
+    border-radius: 4px;
+    padding: 16px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  }
+
+  .search-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .search-form {
+    flex: 1;
+    min-width: 280px;
+
+    .el-form-item {
+      margin-bottom: 8px;
+      margin-right: 12px;
+    }
+  }
+
+  .button-group {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  .search-advanced {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed #e4e7ed;
+
+    .el-form-item {
+      margin-bottom: 8px;
+      margin-right: 16px;
+    }
+  }
+
+  .action-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    background: #fff;
+    border: 1px solid #e4e7ec;
+    padding: 10px 16px;
+    margin-bottom: 12px;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  }
+
+  .action-bar-left {
+    flex-shrink: 0;
+    font-size: 13px;
+    color: #667085;
+
+    strong {
+      color: #00bfa5;
+      font-weight: 600;
+    }
+  }
+
+  .action-bar-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    flex: 1;
+
+    .el-button.is-link {
+      padding: 4px 8px;
+      color: #344054;
+      font-size: 13px;
+
+      &:hover {
+        color: #00bfa5;
+      }
+    }
+  }
+
+  .action-bar-extra {
+    flex-shrink: 0;
+  }
+
+  .table-card {
+    background: #fff;
+    border-radius: 4px;
+    padding: 16px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  }
+
+  .table-scroll {
+    overflow-x: auto;
+  }
+
+  .pagination {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 16px;
+  }
+
+  .left-sidebar {
+    background: #fafbfc;
+    border-right: 1px solid #d0d5dd;
+  }
+}

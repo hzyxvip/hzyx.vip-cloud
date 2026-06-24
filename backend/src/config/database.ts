@@ -10,6 +10,8 @@ import { ComplianceAuditLog } from '../entities/ComplianceAuditLog'
 import { ColdChainRecord } from '../entities/ColdChainRecord'
 import { NonConformingItem } from '../entities/NonConformingItem'
 import { InterCompanyOrder } from '../entities/InterCompanyOrder'
+import { Product } from '../entities/Product'
+import { Customer } from '../entities/Customer'
 
 export const AppDataSource = new DataSource({
   type: 'sqlite',
@@ -26,7 +28,9 @@ export const AppDataSource = new DataSource({
     ComplianceAuditLog,
     ColdChainRecord,
     NonConformingItem,
-    InterCompanyOrder
+    InterCompanyOrder,
+    Product,
+    Customer
   ],
   migrations: [],
   subscribers: []

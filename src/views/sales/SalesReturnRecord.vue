@@ -144,16 +144,16 @@ const loadData = () => {
         status: 'pending',
         auditStatus: 'notAudited',
         warehouseInStatus: 'notInWarehoused',
-        warehouse: '北京仓库',
+        warehouse: '公司库',
         contact: '张三',
         phone: '13800138000',
         returnReason: 'quality',
         returnReasonRemark: '部分商品存在质量问题',
         remark: '',
         items: [
-          { productCode: 'P001', productName: '一次性注射器', spec: '5ml', unit: '支', originalQty: '100', shippedQty: '100', returnQty: '50', price: '5.00', amount: '250.00', batchNo: '20240101', productionDate: '2024-01-01', expiryDate: '2025-01-01', returnWarehouse: '北京仓库' },
-          { productCode: 'P002', productName: '医用纱布', spec: '10cm×10cm', unit: '包', originalQty: '50', shippedQty: '50', returnQty: '30', price: '10.00', amount: '300.00', batchNo: '20240102', productionDate: '2024-01-05', expiryDate: '2025-01-05', returnWarehouse: '北京仓库' },
-          { productCode: 'P003', productName: '碘伏消毒液', spec: '500ml', unit: '瓶', originalQty: '20', shippedQty: '20', returnQty: '10', price: '15.00', amount: '150.00', batchNo: '20240103', productionDate: '2024-01-10', expiryDate: '2025-01-10', returnWarehouse: '北京仓库' }
+          { productCode: 'P001', productName: '一次性注射器', spec: '5ml', unit: '支', originalQty: '100', shippedQty: '100', returnQty: '50', price: '5.00', amount: '250.00', batchNo: '20240101', productionDate: '2024-01-01', expiryDate: '2025-01-01', returnWarehouse: '公司库' },
+          { productCode: 'P002', productName: '医用纱布', spec: '10cm×10cm', unit: '包', originalQty: '50', shippedQty: '50', returnQty: '30', price: '10.00', amount: '300.00', batchNo: '20240102', productionDate: '2024-01-05', expiryDate: '2025-01-05', returnWarehouse: '公司库' },
+          { productCode: 'P003', productName: '碘伏消毒液', spec: '500ml', unit: '瓶', originalQty: '20', shippedQty: '20', returnQty: '10', price: '15.00', amount: '150.00', batchNo: '20240103', productionDate: '2024-01-10', expiryDate: '2025-01-10', returnWarehouse: '公司库' }
         ]
       },
       { 
@@ -168,7 +168,7 @@ const loadData = () => {
         status: 'approved',
         auditStatus: 'audited',
         warehouseInStatus: 'notInWarehoused',
-        warehouse: '上海仓库',
+        warehouse: '公司库',
         contact: '李四',
         phone: '13900139000',
         returnReason: 'wrong',
@@ -177,8 +177,8 @@ const loadData = () => {
         auditPerson: '审核员1',
         auditDate: '2024-01-16',
         items: [
-          { productCode: 'P004', productName: '电子体温计', spec: 'DT-01', unit: '台', originalQty: '20', shippedQty: '20', returnQty: '10', price: '50.00', amount: '500.00', batchNo: '20240104', productionDate: '2024-01-08', expiryDate: '2025-01-08', returnWarehouse: '上海仓库' },
-          { productCode: 'P005', productName: '血压计', spec: 'BP-01', unit: '台', originalQty: '10', shippedQty: '10', returnQty: '5', price: '300.00', amount: '1500.00', batchNo: '20240105', productionDate: '2024-01-06', expiryDate: '2025-01-06', returnWarehouse: '上海仓库' }
+          { productCode: 'P004', productName: '电子体温计', spec: 'DT-01', unit: '台', originalQty: '20', shippedQty: '20', returnQty: '10', price: '50.00', amount: '500.00', batchNo: '20240104', productionDate: '2024-01-08', expiryDate: '2025-01-08', returnWarehouse: '公司库' },
+          { productCode: 'P005', productName: '血压计', spec: 'BP-01', unit: '台', originalQty: '10', shippedQty: '10', returnQty: '5', price: '300.00', amount: '1500.00', batchNo: '20240105', productionDate: '2024-01-06', expiryDate: '2025-01-06', returnWarehouse: '公司库' }
         ]
       },
       { 
@@ -193,7 +193,7 @@ const loadData = () => {
         status: 'warehoused',
         auditStatus: 'audited',
         warehouseInStatus: 'allInWarehoused',
-        warehouse: '广州仓库',
+        warehouse: '公司库',
         contact: '王五',
         phone: '13700137000',
         returnReason: 'unsalable',
@@ -206,9 +206,9 @@ const loadData = () => {
         logisticsCompany: 'sf',
         logisticsNo: 'SF1234567890',
         items: [
-          { productCode: 'P006', productName: '口罩', spec: '医用一次性', unit: '盒', originalQty: '100', shippedQty: '100', returnQty: '100', price: '20.00', amount: '2000.00', batchNo: '20240106', productionDate: '2024-01-02', expiryDate: '2025-01-02', returnWarehouse: '广州仓库' },
-          { productCode: 'P007', productName: '防护服', spec: '一次性', unit: '套', originalQty: '50', shippedQty: '50', returnQty: '50', price: '100.00', amount: '5000.00', batchNo: '20240107', productionDate: '2024-01-03', expiryDate: '2025-01-03', returnWarehouse: '广州仓库' },
-          { productCode: 'P008', productName: '手套', spec: '医用检查', unit: '盒', originalQty: '30', shippedQty: '30', returnQty: '30', price: '15.00', amount: '450.00', batchNo: '20240108', productionDate: '2024-01-04', expiryDate: '2025-01-04', returnWarehouse: '广州仓库' }
+          { productCode: 'P006', productName: '口罩', spec: '医用一次性', unit: '盒', originalQty: '100', shippedQty: '100', returnQty: '100', price: '20.00', amount: '2000.00', batchNo: '20240106', productionDate: '2024-01-02', expiryDate: '2025-01-02', returnWarehouse: '公司库' },
+          { productCode: 'P007', productName: '防护服', spec: '一次性', unit: '套', originalQty: '50', shippedQty: '50', returnQty: '50', price: '100.00', amount: '5000.00', batchNo: '20240107', productionDate: '2024-01-03', expiryDate: '2025-01-03', returnWarehouse: '公司库' },
+          { productCode: 'P008', productName: '手套', spec: '医用检查', unit: '盒', originalQty: '30', shippedQty: '30', returnQty: '30', price: '15.00', amount: '450.00', batchNo: '20240108', productionDate: '2024-01-04', expiryDate: '2025-01-04', returnWarehouse: '公司库' }
         ]
       }
     ]

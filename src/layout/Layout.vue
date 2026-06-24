@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, provide } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   Message,
@@ -22,9 +22,15 @@ import { getCurrentCompany, setCurrentCompany, type Company } from '@/utils/data
 import { companyApi } from '@/utils/api'
 import { isPlatformOperator } from '@/utils/customerProductService'
 import { isPlatformCompanyRecord, PLATFORM_COMPANY_NAME } from '@/constants/platformCompany'
+import { clearAuthSession, getAuthUser, getAuthRole } from '@/utils/authSession'
+import { useEscNavigateBack } from '@/composables/useEscNavigateBack'
+import { LAYOUT_NAVIGATE_BACK_KEY } from '@/composables/useLayoutNavigateBack'
+import { getLayoutBackTarget, syncTabFromRoute } from '@/utils/layoutNavigation'
 
 const router = useRouter()
 const route = useRoute()
+
+useEscNavigateBack()
 
 const hoverMenu = ref('')
 const openTabs = ref<Array<{ name: string; path: string }>>([
@@ -46,7 +52,7 @@ const userInfo = ref<{
 
 const buildCompanyFromUser = (): Company | null => {
   try {
-    const user = userInfo.value || JSON.parse(localStorage.getItem('user') || '{}')
+    const user = userInfo.value || getAuthUser()
     if (!user?.companyId || !user?.companyName) return null
     return {
       id: Number(user.companyId),
@@ -64,10 +70,7 @@ const buildCompanyFromUser = (): Company | null => {
 }
 
 const resolveCurrentCompany = async () => {
-  const storedUser = localStorage.getItem('user')
-  if (storedUser) {
-    userInfo.value = JSON.parse(storedUser)
-  }
+  userInfo.value = getAuthUser()
 
   try {
     const data = await companyApi.getAll()
@@ -116,7 +119,7 @@ const resolveCurrentCompany = async () => {
 }
 
 const isPlatformBoss = computed(() => {
-  const role = userInfo.value?.role || localStorage.getItem('userRole') || ''
+  const role = userInfo.value?.role || getAuthRole()
   return role === 'admin' || role === 'platform_admin'
 })
 
@@ -131,8 +134,8 @@ const displayCompanyName = computed(() => {
   if (currentCompanyInfo.value?.name) return currentCompanyInfo.value.name
   if (userInfo.value?.companyName) return userInfo.value.companyName
   try {
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
-    if (user.companyName) return user.companyName
+    const user = getAuthUser()
+    if (user?.companyName) return user.companyName
   } catch {
     // ignore malformed cache
   }
@@ -151,7 +154,22 @@ const displayCompanyTypeLabel = computed(() => {
 
 let hideTimer: ReturnType<typeof setTimeout> | null = null
 const isMouseInPanel = ref(false)
+const pinnedMenu = ref('')
 const panelTop = ref(0)
+
+const activeMenuLabel = computed(() => hoverMenu.value || pinnedMenu.value)
+
+const updatePanelTop = (event: MouseEvent) => {
+  const target = event.currentTarget as HTMLElement
+  const rect = target.getBoundingClientRect()
+  panelTop.value = Math.max(8, rect.top - 12)
+}
+
+const closeMenuPanel = () => {
+  hoverMenu.value = ''
+  pinnedMenu.value = ''
+  isMouseInPanel.value = false
+}
 
 const panelMaxHeight = computed(() => {
   return `calc(100vh - ${panelTop.value}px - 20px)`
@@ -159,7 +177,22 @@ const panelMaxHeight = computed(() => {
 
 onMounted(() => {
   resolveCurrentCompany()
+  void import('@/utils/productStore').then(({ hydrateProductListFromServer }) => hydrateProductListFromServer())
+  void import('@/utils/customerStore').then(({ hydrateCustomerListFromServer }) => hydrateCustomerListFromServer())
+  document.addEventListener('click', handleDocumentClick)
 })
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleDocumentClick)
+  if (hideTimer) clearTimeout(hideTimer)
+})
+
+const handleDocumentClick = (event: MouseEvent) => {
+  const target = event.target as HTMLElement | null
+  if (!target) return
+  if (target.closest('.sidebar') || target.closest('.sub-menu-panel')) return
+  closeMenuPanel()
+}
 
 const switchCompany = (companyId: number) => {
   currentCompanyId.value = companyId
@@ -169,23 +202,37 @@ const switchCompany = (companyId: number) => {
 }
 
 const handleMenuHover = (label: string, event: MouseEvent) => {
+  if (pinnedMenu.value && pinnedMenu.value !== label) return
   if (hideTimer) {
     clearTimeout(hideTimer)
     hideTimer = null
   }
   hoverMenu.value = label
-  const target = event.currentTarget as HTMLElement
-  const itemHeight = target.offsetHeight
-  panelTop.value = Math.max(8, target.offsetTop - itemHeight * 2)
+  updatePanelTop(event)
+}
+
+const handleMenuClick = (label: string, event: MouseEvent) => {
+  if (hideTimer) {
+    clearTimeout(hideTimer)
+    hideTimer = null
+  }
+  if (pinnedMenu.value === label) {
+    closeMenuPanel()
+    return
+  }
+  pinnedMenu.value = label
+  hoverMenu.value = label
+  updatePanelTop(event)
 }
 
 const handleMenuLeave = () => {
+  if (pinnedMenu.value) return
   hideTimer = setTimeout(() => {
     if (!isMouseInPanel.value) {
       hoverMenu.value = ''
     }
     hideTimer = null
-  }, 150)
+  }, 220)
 }
 
 const handlePanelEnter = () => {
@@ -198,13 +245,13 @@ const handlePanelEnter = () => {
 
 const handlePanelLeave = () => {
   isMouseInPanel.value = false
+  if (pinnedMenu.value) return
   hoverMenu.value = ''
 }
 
 const handleSubMenuClick = (path: string, label: string) => {
   router.push(path)
-  hoverMenu.value = ''
-  isMouseInPanel.value = false
+  closeMenuPanel()
   addTab(label, path)
 }
 const baseMenuItems = [
@@ -357,8 +404,8 @@ const baseMenuItems = [
         name: '基础资料',
         items: [
           { label: '商品资料列表', path: '/data/product' },
-          { label: '供应商资料', path: '/data/supplier' },
-          { label: '客户管理', path: '/data/customer' },
+          { label: '供应商列表', path: '/data/supplier' },
+          { label: '客户列表', path: '/data/customer' },
           { label: '公司资料设定', path: '/data/company' },
           { label: '仓库管理', path: '/data/warehouse' },
           { label: '库位管理', path: '/data/location' },
@@ -369,9 +416,32 @@ const baseMenuItems = [
       {
         name: '系统维护',
         items: [
-          { label: '商品证件预警', path: '/data/product-warning' },
-          { label: '权限设定', path: '/data/permission' },
+          { label: '商品证件预警', path: '/data/product-warning' }
+        ]
+      }
+    ]
+  },
+  {
+    label: '系统设置',
+    icon: Setting,
+    categories: [
+      {
+        name: '权限与用户',
+        items: [
+          { label: '权限管理', path: '/system/permission' },
+          { label: '账号设定', path: '/system/account' },
           { label: '角色设定', path: '/data/role' },
+          { label: '权限设定', path: '/data/permission' }
+        ]
+      },
+      {
+        name: '系统参数',
+        items: [
+          { label: '单据功能设定', path: '/system/document-function' },
+          { label: '单据编号设定', path: '/system/document-number' },
+          { label: '生产批号设定', path: '/system/batch-no' },
+          { label: '打印设置', path: '/system/print' },
+          { label: '参数配置', path: '/data/param-config' },
           { label: '出入库类别', path: '/data/inout-type' }
         ]
       }
@@ -442,23 +512,52 @@ const switchTab = (path: string) => {
   router.push(path)
 }
 
+const isTabActive = (tab: { path: string }) => {
+  const current = route.path === '/' ? '/dashboard' : route.path
+  if (tab.path === '/dashboard') {
+    return current === '/dashboard'
+  }
+  return current === tab.path
+}
+
+const navigateLayoutBack = () => {
+  router.push(getLayoutBackTarget(route.path))
+}
+
+provide(LAYOUT_NAVIGATE_BACK_KEY, navigateLayoutBack)
+
+watch(
+  () => route.path,
+  () => {
+    syncTabFromRoute(route, addTab)
+  },
+  { immediate: true }
+)
+
 const handleHomeClick = () => {
   router.push('/dashboard')
-  hoverMenu.value = ''
+  closeMenuPanel()
+}
+
+const handleSwitchAccount = () => {
+  clearAuthSession()
+  router.push('/login')
 }
 
 const handleLogout = () => {
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  localStorage.removeItem('userRole')
-  localStorage.removeItem('userPermissions')
-  localStorage.removeItem('currentCompanyId')
+  clearAuthSession()
   router.push('/login')
+}
+
+const handleOpenSystemSettings = () => {
+  router.push('/system/document-function')
+  addTab('单据功能设定', '/system/document-function')
 }
 
 const dropdownMenu = [
   { label: '消息中心', icon: Message },
-  { label: '系统设置', icon: Setting },
+  { label: '系统设置', icon: Setting, onClick: handleOpenSystemSettings },
+  { label: '切换账号', icon: ArrowRight, onClick: handleSwitchAccount },
   { label: '退出登录', icon: TurnOff, onClick: handleLogout }
 ]
 </script>
@@ -486,10 +585,12 @@ const dropdownMenu = [
           class="menu-item"
           :class="{ 
             active: currentMenu?.label === item.label,
-            hover: hoverMenu === item.label
+            hover: activeMenuLabel === item.label,
+            pinned: pinnedMenu === item.label
           }"
           @mouseenter="handleMenuHover(item.label, $event)"
           @mouseleave="handleMenuLeave"
+          @click.stop="handleMenuClick(item.label, $event)"
         >
           <el-icon><component :is="item.icon" /></el-icon>
           <span>{{ item.label }}</span>
@@ -504,7 +605,7 @@ const dropdownMenu = [
             v-for="(tab, index) in openTabs" 
             :key="tab.path"
             class="tab-item"
-            :class="{ active: route.path === tab.path }"
+            :class="{ active: isTabActive(tab) }"
             @click="switchTab(tab.path)"
           >
             <span>{{ tab.name }}</span>
@@ -559,35 +660,35 @@ const dropdownMenu = [
           </el-dropdown>
         </div>
       </el-header>
-      <el-container class="content-container">
-        <div 
-          v-if="hoverMenu"
-          class="sub-menu-panel show"
-          :style="{ top: panelTop + 'px', maxHeight: panelMaxHeight }"
-          @mouseenter="handlePanelEnter"
-          @mouseleave="handlePanelLeave"
-        >
-          <div class="panel-content">
-            <div 
-              v-for="category in menuItems.find(m => m.label === hoverMenu)?.categories"
-              :key="category.name"
-              class="category"
-            >
-              <div class="category-title">{{ category.name }}</div>
-              <div class="category-items">
-                <div 
-                  v-for="item in category.items"
-                  :key="item.path"
-                  class="sub-item"
-                  :class="{ active: route.path === item.path }"
-                  @click="handleSubMenuClick(item.path, item.label)"
-                >
-                  {{ item.label }}
-                </div>
+      <div
+        v-if="activeMenuLabel"
+        class="sub-menu-panel show"
+        :style="{ top: panelTop + 'px', maxHeight: panelMaxHeight }"
+        @mouseenter="handlePanelEnter"
+        @mouseleave="handlePanelLeave"
+      >
+        <div class="panel-content">
+          <div 
+            v-for="category in menuItems.find(m => m.label === activeMenuLabel)?.categories"
+            :key="category.name"
+            class="category"
+          >
+            <div class="category-title">{{ category.name }}</div>
+            <div class="category-items">
+              <div 
+                v-for="item in category.items"
+                :key="item.path"
+                class="sub-item"
+                :class="{ active: route.path === item.path }"
+                @click="handleSubMenuClick(item.path, item.label)"
+              >
+                {{ item.label }}
               </div>
             </div>
           </div>
         </div>
+      </div>
+      <el-container class="content-container">
         <el-main class="main-content">
           <router-view />
         </el-main>
@@ -882,19 +983,19 @@ $light-header: #FFFFFF;
 }
 
 .sub-menu-panel {
-  position: absolute;
-  left: 8px;
+  position: fixed;
+  left: 200px;
   top: 0;
   width: auto;
-  min-width: 0;
-  max-width: none;
+  min-width: 320px;
+  max-width: calc(100vw - 220px);
   background-color: $panel-bg;
   border: 1px solid $panel-border;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   display: none;
   flex-direction: column;
   flex-shrink: 0;
-  z-index: 99;
+  z-index: 2000;
   border-radius: 12px;
   overflow: hidden;
   

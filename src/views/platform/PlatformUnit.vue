@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  loadPlatformUnitCatalog,
+  savePlatformUnitCatalog,
+  addPlatformUnit,
+  deletePlatformUnit,
+  type PlatformUnitCategory
+} from '@/utils/platformUnitStore'
 
 const activeTab = ref('inventory')
 const searchKeyword = ref('')
@@ -9,24 +16,16 @@ const showAddDialog = ref(false)
 const addForm = ref({
   unitName: '',
   category: '',
-  type: '计量'
+  type: '计量' as '计量' | '计价'
 })
 
-const inventoryUnits = ref([
-  { id: 1, category: '单件器械', units: ['支', '只', '根', '枚', '个', '套', '柄', '条', '管', '粒', '丸', '颗', '组', '件', '单元'] },
-  { id: 2, category: '片状敷料', units: ['片', '张', '贴', '卷', '条', '垫', '块'] },
-  { id: 3, category: '液体/容器类', units: ['瓶', '罐', '桶', '袋', '包'] },
-  { id: 4, category: '重量单位', units: ['μg', 'mg', 'g', 'kg', 't', '微克', '毫克', '克', '千克', '吨'] },
-  { id: 5, category: '容积单位', units: ['μL', 'ml', 'cc', 'L', '微升', '毫升', '升'] },
-  { id: 6, category: '长度单位', units: ['mm', 'cm', 'm', '毫米', '厘米', '米'] },
-  { id: 7, category: '面积单位', units: ['c㎡', '㎡', '平方厘米', '平方米'] },
-  { id: 8, category: '检验/医用特殊', units: ['人份', '次', '疗程'] },
-  { id: 9, category: '设备仪器', units: ['台'] }
-])
+const catalog = ref(loadPlatformUnitCatalog())
+const inventoryUnits = computed(() => catalog.value.inventoryUnits)
+const pricingUnits = computed(() => catalog.value.pricingUnits)
 
-const pricingUnits = ref([
-  { id: 1, category: '包装计价单位', units: ['箱', '大箱', '中箱', '小箱', '盒', '大包', '小包', '捆', '扎', '托盘', '塑封', '整批', '板', '排', '层', '托', '塑封袋', '周转箱', '纸箱', '塑盒', '铝箔袋'] }
-])
+const persistCatalog = () => {
+  savePlatformUnitCatalog(catalog.value)
+}
 
 const inventoryCategories = computed(() => inventoryUnits.value.map(item => item.category))
 const pricingCategories = computed(() => pricingUnits.value.map(item => item.category))
@@ -90,58 +89,43 @@ const handleCloseDialog = () => {
 }
 
 const handleSubmitAdd = () => {
-  if (!addForm.value.unitName.trim()) {
-    ElMessage.warning('请输入单位名称')
+  const result = addPlatformUnit(addForm.value.unitName, addForm.value.category, addForm.value.type)
+  if (!result.ok) {
+    ElMessage.warning(result.message || '添加失败')
     return
   }
-  if (!addForm.value.category) {
-    ElMessage.warning('请选择分类')
-    return
-  }
-  
-  const targetUnits = addForm.value.type === '计量' ? inventoryUnits.value : pricingUnits.value
-  const targetCategory = targetUnits.find(cat => cat.category === addForm.value.category)
-  
-  if (targetCategory) {
-    if (targetCategory.units.includes(addForm.value.unitName)) {
-      ElMessage.warning('该单位已存在')
-      return
-    }
-    targetCategory.units.push(addForm.value.unitName)
-    ElMessage.success('添加成功')
-    handleCloseDialog()
-  }
+  catalog.value = loadPlatformUnitCatalog()
+  ElMessage.success('添加成功')
+  handleCloseDialog()
 }
 
 const handleEditUnit = (row: any) => {
   ElMessage.info(`编辑单位: ${row.unit}`)
 }
 
-const handleDeleteUnit = (row: any) => {
+const handleDeleteUnit = (row: { unit: string }) => {
   ElMessageBox.confirm(`确定要删除单位 "${row.unit}" 吗？`, '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
   }).then(() => {
-    inventoryUnits.value.forEach(cat => {
-      cat.units = cat.units.filter(u => u !== row.unit)
-    })
-    pricingUnits.value.forEach(cat => {
-      cat.units = cat.units.filter(u => u !== row.unit)
-    })
+    deletePlatformUnit(row.unit)
+    catalog.value = loadPlatformUnitCatalog()
     ElMessage.success('删除成功')
   }).catch(() => {
     ElMessage.info('已取消删除')
   })
 }
 
-const handleDeleteFromCategory = (cat: any, unitName: string) => {
+const handleDeleteFromCategory = (cat: PlatformUnitCategory, unitName: string) => {
   ElMessageBox.confirm(`确定要删除单位 "${unitName}" 吗？`, '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
   }).then(() => {
     cat.units = cat.units.filter((u: string) => u !== unitName)
+    persistCatalog()
+    catalog.value = loadPlatformUnitCatalog()
     ElMessage.success('删除成功')
   }).catch(() => {
     ElMessage.info('已取消删除')

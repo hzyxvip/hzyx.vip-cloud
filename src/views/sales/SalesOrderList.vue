@@ -1,13 +1,24 @@
 <script setup lang="ts">
+import '@/styles/product-list-table.scss'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { useSalesOrderListColumnSettings } from '@/composables/useSalesOrderListColumnSettings'
+import { resolveWarehouseLabel } from '@/utils/warehouseSettings'
 import {
   onSalesOrderAudited,
   approveModificationRequest,
-  hasPendingModification
+  hasPendingModification,
+  backfillSalesOrderExternalNos,
+  resolveSalesOrderExternalNo
 } from '@/utils/platformCollaborationService'
+import {
+  CONFIRM_STATUS_CONFIRMED,
+  CONFIRM_STATUS_UNCONFIRMED,
+  normalizeConfirmStatus
+} from '@/utils/documentFunctionSettings'
+import { resolveCustomerPlatformCode } from '@/utils/orderListPartnerCodes'
 
 const router = useRouter()
 const showAdvancedFilter = ref(true)
@@ -48,6 +59,11 @@ const businessProcessOptions = [
 const auditStatusOptions = [
   { label: '未审核', value: 'notAudited' },
   { label: '已审核', value: 'audited' }
+]
+
+const confirmStatusOptions = [
+  { label: '未确认', value: CONFIRM_STATUS_UNCONFIRMED },
+  { label: '已确认', value: CONFIRM_STATUS_CONFIRMED }
 ]
 
 const executeStatusOptions = [
@@ -132,6 +148,7 @@ const ALL_FILTER_VALUE = '__all__'
 
 type StatusFilterField =
   | 'auditStatus'
+  | 'confirmStatus'
   | 'executeStatus'
   | 'warehouseStatus'
   | 'closeStatus'
@@ -144,6 +161,7 @@ const searchForm = ref({
   selectedPreset: 'thisMonth',
   dateRange: [] as Date[],
   auditStatus: ALL_FILTER_VALUE,
+  confirmStatus: ALL_FILTER_VALUE,
   executeStatus: ALL_FILTER_VALUE,
   warehouseStatus: ALL_FILTER_VALUE,
   closeStatus: ALL_FILTER_VALUE,
@@ -153,6 +171,7 @@ const searchForm = ref({
 
 const filterGroupsRow1 = [
   { field: 'auditStatus' as StatusFilterField, label: '审核状态', options: auditStatusOptions },
+  { field: 'confirmStatus' as StatusFilterField, label: '确定状态', options: confirmStatusOptions },
   { field: 'executeStatus' as StatusFilterField, label: '执行状态', options: executeStatusOptions },
   { field: 'warehouseStatus' as StatusFilterField, label: '出库状态', options: warehouseStatusOptions }
 ]
@@ -174,19 +193,24 @@ const pageSize = ref(10)
 const tableData = ref<any[]>([])
 
 const defaultData = [
-  { id: 'SO20260620001', orderNo: 'SO-20260620-0001', customer: '北京协和医院', customerCode: 'KH001', warehouse: '北京仓库', date: '2026-06-20', amount: '¥12,500.00', itemCount: 5, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'pending', creator: '系统管理员' },
-  { id: 'SO20260619002', orderNo: 'SO-20260619-0002', customer: '上海瑞金医院', customerCode: 'KH002', warehouse: '上海仓库', date: '2026-06-19', amount: '¥28,800.00', itemCount: 8, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'closed', prepaymentStatus: 'prepaidAudited', receiveStatus: 'received', status: 'completed', creator: '系统管理员' },
-  { id: 'SO20260618003', orderNo: 'SO-20260618-0003', customer: '广州中山医院', customerCode: 'KH003', warehouse: '广州仓库', date: '2026-06-18', amount: '¥15,200.00', itemCount: 3, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidPartiallyAudited', receiveStatus: 'received', status: 'processing', creator: '系统管理员' },
-  { id: 'SO20260617004', orderNo: 'SO-20260617-0004', customer: '深圳人民医院', customerCode: 'KH004', warehouse: '深圳仓库', date: '2026-06-17', amount: '¥45,600.00', itemCount: 12, auditStatus: 'notAudited', executeStatus: 'partiallyExecuted', warehouseStatus: 'partiallyOutWarehoused', closeStatus: 'manualClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'pending', creator: '系统管理员' },
-  { id: 'SO20260616005', orderNo: 'SO-20260616-0005', customer: '杭州第一医院', customerCode: 'KH005', warehouse: '北京仓库', date: '2026-06-16', amount: '¥8,900.00', itemCount: 2, auditStatus: 'audited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidAudited', receiveStatus: 'received', status: 'processing', creator: '系统管理员' },
-  { id: 'SO20260615006', orderNo: 'SO-20260615-0006', customer: '成都华西医院', customerCode: 'KH006', warehouse: '上海仓库', date: '2026-06-15', amount: '¥35,000.00', itemCount: 6, auditStatus: 'audited', executeStatus: 'partiallyExecuted', warehouseStatus: 'partiallyOutWarehoused', closeStatus: 'closed', prepaymentStatus: 'prepaidPartiallyAudited', receiveStatus: 'notReceived', status: 'processing', creator: '系统管理员' },
-  { id: 'SO20260614007', orderNo: 'SO-20260614-0007', customer: '北京协和医院', customerCode: 'KH001', warehouse: '广州仓库', date: '2026-06-14', amount: '¥9,500.00', itemCount: 3, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'manualClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'cancelled', creator: '系统管理员' },
-  { id: 'SO20260613008', orderNo: 'SO-20260613-0008', customer: '上海瑞金医院', customerCode: 'KH002', warehouse: '深圳仓库', date: '2026-06-13', amount: '¥18,900.00', itemCount: 6, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'closed', prepaymentStatus: '', receiveStatus: 'received', status: 'completed', creator: '系统管理员' }
+  { id: 'SO20260620001', orderNo: 'SO-20260620-0001', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-20', amount: '¥12,500.00', itemCount: 5, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'pending', creator: '系统管理员' },
+  { id: 'SO20260619002', orderNo: 'SO-20260619-0002', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-19', amount: '¥28,800.00', itemCount: 8, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'closed', prepaymentStatus: 'prepaidAudited', receiveStatus: 'received', status: 'completed', creator: '系统管理员' },
+  { id: 'SO20260618003', orderNo: 'SO-20260618-0003', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-18', amount: '¥15,200.00', itemCount: 3, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidPartiallyAudited', receiveStatus: 'received', status: 'processing', creator: '系统管理员' },
+  { id: 'SO20260617004', orderNo: 'SO-20260617-0004', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-17', amount: '¥45,600.00', itemCount: 12, auditStatus: 'notAudited', executeStatus: 'partiallyExecuted', warehouseStatus: 'partiallyOutWarehoused', closeStatus: 'manualClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'pending', creator: '系统管理员' },
+  { id: 'SO20260616005', orderNo: 'SO-20260616-0005', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-16', amount: '¥8,900.00', itemCount: 2, auditStatus: 'audited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidAudited', receiveStatus: 'received', status: 'processing', creator: '系统管理员' },
+  { id: 'SO20260615006', orderNo: 'SO-20260615-0006', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-15', amount: '¥35,000.00', itemCount: 6, auditStatus: 'audited', executeStatus: 'partiallyExecuted', warehouseStatus: 'partiallyOutWarehoused', closeStatus: 'closed', prepaymentStatus: 'prepaidPartiallyAudited', receiveStatus: 'notReceived', status: 'processing', creator: '系统管理员' },
+  { id: 'SO20260614007', orderNo: 'SO-20260614-0007', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-14', amount: '¥9,500.00', itemCount: 3, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'manualClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'cancelled', creator: '系统管理员' },
+  { id: 'SO20260613008', orderNo: 'SO-20260613-0008', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-13', amount: '¥18,900.00', itemCount: 6, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'closed', prepaymentStatus: '', receiveStatus: 'received', status: 'completed', creator: '系统管理员' }
 ]
 
 const auditStatusLabels: Record<string, string> = {
   notAudited: '未审核',
   audited: '已审核'
+}
+
+const confirmStatusLabels: Record<string, string> = {
+  [CONFIRM_STATUS_UNCONFIRMED]: '未确认',
+  [CONFIRM_STATUS_CONFIRMED]: '已确认'
 }
 
 const executeStatusLabels: Record<string, string> = {
@@ -227,11 +251,15 @@ const statusLabels: Record<string, { text: string; color: string }> = {
 
 const { columnWidths, handleHeaderDragend } = useTableStyle('sales-order-list', [
   { key: 'orderNo', label: '订单号', defaultWidth: 150 },
+  { key: 'externalNo', label: '外部单号', defaultWidth: 150 },
   { key: 'customer', label: '客户', defaultWidth: 180 },
+  { key: 'customerPlatformCode', label: '客户医享平台编号', defaultWidth: 150 },
+  { key: 'warehouse', label: '仓库', defaultWidth: 110 },
   { key: 'date', label: '下单日期', defaultWidth: 110 },
   { key: 'itemCount', label: '商品种类', defaultWidth: 90 },
   { key: 'amount', label: '成交金额', defaultWidth: 120 },
   { key: 'auditStatus', label: '审核状态', defaultWidth: 90 },
+  { key: 'confirmStatus', label: '确定状态', defaultWidth: 90 },
   { key: 'executeStatus', label: '执行状态', defaultWidth: 100 },
   { key: 'warehouseStatus', label: '出库状态', defaultWidth: 100 },
   { key: 'closeStatus', label: '关闭状态', defaultWidth: 100 },
@@ -240,11 +268,28 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('sales-order-list', 
   { key: 'status', label: '状态', defaultWidth: 90 }
 ])
 
+const {
+  showColumnSelector,
+  columnOptions,
+  selectedColumns,
+  sortedVisibleColumns,
+  tableColumnRenderKey,
+  openColumnSettings,
+  handleColumnDragStart,
+  handleColumnDragOver,
+  handleColumnDrop,
+  confirmColumnSelection
+} = useSalesOrderListColumnSettings('sales-order-list')
+
 const normalizeSavedOrder = (o: Record<string, unknown>) => ({
   ...o,
   orderNo: o.orderNo || o.id,
+  externalNo: resolveSalesOrderExternalNo(o),
+  customerPlatformCode: resolveCustomerPlatformCode(o),
+  warehouse: resolveWarehouseLabel(String(o.warehouse || '')) || String(o.warehouse || ''),
   itemCount: o.itemCount || parseInt(String(o.items || '0'), 10) || 0,
   auditStatus: o.auditStatus || 'notAudited',
+  confirmStatus: normalizeConfirmStatus(o.confirmStatus),
   executeStatus: o.executeStatus || 'notExecuted',
   warehouseStatus: o.warehouseStatus || 'notOutWarehoused',
   closeStatus: o.closeStatus || 'notClosed',
@@ -261,7 +306,7 @@ const loadData = () => {
     .map(normalizeSavedOrder)
   tableData.value = [...newOrders, ...defaultData.map(row => {
     const saved = savedOrders.find((o: Record<string, unknown>) => o.id === row.id)
-    return saved ? normalizeSavedOrder({ ...row, ...saved }) : row
+    return saved ? normalizeSavedOrder({ ...saved, ...row }) : row
   })]
 }
 
@@ -303,6 +348,7 @@ const filteredData = computed(() => {
       const keywords = searchForm.value.keyword.trim().split(/\s+/).filter(Boolean)
       const fields = [
         row.orderNo,
+        row.externalNo,
         row.customer,
         row.customerCode,
         row.creator,
@@ -319,6 +365,7 @@ const filteredData = computed(() => {
     }
 
     if (!matchStatusFilter(row.auditStatus, searchForm.value.auditStatus)) return false
+    if (!matchStatusFilter(row.confirmStatus, searchForm.value.confirmStatus)) return false
     if (!matchStatusFilter(row.executeStatus, searchForm.value.executeStatus)) return false
     if (!matchStatusFilter(row.warehouseStatus, searchForm.value.warehouseStatus)) return false
     if (!matchStatusFilter(row.closeStatus, searchForm.value.closeStatus)) return false
@@ -618,6 +665,11 @@ const handlePresetChange = (val: string) => {
   if (range) searchForm.value.dateRange = range
 }
 
+const syncPresetDateRange = () => {
+  if (!searchForm.value.selectedPreset) return
+  handlePresetChange(searchForm.value.selectedPreset)
+}
+
 const saveSearchForm = () => {
   localStorage.setItem('sales-search-form', JSON.stringify({
     ...searchForm.value,
@@ -630,15 +682,14 @@ const loadSearchForm = () => {
   if (saved) {
     try {
       const parsed = JSON.parse(saved)
-      if (parsed.keyword !== undefined) {
-        Object.assign(searchForm.value, parsed)
-        searchForm.value.auditStatus = migrateSavedFilter(parsed.auditStatus ?? parsed.selectedAuditStatus)
-        searchForm.value.executeStatus = migrateSavedFilter(parsed.executeStatus ?? parsed.selectedExecuteStatus)
-        searchForm.value.warehouseStatus = migrateSavedFilter(parsed.warehouseStatus ?? parsed.selectedWarehouseStatus)
-        searchForm.value.closeStatus = migrateSavedFilter(parsed.closeStatus ?? parsed.selectedCloseStatus)
-        searchForm.value.prepaymentStatus = migrateSavedFilter(parsed.prepaymentStatus ?? parsed.selectedPrepaymentStatus)
-        searchForm.value.receiveStatus = migrateSavedFilter(parsed.receiveStatus ?? parsed.selectedReceiveStatus)
-      }
+      Object.assign(searchForm.value, parsed)
+      searchForm.value.auditStatus = migrateSavedFilter(parsed.auditStatus ?? parsed.selectedAuditStatus)
+      searchForm.value.confirmStatus = migrateSavedFilter(parsed.confirmStatus)
+      searchForm.value.executeStatus = migrateSavedFilter(parsed.executeStatus ?? parsed.selectedExecuteStatus)
+      searchForm.value.warehouseStatus = migrateSavedFilter(parsed.warehouseStatus ?? parsed.selectedWarehouseStatus)
+      searchForm.value.closeStatus = migrateSavedFilter(parsed.closeStatus ?? parsed.selectedCloseStatus)
+      searchForm.value.prepaymentStatus = migrateSavedFilter(parsed.prepaymentStatus ?? parsed.selectedPrepaymentStatus)
+      searchForm.value.receiveStatus = migrateSavedFilter(parsed.receiveStatus ?? parsed.selectedReceiveStatus)
       if (parsed.dateRange?.length) {
         searchForm.value.dateRange = parsed.dateRange.map((d: string) => new Date(d))
       }
@@ -651,6 +702,7 @@ const loadSearchForm = () => {
 
 watch(() => [
   searchForm.value.auditStatus,
+  searchForm.value.confirmStatus,
   searchForm.value.executeStatus,
   searchForm.value.warehouseStatus,
   searchForm.value.closeStatus,
@@ -666,6 +718,7 @@ const resetSearchForm = () => {
     selectedPreset: 'thisMonth',
     dateRange: range,
     auditStatus: ALL_FILTER_VALUE,
+    confirmStatus: ALL_FILTER_VALUE,
     executeStatus: ALL_FILTER_VALUE,
     warehouseStatus: ALL_FILTER_VALUE,
     closeStatus: ALL_FILTER_VALUE,
@@ -679,11 +732,12 @@ const resetSearchForm = () => {
 
 onMounted(() => {
   document.title = '销售订单记录'
-  const range = getDateRange('thisMonth')
-  if (range) {
-    searchForm.value.dateRange = range
-  }
+  backfillSalesOrderExternalNos()
   loadSearchForm()
+  if (!searchForm.value.selectedPreset) {
+    searchForm.value.selectedPreset = 'thisMonth'
+  }
+  syncPresetDateRange()
   loadData()
 
   if (filteredData.value.length === 0 && tableData.value.length > 0) {
@@ -718,7 +772,7 @@ onMounted(() => {
           <el-form-item class="keyword-input">
             <el-input
               v-model="searchForm.keyword"
-              placeholder="客户/订单号/制单人/商品规格/备注"
+              placeholder="客户/订单号/外部单号/制单人/商品规格/备注"
               clearable
               style="width: 300px;"
             />
@@ -784,14 +838,20 @@ onMounted(() => {
         <el-button type="primary" link size="small" @click="handlePrint">打印</el-button>
         <el-button type="primary" link size="small" @click="handleCopy">复制</el-button>
         <el-button type="primary" link size="small" @click="handleExport">导出</el-button>
+        <el-button type="primary" link size="small" @click="openColumnSettings">列表设置</el-button>
       </div>
       <div class="action-bar-extra">
         <el-button type="primary" class="btn-teal" size="small" @click="handleCreate">新增</el-button>
       </div>
     </div>
 
-    <div class="table-card">
+    <div class="table-card product-list-table-card">
+      <div v-if="sortedVisibleColumns.length === 0" class="header-empty-tip">
+        请点击「列表设置」选择要显示的列
+      </div>
+      <div v-else class="table-scroll product-list-table-scroll">
       <el-table
+        :key="tableColumnRenderKey"
         :data="pagedData"
         class="common-table"
         border
@@ -800,63 +860,81 @@ onMounted(() => {
         @selection-change="handleSelectionChange"
       >
         <el-table-column type="selection" width="50" />
-        <el-table-column label="订单号" :width="columnWidths.orderNo">
+        <el-table-column
+          v-for="col in sortedVisibleColumns"
+          :key="col.key"
+          :prop="col.prop"
+          :label="col.label"
+          :width="columnWidths[col.key]"
+          :align="col.align"
+          :header-align="col.headerAlign || col.align || 'center'"
+        >
           <template #default="{ row }">
-            <span class="code-link" @click="handleOrderNoClick(row)">{{ row.orderNo }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="customer" label="客户" :width="columnWidths.customer" />
-        <el-table-column prop="date" label="下单日期" :width="columnWidths.date" />
-        <el-table-column prop="itemCount" label="商品种类" :width="columnWidths.itemCount" align="center" />
-        <el-table-column prop="amount" label="成交金额" :width="columnWidths.amount" align="right" />
-        <el-table-column label="审核状态" :width="columnWidths.auditStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.auditStatus === 'audited' ? 'success' : 'info'">
+            <span
+              v-if="col.key === 'orderNo'"
+              class="code-link"
+              @click="handleOrderNoClick(row)"
+            >{{ row.orderNo }}</span>
+            <span v-else-if="col.key === 'externalNo'">{{ row.externalNo || '—' }}</span>
+            <span v-else-if="col.key === 'customerPlatformCode'">{{ row.customerPlatformCode || '—' }}</span>
+            <span v-else-if="col.key === 'warehouse'">{{ row.warehouse || '—' }}</span>
+            <el-tag
+              v-else-if="col.key === 'auditStatus'"
+              size="small"
+              :type="row.auditStatus === 'audited' ? 'success' : 'info'"
+            >
               {{ auditStatusLabels[row.auditStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="执行状态" :width="columnWidths.executeStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.executeStatus === 'allExecuted' ? 'success' : row.executeStatus === 'partiallyExecuted' ? 'warning' : 'info'">
+            <el-tag
+              v-else-if="col.key === 'confirmStatus'"
+              size="small"
+              :type="row.confirmStatus === CONFIRM_STATUS_CONFIRMED ? 'success' : 'warning'"
+            >
+              {{ confirmStatusLabels[row.confirmStatus] || CONFIRM_STATUS_UNCONFIRMED }}
+            </el-tag>
+            <el-tag
+              v-else-if="col.key === 'executeStatus'"
+              size="small"
+              :type="row.executeStatus === 'allExecuted' ? 'success' : row.executeStatus === 'partiallyExecuted' ? 'warning' : 'info'"
+            >
               {{ executeStatusLabels[row.executeStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="出库状态" :width="columnWidths.warehouseStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.warehouseStatus === 'allOutWarehoused' ? 'success' : row.warehouseStatus === 'partiallyOutWarehoused' ? 'warning' : 'info'">
+            <el-tag
+              v-else-if="col.key === 'warehouseStatus'"
+              size="small"
+              :type="row.warehouseStatus === 'allOutWarehoused' ? 'success' : row.warehouseStatus === 'partiallyOutWarehoused' ? 'warning' : 'info'"
+            >
               {{ warehouseStatusLabels[row.warehouseStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="关闭状态" :width="columnWidths.closeStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.closeStatus === 'closed' ? 'danger' : row.closeStatus === 'manualClosed' ? 'warning' : 'info'">
+            <el-tag
+              v-else-if="col.key === 'closeStatus'"
+              size="small"
+              :type="row.closeStatus === 'closed' ? 'danger' : row.closeStatus === 'manualClosed' ? 'warning' : 'info'"
+            >
               {{ closeStatusLabels[row.closeStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="预收单据" :width="columnWidths.prepaymentStatus" align="center">
-          <template #default="{ row }">
-            <span>{{ prepaymentLabels[row.prepaymentStatus] || '-' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="接单状态" :width="columnWidths.receiveStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.receiveStatus === 'received' ? 'success' : 'info'">
+            <span v-else-if="col.key === 'prepaymentStatus'">
+              {{ prepaymentLabels[row.prepaymentStatus] || '-' }}
+            </span>
+            <el-tag
+              v-else-if="col.key === 'receiveStatus'"
+              size="small"
+              :type="row.receiveStatus === 'received' ? 'success' : 'info'"
+            >
               {{ receiveStatusLabels[row.receiveStatus] || '未接单' }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" :width="columnWidths.status" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusLabels[row.status]?.color || 'info'">
+            <el-tag
+              v-else-if="col.key === 'status'"
+              size="small"
+              :type="statusLabels[row.status]?.color || 'info'"
+            >
               {{ statusLabels[row.status]?.text || row.status }}
             </el-tag>
+            <span v-else>{{ col.prop ? row[col.prop] : '' }}</span>
           </template>
         </el-table-column>
       </el-table>
+      </div>
 
       <div class="pagination">
         <el-pagination
@@ -869,6 +947,32 @@ onMounted(() => {
       </div>
     </div>
   </div>
+
+  <el-dialog v-model="showColumnSelector" title="销售订单列表设置" width="720px" draggable>
+    <div class="field-selector">
+      <p class="sort-tip">勾选需要在列表中显示的列，拖拽可调整顺序</p>
+      <el-checkbox-group v-model="selectedColumns">
+        <el-row :gutter="10">
+          <el-col :span="8" v-for="(col, index) in columnOptions" :key="col.key">
+            <div
+              class="field-item"
+              draggable="true"
+              @dragstart="(event) => handleColumnDragStart(event, index)"
+              @dragover="handleColumnDragOver"
+              @drop="(event) => handleColumnDrop(event, index)"
+            >
+              <span class="field-order">{{ index + 1 }}.</span>
+              <el-checkbox :label="col.key" :disabled="col.required">{{ col.label }}</el-checkbox>
+            </div>
+          </el-col>
+        </el-row>
+      </el-checkbox-group>
+    </div>
+    <template #footer>
+      <el-button @click="showColumnSelector = false">取消</el-button>
+      <el-button type="primary" @click="confirmColumnSelection">确定</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style lang="scss" scoped>
@@ -924,11 +1028,11 @@ onMounted(() => {
     border-top: 1px dashed #e4e7ed;
 
     .filter-row {
-      display: flex;
-      align-items: flex-start;
-      gap: 24px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px 24px;
+      align-items: center;
       margin-bottom: 12px;
-      flex-wrap: wrap;
 
       &:last-child {
         margin-bottom: 0;
@@ -937,23 +1041,26 @@ onMounted(() => {
 
     .filter-item {
       display: flex;
-      align-items: flex-start;
-      gap: 10px;
-      flex: 1;
-      min-width: 280px;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
     }
 
     .filter-label {
       font-size: 13px;
       color: #666;
-      min-width: 72px;
+      width: 64px;
       flex-shrink: 0;
+      text-align: right;
+      line-height: 28px;
     }
 
     .filter-tags {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
+      align-items: center;
+      min-width: 0;
     }
 
     .filter-tag {
@@ -1055,15 +1162,10 @@ onMounted(() => {
   border-radius: 4px;
   padding: 16px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
 
-  :deep(.el-table__header-wrapper th) {
-    background: #f5f7fa;
-    color: #344054;
-    font-weight: 600;
-  }
-  :deep(.el-table__row:nth-child(odd)) {
-    background-color: #f0f9f7;
-  }
+.table-scroll {
+  overflow-x: auto;
 }
 
 .code-link {
@@ -1073,6 +1175,46 @@ onMounted(() => {
 
   &:hover {
     text-decoration: underline;
+  }
+}
+
+.header-empty-tip {
+  padding: 40px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 14px;
+}
+
+.field-selector {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 10px 0;
+
+  .sort-tip {
+    color: #909399;
+    font-size: 12px;
+    margin-bottom: 10px;
+    padding: 0 10px;
+  }
+
+  .field-item {
+    cursor: move;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    &:hover {
+      background: #f5f7fa;
+    }
+
+    .field-order {
+      color: #909399;
+      font-size: 12px;
+      min-width: 20px;
+    }
   }
 }
 
