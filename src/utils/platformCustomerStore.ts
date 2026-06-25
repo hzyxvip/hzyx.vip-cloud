@@ -1,5 +1,6 @@
 import type { PartnerDocument, PartnerProfileExtension } from '@/types/partnerProfile'
 import { TENANT_PLATFORM_CUSTOMER_SEED } from '@/constants/platformTenantCustomerSeed'
+import { getAuthUser } from '@/utils/authSession'
 import {
   ensureStablePlatformPartnerCodes,
   formatPlatformPartnerCode,
@@ -358,12 +359,11 @@ export function getNextPlatformCustomerCode(list: PlatformCustomer[]): string {
 }
 
 function getOperatorName(): string {
-  try {
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
-    return user.realName || user.username || '平台管理员'
-  } catch {
-    return '平台管理员'
+  const user = getAuthUser<Record<string, unknown>>()
+  if (user) {
+    return String(user.realName || user.username || '平台管理员')
   }
+  return '平台管理员'
 }
 
 function normalizeListItem(item: PlatformCustomer): PlatformCustomer {
@@ -410,7 +410,12 @@ export function loadPlatformCustomerList(): PlatformCustomer[] {
   const shouldWrite =
     stored.length === 0 ||
     missing.length > 0 ||
-    withCodes.some((item, index) => item.companyCode !== normalized[index]?.companyCode)
+    withCodes.some(item => {
+      const id = normalizePlatformCustomerId(item.id)
+      const prev = stored.find(row => normalizePlatformCustomerId(row.id) === id)
+      if (!prev) return true
+      return prev.companyCode !== item.companyCode
+    })
 
   if (shouldWrite) {
     writeList(withCodes)

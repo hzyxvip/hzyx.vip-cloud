@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useTableStyle } from '@/composables/useTableStyle'
-import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
+import { activeWarehouseOptions, hydrateWarehouseOptionsFromServer } from '@/utils/warehouseSettings'
 
 const searchForm = ref({
   product: '',
@@ -33,7 +33,7 @@ const handleReset = () => {
 }
 
 const handleRefresh = () => {
-  refreshWarehouseOptions()
+  void hydrateWarehouseOptionsFromServer()
   const stored = localStorage.getItem('warehouseList')
   if (stored) {
     try {
@@ -48,7 +48,7 @@ const handleRefresh = () => {
 }
 
 onMounted(() => {
-  refreshWarehouseOptions()
+  void hydrateWarehouseOptionsFromServer()
 })
 </script>
 

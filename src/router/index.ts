@@ -518,6 +518,16 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/platform/PlatformLicenseValidity.vue')
       },
       {
+        path: 'platform/license-public',
+        name: 'PlatformLicensePublic',
+        component: () => import('@/views/platform/PlatformLicensePublic.vue')
+      },
+      {
+        path: 'platform/collab-monitor',
+        name: 'PlatformCollabMonitor',
+        component: () => import('@/views/platform/PlatformCollabMonitor.vue')
+      },
+      {
         path: 'platform/product',
         name: 'PlatformProduct',
         component: () => import('@/views/platform/PlatformProduct.vue')
@@ -623,6 +633,11 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/system/SystemPrintSettings.vue')
       },
       {
+        path: 'system/print-template',
+        name: 'SystemPrintTemplate',
+        component: () => import('@/views/system/SystemPrintTemplateEditor.vue')
+      },
+      {
         path: 'system/document-number',
         name: 'SystemDocumentNumber',
         component: () => import('@/views/system/SystemDocumentNumber.vue')
@@ -636,6 +651,11 @@ const routes: RouteRecordRaw[] = [
         path: 'system/account',
         name: 'SystemAccount',
         component: () => import('@/views/platform/PlatformAccount.vue')
+      },
+      {
+        path: 'system/audit-policy',
+        name: 'SystemAuditPolicy',
+        component: () => import('@/views/system/SystemAuditPolicy.vue')
       }
     ]
   }

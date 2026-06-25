@@ -2,7 +2,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
+import { activeWarehouseOptions, hydrateWarehouseOptionsFromServer } from '@/utils/warehouseSettings'
 
 const router = useRouter()
 const warehouseOptions = activeWarehouseOptions
@@ -148,7 +148,7 @@ const handleCancel = () => {
 }
 
 onMounted(() => {
-  refreshWarehouseOptions()
+  void hydrateWarehouseOptionsFromServer()
   form.documentNo = `TRIN${Date.now()}`
 })
 </script>

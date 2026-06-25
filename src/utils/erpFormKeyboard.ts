@@ -84,6 +84,19 @@ export function scheduleAfterDatePickerClose(callback: () => void) {
   setTimeout(tick, 0)
 }
 
+/** 关闭下拉/日期等浮层，避免遮挡页面操作（如返回列表） */
+export function dismissErpFloatingPanels() {
+  const active = document.activeElement as HTMLElement | null
+  if (active && active !== document.body) {
+    active.blur()
+  }
+  if (isSelectDropdownOpen() || isDatePickerPanelOpen()) {
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true })
+    )
+  }
+}
+
 const CN_MONTH_NAMES = [
   '一月', '二月', '三月', '四月', '五月', '六月',
   '七月', '八月', '九月', '十月', '十一月', '十二月'

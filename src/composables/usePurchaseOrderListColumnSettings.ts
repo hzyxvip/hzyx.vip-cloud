@@ -8,18 +8,18 @@ export type PurchaseOrderListColumnDef = {
   align?: 'left' | 'center' | 'right'
   headerAlign?: 'left' | 'center' | 'right'
   required?: boolean
+  /** 表头点击排序，默认 true */
+  sortable?: boolean
 }
 
 export const PURCHASE_ORDER_LIST_COLUMN_DEFINITIONS: PurchaseOrderListColumnDef[] = [
-  { key: 'orderNo', label: '订单号', required: true },
-  { key: 'projectName', label: '项目名称', prop: 'projectName' },
+  { key: 'orderNo', label: '订单号', prop: 'orderNo', required: true },
   { key: 'supplier', label: '供应商', prop: 'supplier' },
   { key: 'supplierPlatformCode', label: '医享平台供应商编号', prop: 'supplierPlatformCode' },
   { key: 'date', label: '下单日期', prop: 'date' },
   { key: 'itemCount', label: '商品种类', prop: 'itemCount', align: 'center', headerAlign: 'center' },
   { key: 'amount', label: '成交金额', prop: 'amount', align: 'right', headerAlign: 'right' },
   { key: 'auditStatus', label: '审核状态', align: 'center', headerAlign: 'center' },
-  { key: 'confirmStatus', label: '确定状态', align: 'center', headerAlign: 'center' },
   { key: 'executeStatus', label: '执行状态', align: 'center', headerAlign: 'center' },
   { key: 'warehouseStatus', label: '入库状态', align: 'center', headerAlign: 'center' },
   { key: 'closeStatus', label: '关闭状态', align: 'center', headerAlign: 'center' },
@@ -32,9 +32,7 @@ export const DEFAULT_PURCHASE_ORDER_LIST_COLUMN_KEYS =
   PURCHASE_ORDER_LIST_COLUMN_DEFINITIONS.map(col => col.key)
 
 const NEW_LIST_COLUMNS: { key: string; after?: string }[] = [
-  { key: 'projectName', after: 'orderNo' },
-  { key: 'supplierPlatformCode', after: 'supplier' },
-  { key: 'confirmStatus', after: 'auditStatus' }
+  { key: 'supplierPlatformCode', after: 'supplier' }
 ]
 
 function insertColumnKey(keys: string[], key: string, after?: string) {

@@ -322,6 +322,7 @@ export const applyPlatformProductToSalesItem = (
   item.registrationNo = product.registerNo || ''
   item.productionLicenseNo = product.licenseNo || ''
   item.storageCondition = product.storageCondition || ''
+  item.bidType = String(product.bidType || '')
   item._fromPlatform = true
   item._platformProductCode = product.code
   if (item.quantity && item.price) {

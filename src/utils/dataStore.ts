@@ -1,6 +1,12 @@
 import { ref } from 'vue'
 import type { PartnerDocument } from '@/types/partnerProfile'
 import type { LicenseVisibilityConfig } from '@/utils/partnerLicenseVisibility'
+import { getAuthToken, getAuthCompanyId } from './authSession'
+import {
+  SYSTEM_DEFAULT_WAREHOUSE_CODE,
+  SYSTEM_DEFAULT_WAREHOUSE_NAME,
+  buildSystemDefaultWarehouseRecord
+} from './warehouseDefaults'
 
 export interface Company {
   id: number
@@ -79,24 +85,31 @@ export interface Warehouse {
 
 const currentCompanyId = ref<number | null>(null)
 
-import { getAuthCompanyId } from './authSession'
-import {
-  SYSTEM_DEFAULT_WAREHOUSE_CODE,
-  SYSTEM_DEFAULT_WAREHOUSE_NAME,
-  buildSystemDefaultWarehouseRecord
-} from './warehouseDefaults'
-
 export const setCurrentCompany = (companyId: number) => {
   currentCompanyId.value = companyId
   sessionStorage.setItem('currentCompanyId', String(companyId))
 }
 
-export const getCurrentCompany = () => {
-  if (currentCompanyId.value === null) {
-    const stored = getAuthCompanyId()
-    currentCompanyId.value = stored ?? 1
+export const getCurrentCompany = (): number | null => {
+  if (currentCompanyId.value !== null && currentCompanyId.value > 0) {
+    return currentCompanyId.value
   }
-  return currentCompanyId.value
+  const fromAuth = getAuthCompanyId()
+  if (fromAuth && fromAuth > 0) {
+    currentCompanyId.value = fromAuth
+    return fromAuth
+  }
+  try {
+    const cached = sessionStorage.getItem('currentCompanyId')
+    const parsed = Number(cached)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      currentCompanyId.value = parsed
+      return parsed
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
 }
 
 export interface Department {
@@ -345,21 +358,70 @@ function unwrapApiList<T>(res: unknown): T[] | null {
   return null
 }
 
-export async function loadWarehousesFromApi() {
-  try {
-    const { warehouseApi } = await import('./api')
-    const list = unwrapApiList<Warehouse>(await warehouseApi.getAll())
-    if (!list) {
-      ensureLocalSystemDefaultWarehouse(getCurrentCompany())
-      return
+const WAREHOUSE_SYNCED_COMPANY_KEY = 'warehouse_server_synced_company'
+
+let warehouseHydrateTask: Promise<boolean> = Promise.resolve(false)
+
+export function isWarehouseListSyncedForCurrentCompany(): boolean {
+  const companyId = getCurrentCompany()
+  if (getAuthToken() && sessionStorage.getItem(WAREHOUSE_SYNCED_COMPANY_KEY) !== String(companyId)) {
+    return false
+  }
+  return warehouses.value.some(w => w.companyId === companyId && w.status === '启用')
+}
+
+/** 登录后从服务器拉取当前公司仓库；失败时不写入本地假数据，避免与数据库不一致 */
+export async function hydrateWarehouseListFromServer(options?: { timeoutMs?: number }): Promise<boolean> {
+  if (!getAuthToken()) return false
+
+  const timeoutMs = options?.timeoutMs ?? 15000
+
+  const run = async (): Promise<boolean> => {
+    const ok = await loadWarehousesFromApi()
+    if (ok) {
+      sessionStorage.setItem(WAREHOUSE_SYNCED_COMPANY_KEY, String(getCurrentCompany()))
     }
-    warehouses.value = list.map(mapWarehouseFromApi)
-  } catch {
-    ensureLocalSystemDefaultWarehouse(getCurrentCompany())
+    return ok
+  }
+
+  const task = warehouseHydrateTask.then(run, run)
+  warehouseHydrateTask = task
+
+  try {
+    return await Promise.race([
+      task,
+      new Promise<boolean>((_, reject) => {
+        setTimeout(() => reject(new Error('仓库数据同步超时')), timeoutMs)
+      })
+    ])
+  } catch (error) {
+    console.warn('[dataStore] 从服务器加载仓库失败，请检查网络或刷新页面', error)
+    return false
   }
 }
 
-/** 后端不可用时，本地补一条系统默认仓库 ck01 */
+export async function loadWarehousesFromApi(): Promise<boolean> {
+  try {
+    const { warehouseApi } = await import('./api')
+    const companyId = getCurrentCompany()
+    const list = unwrapApiList<Warehouse>(await warehouseApi.getAll())
+    if (!list) return false
+
+    const mapped = list.map(mapWarehouseFromApi)
+    warehouses.value = [
+      ...warehouses.value.filter(w => w.companyId !== companyId),
+      ...mapped
+    ]
+    if (getAuthToken()) {
+      sessionStorage.setItem(WAREHOUSE_SYNCED_COMPANY_KEY, String(companyId))
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 未登录演示场景下补一条本地默认仓库（已登录时勿用，以免与数据库不一致） */
 export function ensureLocalSystemDefaultWarehouse(companyId: number) {
   const companyWarehouses = warehouses.value.filter(w => w.companyId === companyId)
   if (companyWarehouses.length > 0) return

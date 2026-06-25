@@ -9,6 +9,7 @@ import {
   loadPlatformCustomerDraft,
   savePlatformCustomerDraft
 } from '@/utils/platformCustomerDraftStore'
+import { getAuthUser } from '@/utils/authSession'
 import {
   findPlatformCustomerById,
   formatToday,
@@ -40,8 +41,8 @@ const form = reactive({
 })
 
 const getOperator = () => {
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
-  return user.realName || user.username || '平台管理员'
+  const user = getAuthUser<Record<string, unknown>>()
+  return user ? String(user.realName || user.username || '平台管理员') : '平台管理员'
 }
 
 const loadData = () => {

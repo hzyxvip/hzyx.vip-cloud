@@ -37,7 +37,7 @@ const PRIMARY_ROUTE_TITLES: Record<string, string> = {
   '/platform/field': '平台资料字段目录',
   '/purchase/order-list': '采购订单记录',
   '/purchase/inbound': '采购入库',
-  '/purchase/inbound-record': '采购入库单记录',
+  '/purchase/inbound-record': '采购入库记录',
   '/purchase/return': '采购退货',
   '/purchase/invoice': '采购税票登记表',
   '/purchase/report': '采购明细表',
@@ -62,6 +62,7 @@ const PRIMARY_ROUTE_TITLES: Record<string, string> = {
   '/system/document-function': '单据功能设定',
   '/system/print': '打印设置',
   '/system/document-number': '单据编号设定',
+  '/system/audit-policy': '审核制度',
   '/system/account': '账号设定'
 }
 

@@ -12,6 +12,8 @@ import { NonConformingItem } from '../entities/NonConformingItem'
 import { InterCompanyOrder } from '../entities/InterCompanyOrder'
 import { Product } from '../entities/Product'
 import { Customer } from '../entities/Customer'
+import { Supplier } from '../entities/Supplier'
+import { BizOrder } from '../entities/BizOrder'
 
 export const AppDataSource = new DataSource({
   type: 'sqlite',
@@ -30,7 +32,9 @@ export const AppDataSource = new DataSource({
     NonConformingItem,
     InterCompanyOrder,
     Product,
-    Customer
+    Customer,
+    Supplier,
+    BizOrder
   ],
   migrations: [],
   subscribers: []

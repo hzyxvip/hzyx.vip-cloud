@@ -12,6 +12,8 @@ import locationRoutes from './routes/locations'
 import complianceRoutes from './routes/compliance'
 import productRoutes from './routes/products'
 import customerRoutes from './routes/customers'
+import supplierRoutes from './routes/suppliers'
+import orderRoutes from './routes/orders'
 
 const app = express()
 const PORT = parseInt(process.env.PORT || '3006', 10)
@@ -30,6 +32,8 @@ app.use('/api/locations', locationRoutes)
 app.use('/api/compliance', complianceRoutes)
 app.use('/api/products', productRoutes)
 app.use('/api/customers', customerRoutes)
+app.use('/api/suppliers', supplierRoutes)
+app.use('/api/orders', orderRoutes)
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'medical-cloud-backend' })

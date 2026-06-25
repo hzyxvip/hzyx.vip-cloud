@@ -5,9 +5,16 @@ import { getCompanyInfo, setCompanyInfo, resetCompanyInfo, CompanyInfo } from '@
 import { logisticsCompanyOptions } from '@/utils/statusManager'
 import {
   activeWarehouseOptions,
+  hydrateWarehouseOptionsFromServer,
   isLegacyTestWarehouse,
-  refreshWarehouseOptions
 } from '@/utils/warehouseSettings'
+import {
+  DEFAULT_TABLE_APPEARANCE,
+  loadTableAppearanceSettings,
+  resetTableAppearanceSettings,
+  saveTableAppearanceSettings,
+  type TableAppearanceSettings
+} from '@/utils/tableAppearanceSettings'
 
 // 公司信息
 const companyForm = reactive<CompanyInfo>({
@@ -30,6 +37,35 @@ const warehouseList = ref<Array<{ label: string; value: string; code?: string }>
 
 // 物流配置
 const logisticsList = ref([...logisticsCompanyOptions])
+
+const tableAppearanceForm = reactive<TableAppearanceSettings>({ ...loadTableAppearanceSettings() })
+
+const tablePreviewRows = [
+  { code: 'SP001', name: '示例商品 A', qty: 10 },
+  { code: 'SP002', name: '示例商品 B', qty: 5 },
+  { code: 'SP003', name: '示例商品 C', qty: 8 }
+]
+
+const loadTableAppearance = () => {
+  Object.assign(tableAppearanceForm, loadTableAppearanceSettings())
+}
+
+const saveTableAppearance = () => {
+  saveTableAppearanceSettings({ ...tableAppearanceForm })
+  ElMessage.success('表格外观已保存，全系统列表与明细表已统一生效')
+}
+
+const resetTableAppearance = () => {
+  ElMessageBox.confirm('确定恢复表格外观为系统默认吗？', '提示', {
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    type: 'warning'
+  }).then(() => {
+    resetTableAppearanceSettings()
+    Object.assign(tableAppearanceForm, DEFAULT_TABLE_APPEARANCE)
+    ElMessage.success('已恢复默认表格外观')
+  }).catch(() => {})
+}
 
 // 加载公司信息
 const loadCompanyInfo = () => {
@@ -70,27 +106,29 @@ const saveLogistics = () => {
 
 onMounted(() => {
   loadCompanyInfo()
-  refreshWarehouseOptions()
-  const savedWarehouse = localStorage.getItem('system_warehouse_list')
-  if (savedWarehouse) {
-    try {
-      const parsed = JSON.parse(savedWarehouse) as Array<{ label: string; value: string; code?: string }>
-      warehouseList.value = parsed.filter(w =>
-        !isLegacyTestWarehouse({ label: w.label, value: w.value || w.label })
-      )
-    } catch {}
-  }
-  if (!warehouseList.value.length) {
-    warehouseList.value = activeWarehouseOptions.value.map(w => ({
-      label: w.label,
-      value: w.value,
-      code: w.code
-    }))
-  }
+  void hydrateWarehouseOptionsFromServer().then(() => {
+    const savedWarehouse = localStorage.getItem('system_warehouse_list')
+    if (savedWarehouse) {
+      try {
+        const parsed = JSON.parse(savedWarehouse) as Array<{ label: string; value: string; code?: string }>
+        warehouseList.value = parsed.filter(w =>
+          !isLegacyTestWarehouse({ label: w.label, value: w.value || w.label })
+        )
+      } catch {}
+    }
+    if (!warehouseList.value.length) {
+      warehouseList.value = activeWarehouseOptions.value.map(w => ({
+        label: w.label,
+        value: w.value,
+        code: w.code
+      }))
+    }
+  })
   const savedLogistics = localStorage.getItem('system_logistics_list')
   if (savedLogistics) {
     logisticsList.value = JSON.parse(savedLogistics)
   }
+  loadTableAppearance()
 })
 
 // 当前Tab
@@ -238,6 +276,88 @@ const activeTab = ref('company')
         </el-card>
       </el-tab-pane>
 
+      <!-- 表格外观：全系统统一行高与斑马线 -->
+      <el-tab-pane label="表格样式" name="tableAppearance">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          class="table-appearance-tip"
+          title="此处为全系统表格外观源头配置。列表页（common-table）与单据明细表（items-detail-table）共用斑马线颜色；行高分别适用于列表与明细。"
+        />
+        <el-card class="config-card">
+          <template #header>
+            <div class="card-header">
+              <span>行高与颜色</span>
+              <div>
+                <el-button size="small" @click="resetTableAppearance">恢复默认</el-button>
+                <el-button type="primary" size="small" @click="saveTableAppearance">保存并应用</el-button>
+              </div>
+            </div>
+          </template>
+          <el-form :model="tableAppearanceForm" label-width="140px">
+            <el-row :gutter="20">
+              <el-col :span="12">
+                <el-form-item label="列表行高(px)">
+                  <el-input-number v-model="tableAppearanceForm.listRowHeight" :min="28" :max="56" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="明细行高(px)">
+                  <el-input-number v-model="tableAppearanceForm.detailRowHeight" :min="24" :max="48" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="明细输入框高(px)">
+                  <el-input-number v-model="tableAppearanceForm.detailInputHeight" :min="20" :max="40" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="单元格上下边距(px)">
+                  <el-input-number v-model="tableAppearanceForm.cellPaddingY" :min="0" :max="12" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="奇数行背景">
+                  <el-color-picker v-model="tableAppearanceForm.rowOddBg" show-alpha />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="偶数行背景">
+                  <el-color-picker v-model="tableAppearanceForm.rowEvenBg" show-alpha />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="悬停背景">
+                  <el-color-picker v-model="tableAppearanceForm.rowHoverBg" show-alpha />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="表头背景">
+                  <el-color-picker v-model="tableAppearanceForm.headerBg" show-alpha />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="边框颜色">
+                  <el-color-picker v-model="tableAppearanceForm.lineColor" show-alpha />
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </el-form>
+        </el-card>
+
+        <el-card class="config-card">
+          <template #header>
+            <span>效果预览（保存后全站生效）</span>
+          </template>
+          <el-table :data="tablePreviewRows" class="common-table" border style="max-width: 640px">
+            <el-table-column prop="code" label="编码" width="120" />
+            <el-table-column prop="name" label="名称" />
+            <el-table-column prop="qty" label="数量" width="100" align="right" />
+          </el-table>
+        </el-card>
+      </el-tab-pane>
+
       <!-- 单据状态 -->
       <el-tab-pane label="单据状态" name="status">
         <el-card class="config-card">
@@ -310,6 +430,10 @@ const activeTab = ref('company')
     .el-form-item {
       margin-bottom: 18px;
     }
+  }
+
+  .table-appearance-tip {
+    margin-bottom: 16px;
   }
 }
 </style>

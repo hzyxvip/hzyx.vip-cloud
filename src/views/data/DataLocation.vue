@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Download, Upload } from '@element-plus/icons-vue'
 import * as XLSX from 'xlsx'
 import { warehouses, locations, locationStore, loadLocationsFromApi, loadWarehousesFromApi, getCurrentCompany, type Location } from '@/utils/dataStore'
+import { hydrateWarehouseOptionsFromServer } from '@/utils/warehouseSettings'
 import { useTableStyle } from '@/composables/useTableStyle'
 import { useStockBatchModifyActions } from '@/composables/useStockBatchModifyActions'
 import {
@@ -317,8 +318,7 @@ const {
 })
 
 onMounted(() => {
-  loadLocationsFromApi()
-  loadWarehousesFromApi()
+  void Promise.all([loadLocationsFromApi(), hydrateWarehouseOptionsFromServer()])
 })
 </script>
 

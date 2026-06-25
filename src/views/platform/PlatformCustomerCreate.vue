@@ -9,6 +9,7 @@ import {
   normalizePartnerDocuments,
   syncPartnerDocumentStatus
 } from '@/utils/partnerLicenseDocuments'
+import { getAuthUser } from '@/utils/authSession'
 import {
   buildPlatformCustomerFromForm,
   createEmptyPlatformCustomerForm,
@@ -145,8 +146,8 @@ watch(companyType, type => {
 })
 
 const getOperator = () => {
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
-  return user.realName || user.username || '平台管理员'
+  const user = getAuthUser<Record<string, unknown>>()
+  return user ? String(user.realName || user.username || '平台管理员') : '平台管理员'
 }
 
 const syncDocumentStatus = () => {

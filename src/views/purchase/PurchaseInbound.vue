@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, type Ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { print, preview } from '@/utils/printService'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -28,7 +28,7 @@ import { CONFIRM_STATUS_CONFIRMED, CONFIRM_STATUS_UNCONFIRMED, normalizeConfirmS
 import { locations } from '@/utils/dataStore'
 import {
   activeWarehouseOptions,
-  refreshWarehouseOptions,
+  hydrateWarehouseOptionsFromServer,
   resolveWarehouseLabel as resolveWarehouseLabelFromSettings
 } from '@/utils/warehouseSettings'
 import {
@@ -59,6 +59,9 @@ import {
 } from '@/utils/productBatchExpiry'
 import BatchNoFormatPicker from '@/components/common/BatchNoFormatPicker.vue'
 import BatchNoCell from '@/components/common/BatchNoCell.vue'
+import { useDocumentItemTableSort } from '@/composables/useDocumentItemTableSort'
+import DocumentSortHeader from '@/components/common/DocumentSortHeader.vue'
+import ProductBatchSelectDialog from '@/components/common/ProductBatchSelectDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -182,7 +185,7 @@ const HEADER_FIELD_DEFINITIONS: HeaderFieldOption[] = [
   { key: 'warehouse', label: '仓库', type: 'select', options: 'warehouseOptions', required: true },
   { key: 'warehouseCode', label: '仓库编码', type: 'input', disabled: true },
   { key: 'date', label: '入库日期', type: 'date', required: true },
-  { key: 'operator', label: '操作员', type: 'input' },
+  { key: 'operator', label: '审核入库人员', type: 'input', disabled: true },
   { key: 'remark', label: '备注', type: 'textarea', fullWidth: true, maxLength: 200 },
   { key: 'carrier', label: '承运商', type: 'input' },
   { key: 'auditor', label: '审核人', type: 'input', disabled: true },
@@ -964,45 +967,26 @@ const handleItemProductBlur = (item: InboundItem) => {
 }
 
 const showBatchAdd = ref(false)
-const batchSearchQuery = ref('')
-const batchSelectedProducts = ref<ProductMaster[]>([])
 
-const filteredBatchProducts = computed(() => {
+const batchProductList = computed(() => {
   refreshProductList()
-  if (!batchSearchQuery.value) return productList.value
-  const query = batchSearchQuery.value.toLowerCase()
-  return productList.value.filter(p =>
-    (p.code || '').toLowerCase().includes(query) ||
-    (p.name || '').toLowerCase().includes(query) ||
-    (p.spec || '').toLowerCase().includes(query)
-  )
+  return productList.value
 })
 
 const openBatchAdd = () => {
-  batchSearchQuery.value = ''
-  batchSelectedProducts.value = []
   showBatchAdd.value = true
 }
 
-const confirmBatchAdd = () => {
-  if (batchSelectedProducts.value.length === 0) {
-    ElMessage.warning('请选择至少一个商品')
-    return
-  }
-  batchSelectedProducts.value.forEach(product => {
+const confirmBatchAdd = (selected: ProductMaster[]) => {
+  selected.forEach(product => {
     const row = createEmptyItemRow()
     applyLocalProductToItem(row, product)
     row.productLocked = true
     calcRowAmount(row)
     form.value.items.push(row)
   })
-  ElMessage.success(`成功添加 ${batchSelectedProducts.value.length} 个商品`)
-  showBatchAdd.value = false
+  ElMessage.success(`成功添加 ${selected.length} 个商品`)
   syncItemsTableLayout()
-}
-
-const handleBatchSelectionChange = (rows: ProductMaster[]) => {
-  batchSelectedProducts.value = rows
 }
 
 const handleItemDateKeydown = (e: KeyboardEvent, row: InboundItem, colKey: string) => {
@@ -1432,7 +1416,7 @@ const buildInboundData = (status: string, validItems: InboundItem[]) => ({
   warehouse: form.value.warehouse,
   warehouseCode: form.value.warehouseCode,
   date: form.value.date,
-  operator: form.value.operator || '系统操作员',
+  operator: form.value.operator,
   carrier: form.value.carrier,
   freight: form.value.freight,
   discountRate: form.value.discountRate,
@@ -1454,6 +1438,7 @@ const buildInboundData = (status: string, validItems: InboundItem[]) => ({
   signPerson: form.value.signPerson,
   signDate: form.value.signDate,
   signRemark: form.value.signRemark,
+  inboundStatus: form.value.auditStatus === 'audited' ? 'allInWarehoused' : 'notInWarehoused',
   items: validItems,
   subTotalAmount: subTotalAmount.value,
   totalQuantity: totalQuantity.value,
@@ -1489,7 +1474,7 @@ const appendUdiForItems = (validItems: InboundItem[]) => {
       udiCode: item.productCode,
       batchNo: item.batchNo,
       quantity: item.quantity,
-      operator: form.value.operator || '系统操作员',
+      operator: form.value.operator,
       operatedAt: formatLocalDateTime()
     })
   })
@@ -1607,24 +1592,13 @@ const confirmStatusTagType = computed(() =>
 const handleSaveAndAudit = () => {
   if (!validateForm()) return
   if (form.value.auditStatus === 'audited') {
-    ElMessage.info('入库单已审核')
+    ElMessage.info('入库单已审核入库')
     return
   }
   if (!form.value.inboundNo) form.value.inboundNo = `PIN${Date.now()}`
   persistInbound('draft')
   if (!autoConfirmPurchaseInboundIfNeeded()) return
   handleAuditToggle()
-}
-
-const handleSubmit = () => {
-  if (!validateForm()) return
-  if (!runInboundComplianceCheck()) return
-  if (!form.value.inboundNo) form.value.inboundNo = `PIN${Date.now()}`
-  const validItems = getValidItems()
-  persistInbound('pending')
-  appendUdiForItems(validItems)
-  ElMessage.success('采购入库单提交成功')
-  router.push('/purchase/inbound-record')
 }
 
 const handleAuditToggle = () => {
@@ -1637,7 +1611,11 @@ const handleAuditToggle = () => {
     }).then(() => {
       form.value.auditStatus = 'notAudited'
       form.value.auditor = ''
+      form.value.operator = ''
       form.value.auditTime = ''
+      form.value.signStatus = '未签收'
+      form.value.signPerson = ''
+      form.value.signDate = ''
       resetPurchaseInboundConfirm()
       if (form.value.status === 'completed' || form.value.status === 'processing') {
         form.value.status = 'pending'
@@ -1648,20 +1626,26 @@ const handleAuditToggle = () => {
     return
   }
   if (!requirePurchaseInboundConfirmed()) return
-  ElMessageBox.confirm('确定要审核该采购入库单吗？', '审核确认', {
+  ElMessageBox.confirm('确定要审核入库该采购入库单吗？', '审核入库确认', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
   }).then(() => {
+    const auditPerson = '当前用户'
+    const signDate = new Date().toISOString().split('T')[0]
     form.value.auditStatus = 'audited'
-    form.value.auditor = '当前用户'
+    form.value.auditor = auditPerson
+    form.value.operator = auditPerson
     form.value.auditTime = formatLocalDateTime()
-    if (form.value.status === 'draft' || form.value.status === 'pending') {
-      form.value.status = 'completed'
-    }
+    form.value.status = 'completed'
+    form.value.signStatus = '已签收'
+    form.value.signPerson = form.value.signPerson || auditPerson
+    form.value.signDate = form.value.signDate || signDate
+    const validItems = getValidItems()
     const saved = persistInbound(form.value.status)
+    appendUdiForItems(validItems)
     onPurchaseInboundAudited(saved)
-    ElMessage.success('审核成功')
+    ElMessage.success('审核入库成功')
   }).catch(() => {})
 }
 
@@ -1676,7 +1660,7 @@ const buildPrintData = () => ({
   supplierPhone: '',
   documentNo: form.value.inboundNo || `PIN${Date.now()}`,
   warehouseName: warehouseLabels[form.value.warehouse] || form.value.warehouse,
-  checker: form.value.operator,
+  checker: form.value.operator || form.value.auditor,
   inspector: '',
   items: form.value.items.map(row => ({
     productCode: row.productCode,
@@ -1739,7 +1723,7 @@ const handleMore = (command: string) => {
 }
 
 onMounted(() => {
-  refreshWarehouseOptions()
+  void hydrateWarehouseOptionsFromServer()
   refreshProductList()
   form.value.date = new Date().toISOString().slice(0, 10)
   form.value.createTime = formatLocalDateTime()
@@ -1791,6 +1775,24 @@ watch(itemsCollapsed, collapsed => {
 watch(sortedVisibleItemColumns, syncItemsTableLayout, { deep: true })
 watch(itemColumnWidths, syncItemsTableLayout, { deep: true })
 watch(itemsTableTotalWidth, syncItemsTableLayout)
+
+const formItems = computed({
+  get: () => form.value.items as Record<string, unknown>[],
+  set: items => { form.value.items = items as typeof form.value.items }
+})
+
+const itemColumnSortKeys = computed(() => sortedVisibleItemColumns.value.map(c => c.key))
+
+const {
+  getItemSortIcon,
+  handleItemColumnSort,
+  isColumnSortable,
+  itemSortOrders
+} = useDocumentItemTableSort(formItems as Ref<Record<string, unknown>[]>, itemColumnSortKeys, {
+  documentKind: 'purchase_inbound',
+  getColumnDef: key => ITEM_COLUMN_DEFINITIONS.find(c => c.key === key),
+  onSorted: syncItemsTableLayout
+})
 </script>
 
 <template>
@@ -1826,7 +1828,7 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
           plain
           :disabled="form.auditStatus === 'audited'"
           @click="handleSaveAndAudit"
-        >保存并审核</el-button>
+        >保存并审核入库</el-button>
         <el-button type="primary" size="small" plain @click="handleSaveAndNew">保存并新增</el-button>
         <el-button
           v-if="canConfirmPurchaseInbound"
@@ -1838,8 +1840,7 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
           size="small"
           :type="form.auditStatus === 'audited' ? 'warning' : 'success'"
           @click="handleAuditToggle"
-        >{{ form.auditStatus === 'audited' ? '反审核' : '审核' }}</el-button>
-        <el-button type="primary" size="small" @click="handleSubmit">确认入库</el-button>
+        >{{ form.auditStatus === 'audited' ? '反审核' : '审核入库' }}</el-button>
         <el-dropdown split-button type="primary" size="small" class="btn-print" @click="handlePrint">
           打印
           <template #dropdown>
@@ -2076,8 +2077,18 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
               :align="col.align"
               header-align="center"
             >
-              <template v-if="col.required" #header>
-                <span class="required-col">{{ col.label }}</span>
+              <template #header>
+                <DocumentSortHeader
+                  v-if="isColumnSortable(col)"
+                  :label="col.label"
+                  :required="col.required"
+                  :sort-icon="getItemSortIcon(col.key)"
+                  :active="!!itemSortOrders[col.key]"
+                  :align="col.align === 'right' ? 'right' : 'center'"
+                  @sort="handleItemColumnSort(col.key)"
+                />
+                <span v-else-if="col.required" class="required-col">{{ col.label }}</span>
+                <span v-else>{{ col.label }}</span>
               </template>
               <template #default="{ row }">
                 <div v-if="col.key === 'productCode'" class="code-cell">
@@ -2086,7 +2097,6 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
                     :ref="(el: any) => setProductAutocompleteRef(row, 'productCode', el)"
                     size="small"
                     class="product-code-autocomplete"
-                    placeholder="编码 名称 规格 厂家"
                     popper-class="product-suggest-popper"
                     :debounce="150"
                     :trigger-on-focus="false"
@@ -2484,26 +2494,11 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
     </div>
   </div>
 
-  <el-dialog v-model="showBatchAdd" title="批量添加商品" width="800px" draggable>
-    <div class="batch-add-dialog">
-      <div class="batch-search">
-        <el-input v-model="batchSearchQuery" placeholder="搜索商品编码、名称、规格" clearable />
-      </div>
-      <el-table :data="filteredBatchProducts" border max-height="360" @selection-change="handleBatchSelectionChange">
-        <el-table-column type="selection" width="50" />
-        <el-table-column prop="code" label="商品编码" width="120" />
-        <el-table-column prop="name" label="商品名称" min-width="160" />
-        <el-table-column prop="spec" label="规格型号" width="120" />
-        <el-table-column prop="manufacturer" label="生产厂家" min-width="140" />
-        <el-table-column prop="brand" label="品牌" width="100" />
-        <el-table-column prop="registrant" label="注册人/备案人" min-width="140" />
-      </el-table>
-    </div>
-    <template #footer>
-      <el-button @click="showBatchAdd = false">取消</el-button>
-      <el-button type="primary" @click="confirmBatchAdd">确定添加</el-button>
-    </template>
-  </el-dialog>
+  <ProductBatchSelectDialog
+    v-model="showBatchAdd"
+    :products="batchProductList"
+    @confirm="confirmBatchAdd"
+  />
 
   <el-dialog v-model="showFieldSelector" title="表头设置" width="720px" draggable>
     <div class="field-selector">
@@ -2547,6 +2542,8 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
 </template>
 
 <style lang="scss" scoped>
+@import '@/styles/document-table-sort.scss';
+
 .erp-page {
   position: relative;
   padding: 0;
@@ -2889,15 +2886,7 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
   }
 
   :deep(.items-detail-table.el-table) {
-    --table-line-color: #d9d9d9;
-    --table-row-odd-bg: #f0f7ff;
-    --table-row-even-bg: #f5f5f5;
-    --table-row-hover-bg: #fff3cd;
-    --table-header-bg: #f5f5f5;
-    --el-table-border-color: #d9d9d9;
-    --el-border-color-lighter: #d9d9d9;
-
-    border: 1px solid var(--table-line-color);
+    border: 1px solid var(--yx-table-line-color);
 
     .el-table__header-wrapper,
     .el-table__body-wrapper,
@@ -3091,18 +3080,6 @@ watch(itemsTableTotalWidth, syncItemsTableLayout)
     .el-table__body-wrapper td.el-table__cell.is-left,
     .el-table__footer-wrapper td.el-table__cell.is-left {
       text-align: left;
-    }
-
-    .el-table__body-wrapper tr:nth-child(odd) > td.el-table__cell {
-      background-color: var(--table-row-odd-bg) !important;
-    }
-
-    .el-table__body-wrapper tr:nth-child(even) > td.el-table__cell {
-      background-color: var(--table-row-even-bg) !important;
-    }
-
-    .el-table__body-wrapper tr:hover > td.el-table__cell {
-      background-color: var(--table-row-hover-bg) !important;
     }
 
     .el-table__cell {

@@ -1,14 +1,36 @@
 <script setup lang="ts">
+import '@/styles/product-list-table.scss'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown } from '@element-plus/icons-vue'
 import { useTableStyle } from '@/composables/useTableStyle'
+import { useSalesOutboundRecordColumnSettings } from '@/composables/useSalesOutboundRecordColumnSettings'
+import { syncSalesOrderExecuteStatusFromOutbound } from '@/utils/salesOrderExecution'
 import { onSalesOutboundAudited } from '@/utils/platformCollaborationService'
 import { CONFIRM_STATUS_CONFIRMED } from '@/utils/documentFunctionSettings'
 import { validateOutboundItems, showComplianceResult } from '@/utils/complianceService'
+import { printSalesOutbound, type SalesOutboundData } from '@/utils/printService'
+import { getCompanyInfo } from '@/utils/companyConfig'
+import { escapeHtml } from '@/utils/htmlEscape'
+
+const logisticsCompanyMap: Record<string, string> = {
+  sf: '顺丰速运',
+  yt: '圆通速递',
+  zt: '中通快递',
+  st: '申通快递',
+  yd: '韵达快递',
+  ems: 'EMS',
+  jd: '京东物流',
+  db: '德邦物流',
+  self: '上门自提'
+}
 
 const router = useRouter()
 const showAdvancedFilter = ref(true)
+
+const PAGE_TITLE = '销售出库记录'
+const PAGE_BREADCRUMB = '首页 / 销售管理 / 销售单据 / 销售出库记录'
 
 const OUTBOUND_STORAGE_KEY = 'salesOutboundRecords'
 const SEARCH_FORM_KEY = 'sales-outbound-record-search-form'
@@ -29,18 +51,6 @@ const addOperationLog = (outboundId: string, operationType: string, operator: st
   localStorage.setItem(OPERATION_LOG_KEY, JSON.stringify(operationLogs.value))
 }
 
-const logisticsCompanyMap: Record<string, string> = {
-  sf: '顺丰速运',
-  yt: '圆通速递',
-  zt: '中通快递',
-  st: '申通快递',
-  yd: '韵达快递',
-  ems: 'EMS',
-  jd: '京东物流',
-  db: '德邦物流',
-  self: '上门自提'
-}
-
 const timePresets = [
   { label: '当月', value: 'thisMonth' },
   { label: '今日', value: 'today' },
@@ -57,9 +67,10 @@ const auditStatusOptions = [
   { label: '已审核', value: 'audited' }
 ]
 
-const signStatusOptions = [
-  { label: '已签收', value: 'signed' },
-  { label: '未签收', value: 'notSigned' }
+const logisticsStatusOptions = [
+  { label: '无物流', value: 'noLogistics' },
+  { label: '在途', value: 'inTransit' },
+  { label: '已签收', value: 'signed' }
 ]
 
 const docStatusOptions = [
@@ -78,12 +89,6 @@ const closeStatusOptions = [
 const receiptStatusOptions = [
   { label: '已收款', value: 'received' },
   { label: '未收款', value: 'notReceived' }
-]
-
-const logisticsStatusOptions = [
-  { label: '无物流', value: 'noLogistics' },
-  { label: '在途', value: 'inTransit' },
-  { label: '已签收', value: 'signed' }
 ]
 
 const toDateKey = (value: Date | string | null | undefined): string => {
@@ -137,30 +142,28 @@ const getDateRange = (preset: string): [Date, Date] | null => {
 
 const ALL_FILTER_VALUE = '__all__'
 
-type StatusFilterField = 'auditStatus' | 'signStatus' | 'docStatus' | 'closeStatus' | 'paymentStatus' | 'logisticsStatus'
+type StatusFilterField = 'auditStatus' | 'logisticsStatus' | 'docStatus' | 'closeStatus' | 'paymentStatus'
 
 const searchForm = ref({
   keyword: '',
   selectedPreset: 'thisMonth',
   dateRange: [] as Date[],
   auditStatus: ALL_FILTER_VALUE,
-  signStatus: ALL_FILTER_VALUE,
+  logisticsStatus: ALL_FILTER_VALUE,
   docStatus: ALL_FILTER_VALUE,
   closeStatus: ALL_FILTER_VALUE,
-  paymentStatus: ALL_FILTER_VALUE,
-  logisticsStatus: ALL_FILTER_VALUE
+  paymentStatus: ALL_FILTER_VALUE
 })
 
 const filterGroupsRow1 = [
   { field: 'auditStatus' as StatusFilterField, label: '审核状态', options: auditStatusOptions },
-  { field: 'signStatus' as StatusFilterField, label: '签收状态', options: signStatusOptions },
+  { field: 'logisticsStatus' as StatusFilterField, label: '物流状态', options: logisticsStatusOptions },
   { field: 'paymentStatus' as StatusFilterField, label: '收款状态', options: receiptStatusOptions },
   { field: 'docStatus' as StatusFilterField, label: '单据状态', options: docStatusOptions }
 ]
 
 const filterGroupsRow2 = [
-  { field: 'closeStatus' as StatusFilterField, label: '关闭状态', options: closeStatusOptions },
-  { field: 'logisticsStatus' as StatusFilterField, label: '物流状态', options: logisticsStatusOptions }
+  { field: 'closeStatus' as StatusFilterField, label: '关闭状态', options: closeStatusOptions }
 ]
 
 const withAllOption = (options: { label: string; value: string }[]) => [
@@ -190,6 +193,7 @@ const defaultData = [
     logisticsCompany: '',
     logisticsNo: '',
     signStatus: '未签收',
+    logisticsStatus: 'noLogistics',
     deliveryStatus: '未发货',
     signPerson: '',
     signDate: '',
@@ -214,6 +218,7 @@ const defaultData = [
     logisticsCompany: 'sf',
     logisticsNo: 'SF1234567890',
     signStatus: '已签收',
+    logisticsStatus: 'signed',
     deliveryStatus: '已发货',
     signPerson: '张三',
     signDate: '2026-06-19',
@@ -238,6 +243,7 @@ const defaultData = [
     logisticsCompany: '',
     logisticsNo: '',
     signStatus: '未签收',
+    logisticsStatus: 'noLogistics',
     deliveryStatus: '未发货',
     signPerson: '',
     signDate: '',
@@ -262,6 +268,7 @@ const defaultData = [
     logisticsCompany: 'yt',
     logisticsNo: 'YT9876543210',
     signStatus: '已签收',
+    logisticsStatus: 'signed',
     deliveryStatus: '已发货',
     signPerson: '李四',
     signDate: '2026-06-18',
@@ -277,9 +284,10 @@ const auditStatusLabels: Record<string, string> = {
   audited: '已审核'
 }
 
-const signStatusLabels: Record<string, string> = {
-  signed: '已签收',
-  notSigned: '未签收'
+const logisticsStatusLabels: Record<string, string> = {
+  noLogistics: '无物流',
+  inTransit: '在途',
+  signed: '已签收'
 }
 
 const closeStatusLabels: Record<string, string> = {
@@ -291,12 +299,6 @@ const closeStatusLabels: Record<string, string> = {
 const receiptStatusLabels: Record<string, string> = {
   received: '已收款',
   notReceived: '未收款'
-}
-
-const logisticsStatusLabels: Record<string, string> = {
-  noLogistics: '无物流',
-  inTransit: '在途',
-  signed: '已签收'
 }
 
 const statusLabels: Record<string, { text: string; color: string }> = {
@@ -317,15 +319,26 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('sales-outbound-reco
   { key: 'totalQuantity', label: '总数量', defaultWidth: 90 },
   { key: 'amount', label: '出库金额', defaultWidth: 120 },
   { key: 'auditStatus', label: '审核状态', defaultWidth: 90 },
-  { key: 'signStatus', label: '签收状态', defaultWidth: 90 },
+  { key: 'logisticsStatus', label: '物流状态', defaultWidth: 100 },
+  { key: 'counterpartyInboundStatus', label: '对方入库', defaultWidth: 100 },
   { key: 'paymentStatus', label: '收款状态', defaultWidth: 90 },
-  { key: 'logisticsStatus', label: '物流状态', defaultWidth: 90 },
-  { key: 'logisticsCompany', label: '物流公司', defaultWidth: 100 },
-  { key: 'logisticsNo', label: '物流单号', defaultWidth: 140 },
   { key: 'closeStatus', label: '关闭状态', defaultWidth: 100 },
   { key: 'status', label: '状态', defaultWidth: 90 },
   { key: 'remark', label: '备注', defaultWidth: 120 }
 ])
+
+const {
+  showColumnSelector,
+  columnOptions,
+  selectedColumns,
+  sortedVisibleColumns,
+  tableColumnRenderKey,
+  openColumnSettings,
+  handleColumnDragStart,
+  handleColumnDragOver,
+  handleColumnDrop,
+  confirmColumnSelection
+} = useSalesOutboundRecordColumnSettings('sales-outbound-record-list')
 
 const getRowValidItems = (row: Record<string, unknown>) => {
   const items = (row.items || row.outboundItems || []) as Array<Record<string, unknown>>
@@ -343,6 +356,19 @@ const formatLocalDateTime = () =>
 
 const getRowKey = (row: Record<string, unknown>) => String(row.outboundNo || row.id || '')
 
+/** 列表默认倒序：出库日期新 → 旧，同日期按单号倒序 */
+const compareOutboundRecordDesc = (a: Record<string, unknown>, b: Record<string, unknown>) => {
+  const dateA = String(a.date || a.outboundDate || '')
+  const dateB = String(b.date || b.outboundDate || '')
+  if (dateA !== dateB) return dateB.localeCompare(dateA)
+  const noA = String(a.outboundNo || a.id || '')
+  const noB = String(b.outboundNo || b.id || '')
+  return noB.localeCompare(noA, 'zh-CN', { numeric: true })
+}
+
+const sortOutboundRecordsDesc = <T extends Record<string, unknown>>(rows: T[]) =>
+  [...rows].sort(compareOutboundRecordDesc)
+
 const resolveAuditStatus = (row: Record<string, unknown>) => {
   const audit = row.auditStatus
   if (audit === '已审核' || audit === 'audited') return 'audited'
@@ -357,8 +383,30 @@ const resolveCloseStatus = (row: Record<string, unknown>) => {
   return String(row.status) === 'cancelled' ? 'closed' : 'notClosed'
 }
 
-const resolveSignStatusKey = (row: Record<string, unknown>) => {
-  return row.signStatus === '已签收' ? 'signed' : 'notSigned'
+const hasLogisticsTracking = (row: Record<string, unknown>) => {
+  const company = String(row.logisticsCompany || '')
+  const trackingNo = String(row.logisticsNo || '')
+  if (company === 'self') return false
+  return Boolean(trackingNo || company)
+}
+
+const resolveLogisticsStatusKey = (row: Record<string, unknown>) => {
+  if (row.logisticsStatus) return String(row.logisticsStatus)
+  if (!hasLogisticsTracking(row)) return 'noLogistics'
+  if (row.signStatus === '已签收' || row.signPerson) return 'signed'
+  if (row.deliveryStatus === '已发货') return 'inTransit'
+  return 'noLogistics'
+}
+
+const counterpartyInboundLabels: Record<string, string> = {
+  notInStock: '未入库',
+  inStock: '对方已入库'
+}
+
+const resolveCounterpartyInboundKey = (row: Record<string, unknown>) => {
+  const value = String(row.counterpartyInboundStatus || 'notInStock')
+  if (value === 'inStock' || value === '对方已入库') return 'inStock'
+  return 'notInStock'
 }
 
 const resolveReceiptStatusKey = (row: Record<string, unknown>) => {
@@ -367,25 +415,6 @@ const resolveReceiptStatusKey = (row: Record<string, unknown>) => {
   const value = String(status)
   if (value === 'received' || value === '已收款') return 'received'
   return 'notReceived'
-}
-
-const hasLogisticsTracking = (row: Record<string, unknown>) => {
-  const trackingNo = String(row.logisticsNo || '').trim()
-  const company = String(row.logisticsCompany || '').trim()
-  if (company === 'self') return true
-  return Boolean(trackingNo || company)
-}
-
-const resolveLogisticsStatusKey = (row: Record<string, unknown>) => {
-  if (row.logisticsStatus) {
-    const value = String(row.logisticsStatus)
-    if (value === 'noLogistics' || value === '无物流') return 'noLogistics'
-    if (value === 'inTransit' || value === '在途') return 'inTransit'
-    if (value === 'signed' || value === '已签收') return 'signed'
-  }
-  if (row.signStatus === '已签收' || row.signPerson) return 'signed'
-  if (row.deliveryStatus === '已发货' || hasLogisticsTracking(row)) return 'inTransit'
-  return 'noLogistics'
 }
 
 const normalizeOutboundRow = (row: Record<string, unknown>) => {
@@ -415,9 +444,9 @@ const normalizeOutboundRow = (row: Record<string, unknown>) => {
     auditStatus: row.auditStatus || (resolveAuditStatus(row) === 'audited' ? '已审核' : '未审核'),
     closeStatus: resolveCloseStatus(row),
     signStatus: row.signStatus || '未签收',
+    logisticsStatus: resolveLogisticsStatusKey(row),
     deliveryStatus: row.deliveryStatus || '未发货',
-    paymentStatus: row.paymentStatus || '未收款',
-    logisticsStatus: resolveLogisticsStatusKey(row)
+    paymentStatus: row.paymentStatus || '未收款'
   }
   return normalized
 }
@@ -453,7 +482,14 @@ const canDeleteOutbound = (row: Record<string, unknown>) => {
 }
 
 const canUnAuditOutbound = (row: Record<string, unknown>) => {
+  if (resolveCounterpartyInboundKey(row) === 'inStock') return false
   return resolveAuditStatus(row) === 'audited' && resolveCloseStatus(row) === 'notClosed'
+}
+
+const getUnAuditBlockReason = (row: Record<string, unknown>) => {
+  if (resolveCounterpartyInboundKey(row) === 'inStock') return 'counterpartyInStock'
+  if (resolveCloseStatus(row) !== 'notClosed') return 'closed'
+  return ''
 }
 
 const selectedRows = ref<any[]>([])
@@ -486,19 +522,20 @@ const filteredData = computed(() => {
     }
 
     if (!matchStatusFilter(resolveAuditStatus(row), searchForm.value.auditStatus)) return false
-    if (!matchStatusFilter(resolveSignStatusKey(row), searchForm.value.signStatus)) return false
+    if (!matchStatusFilter(resolveLogisticsStatusKey(row), searchForm.value.logisticsStatus)) return false
     if (!matchStatusFilter(String(row.status || ''), searchForm.value.docStatus)) return false
     if (!matchStatusFilter(resolveCloseStatus(row), searchForm.value.closeStatus)) return false
     if (!matchStatusFilter(resolveReceiptStatusKey(row), searchForm.value.paymentStatus)) return false
-    if (!matchStatusFilter(resolveLogisticsStatusKey(row), searchForm.value.logisticsStatus)) return false
 
     return true
   })
 })
 
+const sortedFilteredData = computed(() => sortOutboundRecordsDesc(filteredData.value))
+
 const pagedData = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
-  return filteredData.value.slice(start, start + pageSize.value)
+  return sortedFilteredData.value.slice(start, start + pageSize.value)
 })
 
 const selectFilter = (field: StatusFilterField, value: string) => {
@@ -617,6 +654,7 @@ const handleAudit = () => {
         outboundItems: validItems
       })
       addOperationLog(rowKey, 'audit', '系统管理员', '审核销售出库单')
+      syncSalesOrderExecuteStatusFromOutbound(updated)
     })
     ElMessage.success(`已成功审核 ${targets.length} 条出库单`)
   }).catch(() => {})
@@ -629,18 +667,32 @@ const handleUnAudit = () => {
     ElMessage.info('所选出库单均未审核')
     return
   }
-  const blocked = targets.filter(row => !canUnAuditOutbound(row))
-  if (blocked.length > 0) {
-    ElMessage.warning('已关闭的出库单不能反审核')
+
+  const unAuditable = targets.filter(canUnAuditOutbound)
+  const counterpartyBlocked = targets.filter(row => getUnAuditBlockReason(row) === 'counterpartyInStock')
+  const closeBlocked = targets.filter(row => getUnAuditBlockReason(row) === 'closed')
+
+  if (unAuditable.length === 0) {
+    if (counterpartyBlocked.length > 0) {
+      ElMessage.warning('对方已审核入库，不能反审核')
+    } else {
+      ElMessage.warning('已关闭的出库单不能反审核')
+    }
     return
   }
 
-  ElMessageBox.confirm(`确定要反审核选中的 ${targets.length} 条出库单吗？`, '反审核确认', {
+  if (counterpartyBlocked.length > 0) {
+    ElMessage.warning(`所选 ${counterpartyBlocked.length} 条出库单对方已审核入库，不能反审核，将自动跳过`)
+  } else if (closeBlocked.length > 0) {
+    ElMessage.warning(`所选 ${closeBlocked.length} 条出库单已关闭，不能反审核，将自动跳过`)
+  }
+
+  ElMessageBox.confirm(`确定要反审核选中的 ${unAuditable.length} 条出库单吗？`, '反审核确认', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
   }).then(() => {
-    targets.forEach(row => {
+    unAuditable.forEach(row => {
       const rowKey = getRowKey(row)
       persistOutboundChanges(rowKey, {
         auditStatus: '未审核',
@@ -649,8 +701,9 @@ const handleUnAudit = () => {
         auditTime: ''
       })
       addOperationLog(rowKey, 'unaudit', '系统管理员', '反审核销售出库单')
+      syncSalesOrderExecuteStatusFromOutbound(row)
     })
-    ElMessage.success(`已成功反审核 ${targets.length} 条出库单`)
+    ElMessage.success(`已成功反审核 ${unAuditable.length} 条出库单`)
   }).catch(() => {})
 }
 
@@ -700,114 +753,36 @@ const handleDelete = () => {
   }).catch(() => {})
 }
 
-const handleEnable = () => {
-  if (!requireSelection()) return
-  selectedRows.value.forEach(row => {
-    const rowKey = getRowKey(row)
-    persistOutboundChanges(rowKey, {
-      status: row.status === 'cancelled' ? 'pending' : row.status,
-      closeStatus:
-        resolveCloseStatus(row) === 'closed' || resolveCloseStatus(row) === 'manualClosed'
-          ? 'notClosed'
-          : resolveCloseStatus(row),
-      auditStatus:
-        row.status === 'cancelled'
-          ? '未审核'
-          : resolveAuditStatus(row) === 'audited'
-            ? '已审核'
-            : '未审核'
-    })
-    addOperationLog(rowKey, 'enable', '系统管理员', '启用销售出库单')
-  })
-  ElMessage.success(`已启用 ${selectedRows.value.length} 条出库单`)
-}
-
-const handleClose = () => {
-  if (!requireSelection()) return
-  ElMessageBox.confirm(
-    `确定要关闭选中的 ${selectedRows.value.length} 条出库单吗？`,
-    '关闭确认',
-    { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
-  ).then(() => {
-    selectedRows.value.forEach(row => {
-      const rowKey = getRowKey(row)
-      persistOutboundChanges(rowKey, { closeStatus: 'closed', status: 'cancelled' })
-      addOperationLog(rowKey, 'close', '系统管理员', '关闭销售出库单')
-    })
-    ElMessage.success(`已关闭 ${selectedRows.value.length} 条出库单`)
-  }).catch(() => {})
-}
-
-const handleOutbound = () => {
-  const row = getSelectedRow()
-  if (row) openOutbound(row)
-}
-
 const handleBatchModify = () => {
   if (!requireSelection()) return
   ElMessage.info(`批量修改：已选择 ${selectedRows.value.length} 条出库单`)
 }
 
-const handleToSalesOrder = () => {
-  const row = getSelectedRow()
-  if (!row?.salesOrderNo) {
+const openSalesOrder = (row: Record<string, unknown>) => {
+  const salesOrderNo = String(row.salesOrderNo || row.orderNo || '').trim()
+  if (!salesOrderNo) {
     ElMessage.warning('该出库单未关联销售订单')
     return
   }
-  const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
-  const so = orders.find((item: Record<string, unknown>) =>
-    String(item.orderNo) === String(row.salesOrderNo) || String(item.id) === String(row.salesOrderNo)
+  const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]') as Record<string, unknown>[]
+  const so = orders.find(item =>
+    String(item.orderNo) === salesOrderNo || String(item.id) === salesOrderNo
   )
   if (so?.id) {
     router.push(`/sales/order-list/create/${so.id}`)
     return
   }
-  ElMessage.info(`关联销售订单：${row.salesOrderNo}`)
+  router.push(`/sales/order-list/create/${salesOrderNo}`)
 }
 
-const handleDelivery = () => {
-  const row = getSelectedRow()
-  if (!row) return
-  if (resolveAuditStatus(row) !== 'audited') {
-    ElMessage.warning('请先审核出库单后再发货')
-    return
-  }
-  if (row.deliveryStatus === '已发货') {
-    ElMessage.info('出库单已发货')
-    return
-  }
-  const rowKey = getRowKey(row)
-  persistOutboundChanges(rowKey, { deliveryStatus: '已发货', logisticsStatus: 'inTransit' })
-  addOperationLog(rowKey, 'delivery', '系统管理员', '发货销售出库单')
-  ElMessage.success(`出库单 ${row.outboundNo || row.id} 已发货`)
+const handleSalesOrderNoClick = (row: Record<string, unknown>) => {
+  openSalesOrder(row)
 }
 
-const handleSign = () => {
+const handleToSalesOrder = () => {
   const row = getSelectedRow()
   if (!row) return
-  if (row.signStatus === '已签收') {
-    ElMessage.info('出库单已签收')
-    return
-  }
-  ElMessageBox.prompt('请输入签收人姓名', '签收确认', {
-    confirmButtonText: '确认签收',
-    cancelButtonText: '取消',
-    inputPlaceholder: '请输入签收人姓名'
-  }).then(({ value }) => {
-    if (!value) {
-      ElMessage.warning('请输入签收人姓名')
-      return
-    }
-    const rowKey = getRowKey(row)
-    persistOutboundChanges(rowKey, {
-      signStatus: '已签收',
-      signPerson: value,
-      signDate: new Date().toISOString().split('T')[0],
-      logisticsStatus: 'signed'
-    })
-    addOperationLog(rowKey, 'sign', value, '签收销售出库单')
-    ElMessage.success(`出库单 ${row.outboundNo || row.id} 已签收`)
-  }).catch(() => {})
+  openSalesOrder(row)
 }
 
 const handleTrackLogistics = (row?: Record<string, unknown>) => {
@@ -815,7 +790,7 @@ const handleTrackLogistics = (row?: Record<string, unknown>) => {
   if (!target) return
 
   if (!target.logisticsNo && target.logisticsCompany !== 'self') {
-    ElMessage.warning('暂无物流信息')
+    ElMessage.warning('暂无物流信息，请先在出库单详情页发货并填写物流单号')
     return
   }
 
@@ -824,15 +799,16 @@ const handleTrackLogistics = (row?: Record<string, unknown>) => {
     return
   }
 
+  const signPerson = escapeHtml(target.signPerson || '—')
   const logisticsDetail = {
-    company: logisticsCompanyMap[String(target.logisticsCompany)] || '未知',
-    trackingNo: target.logisticsNo,
+    company: escapeHtml(logisticsCompanyMap[String(target.logisticsCompany)] || '未知'),
+    trackingNo: escapeHtml(target.logisticsNo),
     steps: [
-      { time: '2026-06-18 10:30:00', status: '已发出', location: '发货仓库', remark: '货物已从仓库发出' },
+      { time: '2026-06-18 10:30:00', status: '已发出', location: String(target.warehouse || '公司仓库'), remark: '货物已从仓库发出' },
       { time: '2026-06-18 14:20:00', status: '运输中', location: '物流中转站', remark: '货物正在运输途中' },
       { time: '2026-06-18 20:45:00', status: '到达目的城市', location: '目的地城市', remark: '货物已到达目的城市' },
       { time: '2026-06-19 08:15:00', status: '派送中', location: '配送点', remark: '快递员正在派送中' },
-      { time: '2026-06-19 10:30:00', status: '已签收', location: '客户地址', remark: `签收人：${target.signPerson || '客户'}` }
+      { time: '2026-06-19 10:30:00', status: '已签收', location: String(target.customer || '客户处'), remark: `签收人：${signPerson}` }
     ]
   }
 
@@ -845,9 +821,9 @@ const handleTrackLogistics = (row?: Record<string, unknown>) => {
         <ul style="padding-left: 20px; margin-top: 10px;">
           ${logisticsDetail.steps.map(step => `
             <li style="margin: 8px 0; padding-left: 10px; border-left: 2px solid #00bfa5;">
-              <strong>${step.time}</strong> - ${step.status}<br/>
-              <span style="color: #667085;">${step.location}</span><br/>
-              <span style="color: #999;">${step.remark}</span>
+              <strong>${escapeHtml(step.time)}</strong> - ${escapeHtml(step.status)}<br/>
+              <span style="color: #667085;">${escapeHtml(step.location)}</span><br/>
+              <span style="color: #999;">${escapeHtml(step.remark)}</span>
             </li>
           `).join('')}
         </ul>
@@ -859,6 +835,154 @@ const handleTrackLogistics = (row?: Record<string, unknown>) => {
       dangerouslyUseHTMLString: true
     }
   )
+}
+
+const parseOutboundAmount = (row: Record<string, unknown>) => {
+  const raw = String(row.amount || '0').replace(/[¥,]/g, '')
+  const n = Number.parseFloat(raw)
+  return Number.isFinite(n) ? n : 0
+}
+
+const buildOutboundPrintData = (row: Record<string, unknown>): SalesOutboundData => {
+  const company = getCompanyInfo()
+  const salesDate = String(row.date || row.outboundDate || new Date().toISOString().slice(0, 10))
+  const items = getRowValidItems(row).map(item => ({
+    productCode: String(item.productCode || ''),
+    productName: String(item.productName || ''),
+    spec: String(item.spec || ''),
+    manufacturer: String(item.manufacturer || ''),
+    unit: String(item.unit || ''),
+    quantity: Number(item.quantity) || 0,
+    unitPrice: Number(item.unitPrice ?? item.price) || 0,
+    amount: Number(item.amount) || 0,
+    batchNo: String(item.batchNo || ''),
+    productionDate: String(item.productionDate || item.mfgDate || ''),
+    expiryDate: String(item.expiryDate || ''),
+    registrationNo: String(item.registrationNo || ''),
+    storageCondition: String(item.storageCondition || '')
+  }))
+  return {
+    companyName: company.name,
+    companyAddress: company.address,
+    companyPhone: company.phone,
+    deliveryDate: String(row.deliveryDate || salesDate),
+    salesDate,
+    buyerName: String(row.customer || ''),
+    buyerAddress: String(row.address || ''),
+    buyerPhone: String(row.phone || ''),
+    documentNo: String(row.outboundNo || row.id || ''),
+    warehouseName: String(row.warehouse || ''),
+    receiver: String(row.contact || row.customer || ''),
+    receiverPhone: String(row.phone || ''),
+    licenseNo: company.medicalDeviceLicense,
+    salesperson: String(row.operator || row.creator || ''),
+    shipAddress: company.address,
+    receiveAddress: String(row.address || ''),
+    signPerson: String(row.signPerson || ''),
+    storageConditionText: '常温：空气相对湿度不超过80%且无腐蚀物质清浊，通风良好。',
+    items,
+    totalAmount: parseOutboundAmount(row),
+    qualityStatus: '合格'
+  }
+}
+
+const handleReceipt = () => {
+  const row = getSelectedRow()
+  if (!row) return
+  router.push({
+    path: '/fund/receipt',
+    query: {
+      partner: String(row.customer || ''),
+      sourceOrderNo: String(row.salesOrderNo || ''),
+      amount: String(parseOutboundAmount(row)),
+      outboundNo: String(row.outboundNo || row.id || '')
+    }
+  })
+}
+
+const handleInvoiceRegister = () => {
+  const row = getSelectedRow()
+  if (!row) return
+  router.push({
+    path: '/sales/invoice',
+    query: {
+      orderNo: String(row.salesOrderNo || ''),
+      outboundNo: String(row.outboundNo || row.id || ''),
+      amount: String(parseOutboundAmount(row))
+    }
+  })
+}
+
+const handlePrint = () => {
+  const row = getSelectedRow()
+  if (!row) return
+  if (resolveAuditStatus(row) !== 'audited') {
+    ElMessage.warning('请先审核出库单后再打印')
+    return
+  }
+  const items = getRowValidItems(row)
+  if (items.length === 0) {
+    ElMessage.warning('该出库单无有效商品明细，无法打印')
+    return
+  }
+  try {
+    printSalesOutbound(buildOutboundPrintData(row), false)
+    addOperationLog(getRowKey(row), 'print', '系统管理员', '打印销售出库单')
+    ElMessage.success(`正在打印出库单 ${row.outboundNo || row.id}`)
+  } catch (error) {
+    ElMessage.error('打印失败：' + (error as Error).message)
+  }
+}
+
+const handleAttachmentDownload = () => {
+  const row = getSelectedRow()
+  if (!row) return
+  const attachments = Array.isArray(row.attachments) ? row.attachments : []
+  const count = attachments.length || Number(row.attachmentCount) || 0
+  if (count <= 0) {
+    ElMessage.warning('该出库单暂无附件')
+    return
+  }
+  addOperationLog(getRowKey(row), 'downloadAttachment', '系统管理员', `下载出库单附件（${count} 个）`)
+  ElMessage.success(`已开始下载 ${count} 个附件`)
+}
+
+const handleMoreCommand = (command: string) => {
+  const row = getSelectedRow()
+  if (!row) return
+  const outboundNo = String(row.outboundNo || row.id || '')
+
+  if (command === 'return') {
+    router.push({
+      path: '/sales/return',
+      query: {
+        outboundNo,
+        salesOrderNo: String(row.salesOrderNo || '')
+      }
+    })
+    return
+  }
+
+  if (command === 'purchaseOrder') {
+    router.push({
+      path: '/purchase/order-list/create',
+      query: {
+        fromSalesOutbound: outboundNo,
+        salesOrderNo: String(row.salesOrderNo || '')
+      }
+    })
+    return
+  }
+
+  if (command === 'purchaseInbound') {
+    router.push({
+      path: '/purchase/inbound',
+      query: {
+        fromSalesOutbound: outboundNo,
+        salesOrderNo: String(row.salesOrderNo || '')
+      }
+    })
+  }
 }
 
 const handleSearch = () => {
@@ -896,11 +1020,12 @@ const loadSearchForm = () => {
       const parsed = JSON.parse(saved)
       Object.assign(searchForm.value, parsed)
       searchForm.value.auditStatus = migrateSavedFilter(parsed.auditStatus)
-      searchForm.value.signStatus = migrateSavedFilter(parsed.signStatus)
+      searchForm.value.logisticsStatus = migrateSavedFilter(
+        parsed.logisticsStatus ?? (parsed.signStatus === 'signed' ? 'signed' : parsed.signStatus)
+      )
       searchForm.value.docStatus = migrateSavedFilter(parsed.docStatus)
       searchForm.value.closeStatus = migrateSavedFilter(parsed.closeStatus)
       searchForm.value.paymentStatus = migrateSavedFilter(parsed.paymentStatus)
-      searchForm.value.logisticsStatus = migrateSavedFilter(parsed.logisticsStatus)
       if (parsed.dateRange?.length) {
         searchForm.value.dateRange = parsed.dateRange.map((d: string) => new Date(d))
       }
@@ -918,11 +1043,10 @@ const resetSearchForm = () => {
     selectedPreset: 'thisMonth',
     dateRange: range,
     auditStatus: ALL_FILTER_VALUE,
-    signStatus: ALL_FILTER_VALUE,
+    logisticsStatus: ALL_FILTER_VALUE,
     docStatus: ALL_FILTER_VALUE,
     closeStatus: ALL_FILTER_VALUE,
-    paymentStatus: ALL_FILTER_VALUE,
-    logisticsStatus: ALL_FILTER_VALUE
+    paymentStatus: ALL_FILTER_VALUE
   }
   currentPage.value = 1
   localStorage.removeItem(SEARCH_FORM_KEY)
@@ -930,15 +1054,14 @@ const resetSearchForm = () => {
 
 watch(() => [
   searchForm.value.auditStatus,
-  searchForm.value.signStatus,
+  searchForm.value.logisticsStatus,
   searchForm.value.docStatus,
   searchForm.value.closeStatus,
-  searchForm.value.paymentStatus,
-  searchForm.value.logisticsStatus
+  searchForm.value.paymentStatus
 ], saveSearchForm, { deep: true })
 
 onMounted(() => {
-  document.title = '销售出库记录'
+  document.title = PAGE_TITLE
   const range = getDateRange('thisMonth')
   if (range) {
     searchForm.value.dateRange = range
@@ -954,6 +1077,12 @@ onMounted(() => {
 
 <template>
   <div class="page-container">
+    <div class="page-header">
+      <div class="page-info">
+        <h1>{{ PAGE_TITLE }}</h1>
+        <div class="breadcrumb">{{ PAGE_BREADCRUMB }}</div>
+      </div>
+    </div>
     <div class="search-card">
       <div class="search-row">
         <el-form :model="searchForm" inline class="search-form">
@@ -1030,22 +1159,40 @@ onMounted(() => {
           {{ auditActionLabel }}
         </el-button>
         <el-button type="danger" link size="small" class="btn-delete-link" @click="handleDelete">删除</el-button>
-        <el-button type="primary" link size="small" @click="handleEnable">启用</el-button>
-        <el-button type="primary" link size="small" @click="handleClose">关闭</el-button>
-        <el-button type="primary" link size="small" @click="handleOutbound">出库</el-button>
         <el-button type="primary" link size="small" @click="handleBatchModify">批量修改</el-button>
         <el-button type="primary" link size="small" @click="handleToSalesOrder">关联销售订单</el-button>
-        <el-button type="primary" link size="small" @click="handleDelivery">发货</el-button>
-        <el-button type="primary" link size="small" @click="handleSign">签收</el-button>
         <el-button type="primary" link size="small" @click="handleTrackLogistics()">物流</el-button>
+        <el-button type="primary" link size="small" @click="handleReceipt">收款</el-button>
+        <el-button type="primary" link size="small" @click="handleInvoiceRegister">发票登记</el-button>
+        <el-button type="primary" link size="small" @click="handlePrint">打印</el-button>
+        <el-button type="primary" link size="small" @click="handleAttachmentDownload">附件下载</el-button>
+        <el-dropdown trigger="click" @command="handleMoreCommand">
+          <el-button type="primary" link size="small">
+            更多
+            <el-icon class="dropdown-icon"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="return">退货</el-dropdown-item>
+              <el-dropdown-item command="purchaseOrder">转采购订单</el-dropdown-item>
+              <el-dropdown-item command="purchaseInbound">转采购入库单</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button type="primary" link size="small" @click="openColumnSettings">列表设置</el-button>
       </div>
       <div class="action-bar-extra">
         <el-button type="primary" class="btn-teal" size="small" @click="handleCreate">新增</el-button>
       </div>
     </div>
 
-    <div class="table-card">
+    <div class="table-card product-list-table-card">
+      <div v-if="sortedVisibleColumns.length === 0" class="header-empty-tip">
+        请点击「列表设置」选择要显示的列
+      </div>
+      <div v-else class="table-scroll product-list-table-scroll">
       <el-table
+        :key="tableColumnRenderKey"
         :data="pagedData"
         class="common-table"
         border
@@ -1054,88 +1201,74 @@ onMounted(() => {
         @selection-change="handleSelectionChange"
       >
         <el-table-column type="selection" width="50" />
-        <el-table-column label="出库单号" :width="columnWidths.outboundNo">
+        <el-table-column
+          v-for="col in sortedVisibleColumns"
+          :key="col.key"
+          :prop="col.prop"
+          :label="col.label"
+          :width="columnWidths[col.key]"
+          :align="col.align"
+          :header-align="col.headerAlign || col.align || 'center'"
+        >
           <template #default="{ row }">
-            <span class="code-link" @click="handleOutboundNoClick(row)">{{ row.outboundNo }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="salesOrderNo" label="销售订单号" :width="columnWidths.salesOrderNo" />
-        <el-table-column prop="customer" label="客户" :width="columnWidths.customer" />
-        <el-table-column prop="warehouse" label="仓库" :width="columnWidths.warehouse" />
-        <el-table-column prop="date" label="出库日期" :width="columnWidths.date" />
-        <el-table-column prop="operator" label="操作员" :width="columnWidths.operator" />
-        <el-table-column prop="itemCount" label="商品种类" :width="columnWidths.itemCount" align="center" />
-        <el-table-column prop="totalQuantity" label="总数量" :width="columnWidths.totalQuantity" align="center" />
-        <el-table-column label="出库金额" :width="columnWidths.amount" align="right">
-          <template #default="{ row }">
-            <span>¥{{ row.amount }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="审核状态" :width="columnWidths.auditStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="resolveAuditStatus(row) === 'audited' ? 'success' : 'info'">
+            <span
+              v-if="col.key === 'outboundNo'"
+              class="code-link"
+              @click="handleOutboundNoClick(row)"
+            >{{ row.outboundNo }}</span>
+            <span
+              v-else-if="col.key === 'salesOrderNo'"
+              :class="{ 'code-link': row.salesOrderNo }"
+              @click="row.salesOrderNo && handleSalesOrderNoClick(row)"
+            >{{ row.salesOrderNo || '—' }}</span>
+            <span v-else-if="col.key === 'amount'">¥{{ row.amount }}</span>
+            <el-tag
+              v-else-if="col.key === 'auditStatus'"
+              size="small"
+              :type="resolveAuditStatus(row) === 'audited' ? 'success' : 'info'"
+            >
               {{ auditStatusLabels[resolveAuditStatus(row)] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="签收状态" :width="columnWidths.signStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="resolveSignStatusKey(row) === 'signed' ? 'success' : 'warning'">
-              {{ signStatusLabels[resolveSignStatusKey(row)] }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="收款状态" :width="columnWidths.paymentStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="resolveReceiptStatusKey(row) === 'received' ? 'success' : 'warning'">
-              {{ receiptStatusLabels[resolveReceiptStatusKey(row)] }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="物流状态" :width="columnWidths.logisticsStatus" align="center">
-          <template #default="{ row }">
             <el-tag
+              v-else-if="col.key === 'logisticsStatus'"
               size="small"
               :type="resolveLogisticsStatusKey(row) === 'signed' ? 'success' : resolveLogisticsStatusKey(row) === 'inTransit' ? 'warning' : 'info'"
             >
               {{ logisticsStatusLabels[resolveLogisticsStatusKey(row)] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="物流公司" :width="columnWidths.logisticsCompany" align="center">
-          <template #default="{ row }">
-            <span>{{ logisticsCompanyMap[row.logisticsCompany] || '-' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="物流单号" :width="columnWidths.logisticsNo">
-          <template #default="{ row }">
-            <span
-              v-if="row.logisticsNo"
-              class="code-link"
-              @click="handleTrackLogistics(row)"
-            >{{ row.logisticsNo }}</span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="关闭状态" :width="columnWidths.closeStatus" align="center">
-          <template #default="{ row }">
             <el-tag
+              v-else-if="col.key === 'counterpartyInboundStatus'"
+              size="small"
+              :type="resolveCounterpartyInboundKey(row) === 'inStock' ? 'success' : 'info'"
+            >
+              {{ row.counterpartyInboundStatusLabel || counterpartyInboundLabels[resolveCounterpartyInboundKey(row)] }}
+            </el-tag>
+            <el-tag
+              v-else-if="col.key === 'paymentStatus'"
+              size="small"
+              :type="resolveReceiptStatusKey(row) === 'received' ? 'success' : 'warning'"
+            >
+              {{ receiptStatusLabels[resolveReceiptStatusKey(row)] }}
+            </el-tag>
+            <el-tag
+              v-else-if="col.key === 'closeStatus'"
               size="small"
               :type="resolveCloseStatus(row) === 'closed' ? 'danger' : resolveCloseStatus(row) === 'manualClosed' ? 'warning' : 'info'"
             >
               {{ closeStatusLabels[resolveCloseStatus(row)] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" :width="columnWidths.status" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusLabels[row.status]?.color || 'info'">
+            <el-tag
+              v-else-if="col.key === 'status'"
+              size="small"
+              :type="statusLabels[row.status]?.color || 'info'"
+            >
               {{ statusLabels[row.status]?.text || row.status }}
             </el-tag>
+            <span v-else>{{ col.prop ? row[col.prop] : '' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="remark" label="备注" :width="columnWidths.remark" />
       </el-table>
+      </div>
 
       <div class="pagination">
         <el-pagination
@@ -1143,11 +1276,37 @@ onMounted(() => {
           v-model:page-size="pageSize"
           :page-sizes="[10, 20, 50, 100]"
           layout="total, sizes, prev, pager, next, jumper"
-          :total="filteredData.length"
+          :total="sortedFilteredData.length"
         />
       </div>
     </div>
   </div>
+
+  <el-dialog v-model="showColumnSelector" title="销售出库记录列表设置" width="720px" draggable>
+    <div class="field-selector">
+      <p class="sort-tip">勾选需要在列表中显示的列，拖拽可调整顺序</p>
+      <el-checkbox-group v-model="selectedColumns">
+        <el-row :gutter="10">
+          <el-col :span="8" v-for="(col, index) in columnOptions" :key="col.key">
+            <div
+              class="field-item"
+              draggable="true"
+              @dragstart="(event) => handleColumnDragStart(event, index)"
+              @dragover="handleColumnDragOver"
+              @drop="(event) => handleColumnDrop(event, index)"
+            >
+              <span class="field-order">{{ index + 1 }}.</span>
+              <el-checkbox :label="col.key" :disabled="col.required">{{ col.label }}</el-checkbox>
+            </div>
+          </el-col>
+        </el-row>
+      </el-checkbox-group>
+    </div>
+    <template #footer>
+      <el-button @click="showColumnSelector = false">取消</el-button>
+      <el-button type="primary" class="btn-teal" @click="confirmColumnSelection">确定</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style lang="scss" scoped>
@@ -1155,6 +1314,26 @@ onMounted(() => {
   padding: 16px 20px;
   background: #f5f7fa;
   min-height: calc(100vh - 60px);
+}
+
+.page-header {
+  margin-bottom: 12px;
+
+  .page-info {
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #333;
+      margin: 0 0 6px;
+      line-height: 24px;
+    }
+
+    .breadcrumb {
+      font-size: 13px;
+      color: #667085;
+      line-height: 20px;
+    }
+  }
 }
 
 .btn-teal {
@@ -1294,7 +1473,8 @@ onMounted(() => {
   gap: 4px 8px;
   flex: 1;
 
-  :deep(.el-button.is-link) {
+  :deep(.el-button.is-link),
+  :deep(.el-dropdown .el-button.is-link) {
     padding: 4px 8px;
     color: #344054;
     font-size: 13px;
@@ -1302,6 +1482,12 @@ onMounted(() => {
     &:hover {
       color: #00bfa5;
     }
+  }
+
+  .dropdown-icon {
+    margin-left: 2px;
+    font-size: 12px;
+    vertical-align: middle;
   }
 
   .btn-delete-link {
@@ -1333,6 +1519,50 @@ onMounted(() => {
   :deep(.el-table__row:nth-child(odd)) {
     background-color: #f0f9f7;
   }
+}
+
+.header-empty-tip {
+  padding: 40px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 14px;
+}
+
+.field-selector {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 10px 0;
+
+  .sort-tip {
+    color: #909399;
+    font-size: 12px;
+    margin-bottom: 10px;
+    padding: 0 10px;
+  }
+
+  .field-item {
+    cursor: move;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    &:hover {
+      background: #f5f7fa;
+    }
+
+    .field-order {
+      color: #909399;
+      font-size: 12px;
+      min-width: 20px;
+    }
+  }
+}
+
+.table-scroll {
+  overflow-x: auto;
 }
 
 .code-link {

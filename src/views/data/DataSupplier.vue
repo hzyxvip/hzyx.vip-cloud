@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import { useTableStyle } from '@/composables/useTableStyle'
 import { usePartnerListBatchAudit } from '@/composables/usePartnerListBatchAudit'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Setting } from '@element-plus/icons-vue'
 import {
   getTradingPartners,
   upsertTradingPartner,
@@ -17,6 +18,10 @@ import {
   supplierTypeOptions,
   type SupplierMaster
 } from '@/utils/supplierStore'
+import {
+  SUPPLIER_LIST_COLUMN_DEFINITIONS,
+  useSupplierListColumnSettings
+} from '@/composables/useSupplierListColumnSettings'
 
 const SEARCH_FORM_KEY = 'supplier-search-form'
 
@@ -63,19 +68,26 @@ const statusLabels: Record<string, { text: string; color: string }> = {
 const { columnWidths, handleHeaderDragend } = useTableStyle('supplier-list', [
   { key: 'index', label: '行号', defaultWidth: 56 },
   { key: 'select', label: '', defaultWidth: 42 },
-  { key: 'id', label: '医享平台编号', defaultWidth: 120 },
-  { key: 'name', label: '供应商名称', defaultWidth: 180 },
-  { key: 'contact', label: '联系人', defaultWidth: 100 },
-  { key: 'phone', label: '联系电话', defaultWidth: 120 },
-  { key: 'mobile', label: '手机', defaultWidth: 120 },
-  { key: 'type', label: '供应商类型', defaultWidth: 110 },
-  { key: 'province', label: '省份', defaultWidth: 90 },
-  { key: 'city', label: '城市', defaultWidth: 90 },
-  { key: 'auditStatus', label: '审核状态', defaultWidth: 100 },
-  { key: 'status', label: '状态', defaultWidth: 80 },
-  { key: 'collaboration', label: '平台协同', defaultWidth: 100 },
-  { key: 'createTime', label: '建档日期', defaultWidth: 110 }
+  ...SUPPLIER_LIST_COLUMN_DEFINITIONS.map(col => ({
+    key: col.key,
+    label: col.label,
+    prop: col.prop,
+    defaultWidth: col.defaultWidth
+  }))
 ])
+
+const {
+  showColumnSelector,
+  columnOptions,
+  selectedColumns,
+  sortedVisibleColumns,
+  tableColumnRenderKey,
+  openColumnSettings,
+  handleColumnDragStart,
+  handleColumnDragOver,
+  handleColumnDrop,
+  confirmColumnSelection
+} = useSupplierListColumnSettings('supplier-list')
 
 const partnerKey = (name: string) => `supplier:${name}`
 
@@ -416,8 +428,26 @@ onMounted(() => {
     </div>
 
     <div class="table-card data-list-table-card">
+      <div class="table-toolbar">
+        <div class="table-summary">共 {{ filteredData.length }} 条</div>
+        <el-button
+          type="primary"
+          link
+          size="small"
+          class="supplier-list-settings-btn"
+          @click.stop="openColumnSettings"
+        >
+          <el-icon><Setting /></el-icon>
+          列表设置
+        </el-button>
+      </div>
+      <div v-if="sortedVisibleColumns.length === 0" class="header-empty-tip">
+        请点击「列表设置」选择要显示的列
+      </div>
       <el-table
+        v-else
         ref="tableRef"
+        :key="tableColumnRenderKey"
         :data="pagedData"
         row-key="id"
         class="common-table"
@@ -429,48 +459,50 @@ onMounted(() => {
       >
         <el-table-column type="index" label="行号" :index="indexMethod" :width="columnWidths.index" align="center" />
         <el-table-column type="selection" :width="columnWidths.select" fixed="left" />
-        <el-table-column prop="id" label="医享平台编号" :width="columnWidths.id">
+        <el-table-column
+          v-for="col in sortedVisibleColumns"
+          :key="col.key"
+          :prop="col.prop"
+          :label="col.label"
+          :width="columnWidths[col.key]"
+          :align="col.align"
+          :header-align="col.headerAlign || col.align || 'center'"
+          show-overflow-tooltip
+        >
           <template #default="{ row }">
-            <span class="code-link" @click="handleCodeClick(row)">{{ row.code || row.id }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="name" label="供应商名称" :width="columnWidths.name" show-overflow-tooltip />
-        <el-table-column prop="contact" label="联系人" :width="columnWidths.contact" />
-        <el-table-column prop="phone" label="联系电话" :width="columnWidths.phone" />
-        <el-table-column prop="mobile" label="手机" :width="columnWidths.mobile" />
-        <el-table-column prop="type" label="供应商类型" :width="columnWidths.type">
-          <template #default="{ row }">
-            <el-tag size="small" type="info">{{ supplierTypeLabels[row.type] || row.type }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="province" label="省份" :width="columnWidths.province" />
-        <el-table-column prop="city" label="城市" :width="columnWidths.city" />
-        <el-table-column label="审核状态" :width="columnWidths.auditStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.auditStatus === 'audited' ? 'success' : 'info'">
+            <span
+              v-if="col.key === 'code'"
+              class="code-link"
+              @click="handleCodeClick(row)"
+            >{{ row.code || row.id }}</span>
+            <el-tag v-else-if="col.key === 'type'" size="small" type="info">
+              {{ supplierTypeLabels[row.type] || row.type }}
+            </el-tag>
+            <el-tag
+              v-else-if="col.key === 'auditStatus'"
+              size="small"
+              :type="row.auditStatus === 'audited' ? 'success' : 'info'"
+            >
               {{ auditStatusLabels[row.auditStatus] }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" :width="columnWidths.status" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusLabels[row.status]?.color || 'info'">
+            <el-tag
+              v-else-if="col.key === 'status'"
+              size="small"
+              :type="statusLabels[row.status]?.color || 'info'"
+            >
               {{ statusLabels[row.status]?.text || '正常' }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="平台协同" :width="columnWidths.collaboration" align="center">
-          <template #default="{ row }">
             <el-switch
+              v-else-if="col.key === 'collaboration'"
               v-model="row.collaborationEnabled"
               inline-prompt
               active-text="开"
               inactive-text="关"
               @change="handleCollaborationChange(row)"
             />
+            <span v-else>{{ row[col.prop] ?? '' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="createTime" label="建档日期" :width="columnWidths.createTime" />
       </el-table>
 
       <div class="pagination">
@@ -486,6 +518,41 @@ onMounted(() => {
         />
       </div>
     </div>
+
+    <el-dialog
+      v-model="showColumnSelector"
+      title="供应商列表设置"
+      width="760px"
+      draggable
+      append-to-body
+      align-center
+      destroy-on-close
+      class="supplier-column-settings-dialog"
+    >
+      <div class="field-selector">
+        <p class="sort-tip">勾选需要在列表中显示的列，拖拽可调整顺序</p>
+        <el-checkbox-group v-model="selectedColumns">
+          <el-row :gutter="10">
+            <el-col :span="8" v-for="(col, index) in columnOptions" :key="col.key">
+              <div
+                class="field-item"
+                draggable="true"
+                @dragstart="(event) => handleColumnDragStart(event, index)"
+                @dragover="handleColumnDragOver"
+                @drop="(event) => handleColumnDrop(event, index)"
+              >
+                <span class="field-order">{{ index + 1 }}.</span>
+                <el-checkbox :label="col.key" :disabled="col.required">{{ col.label }}</el-checkbox>
+              </div>
+            </el-col>
+          </el-row>
+        </el-checkbox-group>
+      </div>
+      <template #footer>
+        <el-button @click="showColumnSelector = false">取消</el-button>
+        <el-button type="primary" @click="confirmColumnSelection">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -591,6 +658,124 @@ onMounted(() => {
   border-radius: 12px;
   padding: 20px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+
+  .table-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .table-summary {
+    font-size: 13px;
+    color: #667085;
+  }
+
+  .supplier-list-settings-btn {
+    --el-button-text-color: #1890ff;
+    font-size: 13px;
+    font-weight: 500;
+
+    &:hover {
+      --el-button-hover-text-color: #096dd9;
+    }
+  }
+}
+
+.header-empty-tip {
+  padding: 40px 0;
+  text-align: center;
+  color: #1890ff;
+  font-size: 14px;
+  background: #e6f7ff;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.field-selector {
+  max-height: 460px;
+  overflow-y: auto;
+  padding: 12px 0;
+
+  .sort-tip {
+    color: #096dd9;
+    font-size: 15px;
+    line-height: 1.6;
+    margin-bottom: 14px;
+    padding: 8px 12px;
+    background: #e6f7ff;
+    border: 1px solid #91d5ff;
+    border-radius: 4px;
+  }
+
+  .field-item {
+    cursor: move;
+    padding: 8px 10px;
+    border-radius: 4px;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+
+    &:hover {
+      background: #e6f7ff;
+    }
+
+    .field-order {
+      color: #1890ff;
+      font-size: 15px;
+      min-width: 26px;
+    }
+
+    :deep(.el-checkbox) {
+      height: auto;
+    }
+
+    :deep(.el-checkbox__label) {
+      font-size: 15px;
+      line-height: 1.5;
+      color: #303133;
+    }
+
+    :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+      background-color: #1890ff;
+      border-color: #1890ff;
+    }
+
+    :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+      color: #096dd9;
+    }
+  }
+}
+
+:deep(.supplier-column-settings-dialog) {
+  .el-dialog__header {
+    margin-right: 0;
+    padding: 16px 20px;
+    background: #e6f7ff;
+    border-bottom: 1px solid #91d5ff;
+  }
+
+  .el-dialog__title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #096dd9;
+  }
+
+  .el-dialog__body {
+    font-size: 15px;
+  }
+
+  .el-dialog__footer .el-button--primary {
+    background-color: #1890ff;
+    border-color: #1890ff;
+
+    &:hover {
+      background-color: #096dd9;
+      border-color: #096dd9;
+    }
+  }
 }
 
 .code-link {

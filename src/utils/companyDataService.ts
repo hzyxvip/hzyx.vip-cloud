@@ -8,13 +8,69 @@ import {
 } from '@/utils/platformFieldStore'
 import { companyApi } from '@/utils/api'
 import { applyPublicDisplayDefaults } from '@/utils/companyPublicDisplayService'
+import { sanitizeLicenseDocumentsForLocalStorage } from '@/utils/partnerLicenseUpload'
+import { loadPlatformCustomerList } from '@/utils/platformCustomerStore'
+import { resolvePartnerPlatformCodeByName } from '@/utils/orderListPartnerCodes'
+import { isPlatformPartnerCode } from '@/utils/partnerPlatformCode'
+import { TENANT_PLATFORM_CUSTOMER_SEED } from '@/constants/platformTenantCustomerSeed'
+import { getAuthUser } from '@/utils/authSession'
 
 const COMPANY_FIELD_LAYOUT_KEY = 'companyFieldLayout'
 
 const tenantProfileStorageKey = (companyId: number) => `tenantCompanyProfile_${companyId}`
 
-/** 平台字段编码 → 公司资料属性 */
-export const COMPANY_FIELD_PROP_MAP: Record<string, keyof Company> = {
+/** 超大缓存会在 JSON.parse 阶段卡死浏览器，先剥离内嵌图片再解析 */
+const stripEmbeddedLicenseImages = (raw: string): string => {
+  if (raw.length < 512 * 1024) return raw
+  return raw
+    .replace(/"imageOriginalUrl"\s*:\s*"data:image\/[^"]*"/gi, '"imageOriginalUrl":""')
+    .replace(/"imageUrl"\s*:\s*"data:image\/[^"]*"/gi, '"imageUrl":""')
+    .replace(/"imageSizeBytes"\s*:\s*\d+/g, '"imageSizeBytes":0')
+}
+
+/** 紧急修复：清除当前企业膨胀的证照缓存（控制台或技术支持可调用） */
+export const repairTenantProfileStorage = (companyId: number | null = getCurrentCompany()): boolean => {
+  if (!companyId) return false
+  const key = tenantProfileStorageKey(companyId)
+  const raw = localStorage.getItem(key)
+  if (!raw) return false
+  if (raw.length > 4 * 1024 * 1024) {
+    localStorage.removeItem(key)
+    return true
+  }
+  try {
+    const cleaned = stripEmbeddedLicenseImages(raw)
+    const parsed = JSON.parse(cleaned) as Company
+    const merged = {
+      ...createEmptyCompanyForm(),
+      ...parsed,
+      id: companyId,
+      documents: parsed.documents?.length
+        ? sanitizeLicenseDocumentsForLocalStorage(parsed.documents)
+        : parsed.documents,
+      customFields: parsed.customFields || {}
+    }
+    localStorage.setItem(key, JSON.stringify(merged))
+    return true
+  } catch {
+    localStorage.removeItem(key)
+    return true
+  }
+}
+
+export const repairAllTenantProfileCaches = (): number => {
+  let repaired = 0
+  for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+    const key = localStorage.key(i)
+    if (!key?.startsWith('tenantCompanyProfile_')) continue
+    const companyId = Number(key.slice('tenantCompanyProfile_'.length))
+    if (!Number.isFinite(companyId)) continue
+    if (repairTenantProfileStorage(companyId)) repaired += 1
+  }
+  return repaired
+}
+
+const COMPANY_FIELD_PROP_MAP: Record<string, keyof Company> = {
   companyCode: 'code',
   companyName: 'name',
   creditCode: 'taxNo',
@@ -74,22 +130,40 @@ export const createEmptyCompanyForm = (): Omit<Company, 'id'> => ({
 })
 
 export const getLoggedInUserContext = () => {
-  try {
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
-    return {
-      companyId: Number(user.companyId) || getCurrentCompany(),
-      companyName: String(user.companyName || ''),
-      companyCode: String(user.companyCode || ''),
-      realName: String(user.realName || user.username || '')
-    }
-  } catch {
-    return {
-      companyId: getCurrentCompany(),
-      companyName: '',
-      companyCode: '',
-      realName: ''
-    }
+  const user = getAuthUser<Record<string, unknown>>() || {}
+  const companyId = Number(user.companyId) || getCurrentCompany()
+  return {
+    companyId: companyId && companyId > 0 ? companyId : null,
+    companyName: String(user.companyName || ''),
+    companyCode: String(user.companyCode || ''),
+    realName: String(user.realName || user.username || '')
   }
+}
+
+/** 当前租户在平台客户库中的医享平台编号（YY） */
+export const resolveTenantPlatformPartnerCode = (
+  profile?: Pick<Company, 'name' | 'code'> | null
+): string => {
+  const ctx = getLoggedInUserContext()
+  const name = String(profile?.name || ctx.companyName || '').trim()
+  const tenantCode = String(profile?.code || ctx.companyCode || '').trim()
+  const platformList = loadPlatformCustomerList()
+
+  const seed = TENANT_PLATFORM_CUSTOMER_SEED.find(
+    item => item.companyCode === tenantCode || item.companyName === name
+  )
+  if (seed) {
+    const matched = platformList.find(item => item.id === seed.id)
+    const code = String(matched?.companyCode || '').trim()
+    if (isPlatformPartnerCode(code)) return code
+  }
+
+  const byName = platformList.find(item => item.companyName === name)
+  const byNameCode = String(byName?.companyCode || '').trim()
+  if (isPlatformPartnerCode(byNameCode)) return byNameCode
+
+  const fallback = resolvePartnerPlatformCodeByName(name)
+  return isPlatformPartnerCode(fallback) ? fallback : ''
 }
 
 export const getCompanyFormKey = (fieldCode: string): string =>
@@ -147,18 +221,52 @@ export const formatCompanyFieldDisplay = (company: Company, field: PlatformField
 }
 
 const readLocalTenantProfile = (companyId: number): Company | null => {
-  const stored = localStorage.getItem(tenantProfileStorageKey(companyId))
+  const key = tenantProfileStorageKey(companyId)
+  const stored = localStorage.getItem(key)
   if (!stored) return null
   try {
-    const parsed = JSON.parse(stored) as Company
-    return { ...createEmptyCompanyForm(), ...parsed, id: companyId, customFields: parsed.customFields || {} }
+    let raw = stored
+    if (stored.length > 512 * 1024) {
+      raw = stripEmbeddedLicenseImages(stored)
+    }
+    if (raw.length > 2 * 1024 * 1024) {
+      console.warn('[company] tenant profile still oversized after strip, resetting cache')
+      localStorage.removeItem(key)
+      return null
+    }
+    const parsed = JSON.parse(raw) as Company
+    const documents = parsed.documents?.length
+      ? sanitizeLicenseDocumentsForLocalStorage(parsed.documents)
+      : parsed.documents
+    const merged = {
+      ...createEmptyCompanyForm(),
+      ...parsed,
+      id: companyId,
+      documents,
+      customFields: parsed.customFields || {}
+    }
+    if (documents !== parsed.documents) {
+      try {
+        localStorage.setItem(tenantProfileStorageKey(companyId), JSON.stringify(merged))
+      } catch {
+        /* ignore rewrite failure */
+      }
+    }
+    return merged
   } catch {
     return null
   }
 }
 
 const writeLocalTenantProfile = (profile: Company): void => {
-  localStorage.setItem(tenantProfileStorageKey(profile.id), JSON.stringify(profile))
+  try {
+    localStorage.setItem(tenantProfileStorageKey(profile.id), JSON.stringify(profile))
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+      throw new Error('本地存储空间不足，请清除部分证照图片或删除浏览器缓存后重试')
+    }
+    throw error
+  }
   const idx = companies.value.findIndex(item => item.id === profile.id)
   if (idx >= 0) companies.value[idx] = profile
   else companies.value.push(profile)
@@ -199,6 +307,10 @@ export const mirrorTenantProfileToSystemConfig = (profile: Company): void => {
 /** 加载当前租户（登录企业）的公司资料 */
 export const loadTenantCompanyProfile = async (): Promise<Company> => {
   const companyId = getCurrentCompany()
+  if (!companyId) {
+    throw new Error('未登录或无法识别当前企业')
+  }
+  repairTenantProfileStorage(companyId)
 
   try {
     const apiProfile = await companyApi.getById(companyId)
@@ -225,7 +337,18 @@ export const loadTenantCompanyProfile = async (): Promise<Company> => {
 /** 保存当前租户公司资料 */
 export const saveTenantCompanyProfile = async (profile: Company): Promise<void> => {
   const companyId = getCurrentCompany()
-  const payload = { ...profile, id: companyId, status: profile.status || '启用' }
+  if (!companyId) {
+    throw new Error('未登录或无法识别当前企业')
+  }
+  const sanitizedDocuments = profile.documents?.length
+    ? sanitizeLicenseDocumentsForLocalStorage(profile.documents)
+    : profile.documents
+  const payload = {
+    ...profile,
+    id: companyId,
+    status: profile.status || '启用',
+    documents: sanitizedDocuments
+  }
   writeLocalTenantProfile(payload)
   mirrorTenantProfileToSystemConfig(payload)
 

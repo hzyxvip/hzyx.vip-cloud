@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, type Ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { printSalesOutbound, type SalesOutboundData } from '@/utils/printService'
 import { loadPrintSettings } from '@/utils/printSettings'
@@ -10,8 +10,12 @@ import {
   ArrowLeft, ArrowRight, DArrowLeft, DArrowRight,
   MoreFilled, Plus, Minus, CopyDocument, Setting
 } from '@element-plus/icons-vue'
-import { warehouses, locations, loadLocationsFromApi, loadWarehousesFromApi, getCurrentCompany } from '@/utils/dataStore'
-import { getDefaultWarehouseValue, refreshWarehouseOptions } from '@/utils/warehouseSettings'
+import { warehouses, locations, loadLocationsFromApi, getCurrentCompany } from '@/utils/dataStore'
+import {
+  activeWarehouseOptions,
+  getDefaultWarehouseValue,
+  hydrateWarehouseOptionsFromServer
+} from '@/utils/warehouseSettings'
 import { getCompanyInfo } from '@/utils/companyConfig'
 import { loadProductList, findProductsByCompositeQuery, type ProductMaster } from '@/utils/productStore'
 import {
@@ -26,11 +30,13 @@ import {
   showComplianceResult
 } from '@/utils/complianceService'
 import { onSalesOutboundAudited } from '@/utils/platformCollaborationService'
+import { syncSalesOrderExecuteStatusFromOutbound, derivePendingOrderItemsForOutbound } from '@/utils/salesOrderExecution'
 import {
   enrichCustomerFieldsFromMaster,
   hydrateCustomerListFromServer,
   loadActiveCustomerList,
   applyCustomerMasterToTarget,
+  resolveCustomerMaster,
   type CustomerMaster
 } from '@/utils/customerStore'
 import { useDocumentConfirm } from '@/composables/useDocumentConfirm'
@@ -41,6 +47,7 @@ import {
   findFieldKeyFromElement,
   focusCellControl,
   focusFieldByKey,
+  focusItemDateCell,
   handleFormGridSelectKeyboard,
   handleItemSelectEnter,
   handleItemSelectKeyboard,
@@ -48,6 +55,7 @@ import {
   isItemDatePickerTarget,
   isItemSelectTarget,
   isSelectDropdownOpen,
+  dismissErpFloatingPanels,
   navigateSequentialFields,
   scheduleAfterDatePickerClose,
   scheduleAfterSelectClose,
@@ -55,15 +63,18 @@ import {
 } from '@/utils/erpFormKeyboard'
 import {
   loadBatchNoFormat,
-  saveBatchNoFormat,
   applyProductionDateToItemRow,
-  markBatchNoManual,
-  markExpiryManual,
-  reapplyBatchNoFormatToItems,
-  type BatchNoFormat
+  syncImportedRowBatchNoState
 } from '@/utils/productBatchExpiry'
-import BatchNoFormatPicker from '@/components/common/BatchNoFormatPicker.vue'
-import BatchNoCell from '@/components/common/BatchNoCell.vue'
+import {
+  useDocumentItemBatchNo,
+  isBatchNoFormatTarget,
+  isBatchNoInputTarget
+} from '@/composables/useDocumentItemBatchNo'
+import BatchNoCellKeyboard from '@/components/purchase/BatchNoCellKeyboard.vue'
+import { useDocumentItemTableSort } from '@/composables/useDocumentItemTableSort'
+import DocumentSortHeader from '@/components/common/DocumentSortHeader.vue'
+import ProductBatchSelectDialog from '@/components/common/ProductBatchSelectDialog.vue'
 
 const OUTBOUND_STORAGE_KEY = 'salesOutboundRecords'
 const OPERATION_LOG_KEY = 'sales-outbound-operation-logs'
@@ -86,7 +97,7 @@ interface OutboundItem {
   locationCode: string
   locationName: string
   remark: string
-  mfgDate: string
+  productionDate: string
   expiryDate: string
   batchNo: string
   bidType: string
@@ -114,7 +125,7 @@ const DEFAULT_ITEM_COLUMN_KEYS = [
   'registrationNo', 'productionLicenseNo',
   'unit', 'quantity', 'unitPrice', 'amount',
   'discount', 'netAmount',
-  'batchNo', 'mfgDate', 'expiryDate', 'storageCondition', 'bidType',
+  'batchNo', 'productionDate', 'expiryDate', 'storageCondition', 'bidType',
   'locationName', 'remark'
 ]
 
@@ -132,7 +143,7 @@ const ITEM_COLUMN_DEFINITIONS: ItemColumnDef[] = [
   { key: 'discount', label: '折扣%', prop: 'discount', align: 'right' },
   { key: 'netAmount', label: '折后金额', prop: 'netAmount', align: 'right' },
   { key: 'batchNo', label: '生产批号', prop: 'batchNo', align: 'center' },
-  { key: 'mfgDate', label: '生产日期', prop: 'mfgDate', align: 'center' },
+  { key: 'productionDate', label: '生产日期', prop: 'productionDate', align: 'center' },
   { key: 'expiryDate', label: '有效期至', prop: 'expiryDate', align: 'center' },
   { key: 'storageCondition', label: '贮存条件', prop: 'storageCondition', align: 'center' },
   { key: 'bidType', label: '招标类型', prop: 'bidType', align: 'center' },
@@ -190,7 +201,7 @@ const HEADER_FIELD_DEFINITIONS: HeaderFieldOption[] = [
   { key: 'logisticsNo', label: '物流单号', type: 'input' },
   { key: 'deliveryDate', label: '发货日期', type: 'date' },
   { key: 'deliveryStatus', label: '发货状态', type: 'status' },
-  { key: 'signStatus', label: '签收状态', type: 'status' },
+  { key: 'logisticsStatus', label: '物流状态', type: 'status' },
   { key: 'signPerson', label: '签收人', type: 'input', disabled: true },
   { key: 'signDate', label: '签收日期', type: 'input', disabled: true },
   { key: 'creator', label: '开单人员', type: 'input', disabled: true },
@@ -317,20 +328,12 @@ const transportOptions = [
   { label: '自提', value: 'self' }
 ]
 
-const warehouseOptions = computed(() =>
-  warehouses.value
-    .filter(w => w.companyId === getCurrentCompany() && w.status === '启用')
-    .map(w => ({ label: w.name, value: w.name }))
-)
+const warehouseOptions = computed(() => activeWarehouseOptions.value)
 
 const ensureOutboundWarehouseDefault = () => {
   if (String(form.value.warehouse || '').trim()) return
-  refreshWarehouseOptions()
-  const defaultVal = getDefaultWarehouseValue(warehouseOptions.value.map(opt => ({
-    label: opt.label,
-    value: opt.value
-  })))
-  const fallback = defaultVal || warehouseOptions.value[0]?.value || warehouses.value[0]?.name || ''
+  const defaultVal = getDefaultWarehouseValue()
+  const fallback = defaultVal || warehouseOptions.value[0]?.value || ''
   if (!fallback) return
   handleWarehouseChange(fallback)
 }
@@ -368,18 +371,83 @@ const getOptions = (optionsKey?: string) => {
   return []
 }
 
+const logisticsStatusLabels: Record<string, string> = {
+  noLogistics: '无物流',
+  inTransit: '在途',
+  signed: '已签收'
+}
+
+const hasLogisticsTracking = (row: Record<string, unknown>) => {
+  const company = String(row.logisticsCompany || '')
+  const trackingNo = String(row.logisticsNo || '')
+  if (company === 'self') return false
+  return Boolean(trackingNo || company)
+}
+
+const resolveLogisticsStatusKey = (row: Record<string, unknown>) => {
+  if (row.logisticsStatus) return String(row.logisticsStatus)
+  if (!hasLogisticsTracking(row)) return 'noLogistics'
+  if (row.signStatus === '已签收' || row.signPerson) return 'signed'
+  if (row.deliveryStatus === '已发货') return 'inTransit'
+  return 'noLogistics'
+}
+
+const isCounterpartyInboundCompleted = () => {
+  const value = String(form.value.counterpartyInboundStatus || 'notInStock')
+  return value === 'inStock' || value === '对方已入库'
+}
+
+const getStatusDisplayText = (key: string) => {
+  if (key === 'logisticsStatus') {
+    return logisticsStatusLabels[resolveLogisticsStatusKey(form.value)] || '无物流'
+  }
+  return String(form.value[key as keyof typeof form.value] || '')
+}
+
 const getStatusTagType = (key: string, value: string) => {
+  if (key === 'logisticsStatus') {
+    const statusKey = resolveLogisticsStatusKey(form.value)
+    if (statusKey === 'signed') return 'success'
+    if (statusKey === 'inTransit') return 'warning'
+    return 'info'
+  }
   if (key === 'confirmStatus') return value === '已确认' ? 'success' : 'warning'
   if (key === 'auditStatus') return value === '已审核' ? 'success' : 'warning'
   if (key === 'deliveryStatus') return value === '已发货' ? 'primary' : 'info'
-  if (key === 'signStatus') return value === '已签收' ? 'success' : 'info'
   if (key === 'paymentStatus') return value === '已收款' ? 'success' : 'info'
   return 'info'
 }
 
 const basicInfoCollapsed = ref(false)
 const itemsCollapsed = ref(false)
-const batchNoFormat = ref<BatchNoFormat>(loadBatchNoFormat())
+
+const {
+  handleProductionDateChange,
+  handleBatchFormatChange,
+  handleBatchNoInput,
+  handleExpiryDateChange,
+  focusBatchNoCell
+} = useDocumentItemBatchNo()
+
+const applyItemBatchFields = (
+  target: Record<string, unknown>,
+  source?: Record<string, unknown>
+) => {
+  if (source) {
+    target.productionDate = String(source.productionDate ?? source.mfgDate ?? '')
+    target.batchNo = String(source.batchNo ?? '')
+    target.expiryDate = String(source.expiryDate ?? '')
+    ;(['_batchNoFormat', '_batchNoManual', '_expiryManual'] as const).forEach(key => {
+      if (source[key] !== undefined) target[key] = source[key]
+    })
+  } else if (!target.productionDate && target.mfgDate) {
+    target.productionDate = String(target.mfgDate)
+  }
+  target._batchFormatPickerOpen = false
+  if (!target._batchNoFormat && String(target.batchNo || '').trim()) {
+    syncImportedRowBatchNoState(target as Record<string, any>)
+  }
+}
 
 const itemsTableRef = ref<TableInstance>()
 const itemsTableWrapRef = ref<HTMLElement>()
@@ -406,9 +474,19 @@ const itemsTableTotalWidth = computed(() => {
   return total
 })
 
+const outboundViewRefreshTick = ref(0)
+
 const itemsTableRenderKey = computed(() =>
-  `${sortedVisibleItemColumns.value.map(c => c.key).join(',')}|${itemsTableTotalWidth.value}`
+  `${sortedVisibleItemColumns.value.map(c => c.key).join(',')}|${itemsTableTotalWidth.value}|${outboundViewRefreshTick.value}`
 )
+
+const refreshOutboundView = () => {
+  outboundItems.value.forEach(row => calcRowAmount(row))
+  outboundViewRefreshTick.value += 1
+  nextTick(() => {
+    syncItemsTableLayout()
+  })
+}
 
 const syncItemsTableColgroup = () => {
   const tableEl = itemsTableRef.value?.$el as HTMLElement | undefined
@@ -521,9 +599,36 @@ const unbindItemsTableResizeObserver = () => {
   itemsTableResizeObserver = null
 }
 
+const insertItemColumnKey = (keys: string[], columnKey: string, afterKey: string) => {
+  if (keys.includes(columnKey)) return keys
+  const afterIdx = keys.indexOf(afterKey)
+  if (afterIdx !== -1) keys.splice(afterIdx + 1, 0, columnKey)
+  else keys.push(columnKey)
+  return keys
+}
+
+const NEW_ITEM_COLUMNS: { key: string; after: string }[] = [
+  { key: 'batchNo', after: 'netAmount' },
+  { key: 'productionDate', after: 'batchNo' },
+  { key: 'expiryDate', after: 'productionDate' }
+]
+
+const migrateItemColumnKeys = (keys: string[]) => {
+  const merged = [...keys]
+  let changed = false
+  NEW_ITEM_COLUMNS.forEach(({ key, after }) => {
+    if (!merged.includes(key)) {
+      insertItemColumnKey(merged, key, after)
+      changed = true
+    }
+  })
+  return { merged, changed }
+}
+
 const initItemColumnConfig = () => {
   let orderKeys = ITEM_COLUMN_DEFINITIONS.map(c => c.key)
   let visibleKeys = [...DEFAULT_ITEM_COLUMN_KEYS]
+  let configChanged = false
 
   const savedOrder = localStorage.getItem(ITEM_COLUMN_ORDER_KEY)
   if (savedOrder) {
@@ -546,6 +651,16 @@ const initItemColumnConfig = () => {
     }
   }
 
+  const orderMigration = migrateItemColumnKeys(
+    orderKeys.filter(key => ITEM_COLUMN_DEFINITIONS.some(c => c.key === key))
+  )
+  const visibleMigration = migrateItemColumnKeys(
+    visibleKeys.filter(key => ITEM_COLUMN_DEFINITIONS.some(c => c.key === key))
+  )
+  orderKeys = orderMigration.merged
+  visibleKeys = visibleMigration.merged
+  configChanged = orderMigration.changed || visibleMigration.changed
+
   const ordered = orderKeys
     .map(key => ITEM_COLUMN_DEFINITIONS.find(c => c.key === key))
     .filter(Boolean) as ItemColumnDef[]
@@ -554,6 +669,11 @@ const initItemColumnConfig = () => {
 
   visibleItemColumns.value = new Set(visibleKeys)
   selectedItemColumns.value = [...visibleKeys]
+
+  if (configChanged) {
+    localStorage.setItem(ITEM_COLUMN_ORDER_KEY, JSON.stringify(itemColumnOptions.value.map(c => c.key)))
+    localStorage.setItem(ITEM_COLUMN_CONFIG_KEY, JSON.stringify([...visibleKeys]))
+  }
 }
 
 const openItemColumnSettings = () => {
@@ -617,8 +737,8 @@ const { columnWidths: itemColumnWidths, handleHeaderDragend: handleItemsHeaderDr
   { key: 'amount', label: '金额', defaultWidth: 100 },
   { key: 'discount', label: '折扣%', defaultWidth: 80 },
   { key: 'netAmount', label: '折后金额', defaultWidth: 100 },
-  { key: 'batchNo', label: '生产批号', defaultWidth: 110 },
-  { key: 'mfgDate', label: '生产日期', defaultWidth: 100 },
+  { key: 'batchNo', label: '生产批号', defaultWidth: 118 },
+  { key: 'productionDate', label: '生产日期', defaultWidth: 100 },
   { key: 'expiryDate', label: '有效期至', defaultWidth: 100 },
   { key: 'storageCondition', label: '贮存条件', defaultWidth: 120 },
   { key: 'bidType', label: '招标类型', defaultWidth: 100 },
@@ -687,7 +807,7 @@ const form = ref({
   signStatus: '未签收',
   signPerson: '',
   signDate: '',
-  logisticsStatus: '',
+  logisticsStatus: 'noLogistics',
   status: 'pending',
   closeStatus: 'notClosed',
   auditor: '',
@@ -793,7 +913,7 @@ const createEmptyItemRow = (): OutboundItem => {
     locationCode: defaultLoc?.code || '',
     locationName: defaultLoc?.name || '',
     remark: '',
-    mfgDate: '',
+    productionDate: '',
     expiryDate: '',
     batchNo: '',
     bidType: '',
@@ -815,37 +935,29 @@ const applyLocalProductToItem = (target: OutboundItem, product: ProductMaster) =
   target.registrationNo = product.registerNo || ''
   target.productionLicenseNo = product.licenseNo || ''
   target.storageCondition = product.storageCondition || ''
+  target.bidType = String(product.bidType || '')
   target._fromPlatform = Boolean(product.fromPlatform)
   target._platformProductCode = String(product.platformProductCode || '')
-  if (target.mfgDate) {
-    applyProductionDateToItemRow(target as Record<string, any>, product, batchNoFormat.value)
+  if (target.productionDate) {
+    applyProductionDateToItemRow(target as Record<string, any>, product, loadBatchNoFormat())
   }
 }
 
-const applyBatchExpiryFromProductionDate = (
-  row: OutboundItem,
-  product?: ProductMaster | Record<string, unknown>
-) => {
-  if (row.mfgDate) {
-    applyProductionDateToItemRow(row as Record<string, any>, product, batchNoFormat.value)
+const PRODUCT_BOUND_READONLY_COLS = new Set(['storageCondition', 'bidType'])
+
+const isProductBoundReadonlyField = (colKey: string) => PRODUCT_BOUND_READONLY_COLS.has(colKey)
+
+const handleBoundProductColumnFocus = (row: OutboundItem, colKey: string) => {
+  if (!isProductBoundReadonlyField(colKey)) return
+  const rowIndex = outboundItems.value.indexOf(row)
+  if (rowIndex < 0) return
+  nextTick(() => focusNextItemCell(rowIndex, colKey))
+}
+
+const applyBatchExpiryFromProductionDate = (row: OutboundItem) => {
+  if (row.productionDate) {
+    applyProductionDateToItemRow(row as Record<string, any>, undefined, loadBatchNoFormat())
   }
-}
-
-const handleBatchNoFormatChange = (format: BatchNoFormat) => {
-  saveBatchNoFormat(format)
-  reapplyBatchNoFormatToItems(outboundItems.value as Record<string, any>[], format)
-}
-
-const handleProductionDateChange = (row: OutboundItem) => {
-  applyProductionDateToItemRow(row as Record<string, any>, undefined, batchNoFormat.value)
-}
-
-const handleBatchNoInput = (row: OutboundItem) => {
-  markBatchNoManual(row as Record<string, any>, batchNoFormat.value)
-}
-
-const handleExpiryDateChange = (row: OutboundItem) => {
-  markExpiryManual(row as Record<string, any>)
 }
 
 const buildItemProductSearchQuery = (item: Record<string, unknown>): string => {
@@ -980,33 +1092,15 @@ const handleItemProductBlur = (item: OutboundItem) => {
 }
 
 const showBatchAdd = ref(false)
-const batchSearchQuery = ref('')
-const batchSelectedProducts = ref<ProductMaster[]>([])
 
 const batchProductList = computed(() => loadProductList())
 
-const filteredBatchProducts = computed(() => {
-  if (!batchSearchQuery.value) return batchProductList.value
-  const query = batchSearchQuery.value.toLowerCase()
-  return batchProductList.value.filter(p =>
-    (p.code || '').toLowerCase().includes(query) ||
-    (p.name || '').toLowerCase().includes(query) ||
-    (p.spec || '').toLowerCase().includes(query)
-  )
-})
-
 const openBatchAdd = () => {
-  batchSearchQuery.value = ''
-  batchSelectedProducts.value = []
   showBatchAdd.value = true
 }
 
-const confirmBatchAdd = () => {
-  if (batchSelectedProducts.value.length === 0) {
-    ElMessage.warning('请选择至少一个商品')
-    return
-  }
-  batchSelectedProducts.value.forEach(product => {
+const confirmBatchAdd = (selected: ProductMaster[]) => {
+  selected.forEach(product => {
     const row = createEmptyItemRow()
     applyLocalProductToItem(row, product)
     row.productLocked = true
@@ -1014,8 +1108,7 @@ const confirmBatchAdd = () => {
     calcRowAmount(row)
     outboundItems.value.push(row)
   })
-  ElMessage.success(`成功添加 ${batchSelectedProducts.value.length} 个商品`)
-  showBatchAdd.value = false
+  ElMessage.success(`成功添加 ${selected.length} 个商品`)
   syncItemsTableLayout()
 }
 
@@ -1158,7 +1251,7 @@ const focusableItemColumnKeys = computed(() =>
   itemTableColumnKeys.value.filter(key => key !== 'index' && key !== 'amount' && key !== 'netAmount')
 )
 
-const focusItemCell = (rowIndex: number, colKey: string) => {
+const focusItemCell = (rowIndex: number, colKey: string, fromColKey?: string) => {
   nextTick(() => {
     const tableEl = itemsTableRef.value?.$el as HTMLElement | undefined
     if (!tableEl) return
@@ -1168,6 +1261,29 @@ const focusItemCell = (rowIndex: number, colKey: string) => {
     const colIndex = itemTableColumnKeys.value.indexOf(colKey)
     if (colIndex < 0) return
     const cell = row.querySelectorAll('td.el-table__cell')[colIndex] as HTMLElement | undefined
+    if (!cell) return
+
+    if (colKey === 'productionDate') {
+      focusItemDateCell(cell, true)
+      return
+    }
+    if (colKey === 'expiryDate') {
+      focusItemDateCell(cell, false)
+      return
+    }
+    if (colKey === 'batchNo') {
+      const rowData = outboundItems.value[rowIndex] as Record<string, any> | undefined
+      if (rowData) {
+        focusBatchNoCell({
+          rowData,
+          cell,
+          fromColKey,
+          onFocusFailed: () => focusNextItemCell(rowIndex, colKey)
+        })
+      }
+      return
+    }
+
     focusCellControl(cell)
   })
 }
@@ -1220,8 +1336,7 @@ const focusNextItemCell = (rowIndex: number, currentColKey: string) => {
     focusItemCell(rowIndex + 1, cols[0])
     return
   }
-  addItem()
-  nextTick(() => focusItemCell(outboundItems.value.length - 1, cols[0]))
+  finishItemEntry()
 }
 
 const findItemsTableFocus = () => {
@@ -1243,6 +1358,8 @@ const handleItemsTableKeydown = (e: KeyboardEvent) => {
   if (isItemDatePickerTarget(e.target)) return
 
   if (e.key === 'Enter') {
+    if (isBatchNoFormatTarget(e.target)) return
+
     const pos = findItemsTableFocus()
     if (!pos) return
     const row = outboundItems.value[pos.row]
@@ -1273,6 +1390,9 @@ const handleItemsTableKeydown = (e: KeyboardEvent) => {
 
   const direction = arrowKeyToDirection(e.key)
   if (!direction) return
+  if (isDatePickerPanelOpen()) return
+  if (isBatchNoFormatTarget(e.target)) return
+  if (isBatchNoInputTarget(e.target) && (direction === 'up' || direction === 'down')) return
   if (!shouldNavigateOnArrow(e)) return
   if (!findItemsTableFocus() && !((e.target as HTMLElement).closest('.items-detail-table'))) return
 
@@ -1304,6 +1424,23 @@ const handleLocationChange = (item: OutboundItem, locationCode: string) => {
   }
 }
 
+const applySalesOrderItemsToOutbound = (order: Record<string, unknown>) => {
+  const pendingItems = derivePendingOrderItemsForOutbound(order, {
+    excludeOutboundNo: String(form.value.outboundNo || '').trim() || undefined
+  })
+
+  if (pendingItems.length === 0) {
+    outboundItems.value = []
+    ElMessage.warning('该销售订单已无未出库明细')
+    syncItemsTableLayout()
+    return
+  }
+
+  outboundItems.value = pendingItems.map(mapOrderItemToOutbound)
+  nextItemId = Math.max(...outboundItems.value.map(i => i.id || 0), 0) + 1
+  syncItemsTableLayout()
+}
+
 const handleSalesOrderChange = (orderNo: string) => {
   const order = salesOrderOptions.value.find(o => o.value === orderNo)
   if (order) {
@@ -1330,10 +1467,8 @@ const handleSalesOrderChange = (orderNo: string) => {
     const fullOrder = orders.find(o =>
       String(o.id) === orderNo || String(o.orderNo) === orderNo
     )
-    if (fullOrder && Array.isArray(fullOrder.detailItems) && fullOrder.detailItems.length > 0) {
-      outboundItems.value = (fullOrder.detailItems as Record<string, unknown>[]).map(mapOrderItemToOutbound)
-      nextItemId = Math.max(...outboundItems.value.map(i => i.id || 0), 0) + 1
-      syncItemsTableLayout()
+    if (fullOrder) {
+      applySalesOrderItemsToOutbound(fullOrder)
     }
   } else {
     form.value.customer = ''
@@ -1342,7 +1477,7 @@ const handleSalesOrderChange = (orderNo: string) => {
 }
 
 const handleCustomerChange = (customerName: string) => {
-  const customer = customerList.value.find(item => item.name === customerName)
+  const customer = resolveCustomerMaster(customerName)
   if (customer) {
     applyCustomerMasterToTarget(form.value, customer)
   }
@@ -1356,10 +1491,6 @@ const addItem = () => {
 const insertItemAfter = (index: number) => {
   outboundItems.value.splice(index + 1, 0, createEmptyItemRow())
   syncItemsTableLayout()
-}
-
-const handleBatchSelectionChange = (rows: ProductMaster[]) => {
-  batchSelectedProducts.value = rows
 }
 
 const removeItem = (index: number) => {
@@ -1457,7 +1588,7 @@ const validateForm = () => {
   return true
 }
 
-const handleSave = (): boolean => {
+const persistOutbound = (): boolean => {
   if (!validateForm()) return false
 
   const recordData = buildRecordData()
@@ -1469,17 +1600,32 @@ const handleSave = (): boolean => {
   if (existingIndex > -1) {
     existingRecords[existingIndex] = recordData
   } else {
-    existingRecords.push(recordData)
+    existingRecords.unshift(recordData)
   }
 
   localStorage.setItem(OUTBOUND_STORAGE_KEY, JSON.stringify(existingRecords))
+  syncSalesOrderExecuteStatusFromOutbound(recordData)
   addOperationLog(
     form.value.outboundNo,
     existingIndex > -1 ? 'edit' : 'create',
     form.value.creator || '当前用户',
     existingIndex > -1 ? '编辑销售出库单' : '创建销售出库单'
   )
+  return true
+}
+
+const handleSave = (): boolean => {
+  if (!persistOutbound()) return false
   ElMessage.success('销售出库单保存成功')
+  return true
+}
+
+const saveOutboundDraft = (): boolean => {
+  if (!form.value.outboundNo) {
+    form.value.outboundNo = generateOutboundNo()
+  }
+  if (!persistOutbound()) return false
+  ElMessage.success('销售出库单已保存')
   return true
 }
 
@@ -1510,7 +1656,7 @@ const resetFormForNew = () => {
     signStatus: '未签收',
     signPerson: '',
     signDate: '',
-    logisticsStatus: '',
+    logisticsStatus: 'noLogistics',
     status: 'pending',
     closeStatus: 'notClosed',
     auditor: '',
@@ -1595,6 +1741,10 @@ const handleAudit = async () => {
 
 const handleAuditToggle = () => {
   if (form.value.auditStatus === '已审核') {
+    if (isCounterpartyInboundCompleted()) {
+      ElMessage.warning('对方已审核入库，不能反审核')
+      return
+    }
     ElMessageBox.confirm('确定要反审核该出库单吗？', '反审核确认', {
       confirmButtonText: '确定',
       cancelButtonText: '取消',
@@ -1646,12 +1796,12 @@ const handleSign = () => {
     ElMessage.warning('请先发货')
     return
   }
-  if (form.value.signStatus === '已签收') {
+  if (resolveLogisticsStatusKey(form.value) === 'signed') {
     ElMessage.info('出库单已签收')
     return
   }
 
-  ElMessageBox.prompt('请输入签收人姓名', '签收确认', {
+  ElMessageBox.prompt('请输入客户签收人姓名', '客户签收确认', {
     confirmButtonText: '确认签收',
     cancelButtonText: '取消'
   }).then(({ value }) => {
@@ -1660,17 +1810,98 @@ const handleSign = () => {
       return
     }
     form.value.signStatus = '已签收'
+    form.value.logisticsStatus = 'signed'
     form.value.signPerson = value
     form.value.signDate = new Date().toISOString().slice(0, 10)
     handleSave()
-    ElMessage.success('出库单已签收')
+    ElMessage.success('已确认客户签收')
   }).catch(() => {
     ElMessage.info('已取消签收')
   })
 }
 
 const handleCancel = () => {
-  router.push('/sales/outbound-record')
+  finishItemEntry()
+  nextTick(() => {
+    router.push('/sales/outbound-record')
+  })
+}
+
+const dismissFloatingLayers = () => {
+  outboundItems.value.forEach(row => {
+    ;(row as Record<string, unknown>)._batchFormatPickerOpen = false
+  })
+  showFieldSelector.value = false
+  showItemColumnSelector.value = false
+  dismissErpFloatingPanels()
+  if (isProductSuggestOpen()) {
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true })
+    )
+  }
+}
+
+const isProductSuggestOpen = () => {
+  const poppers = document.querySelectorAll('.product-suggest-popper')
+  for (const popper of poppers) {
+    const style = window.getComputedStyle(popper)
+    if (style.display === 'none' || style.visibility === 'hidden') continue
+    if (popper.getAttribute('aria-hidden') === 'true') continue
+    const rect = popper.getBoundingClientRect()
+    if (rect.width > 0 && rect.height > 0) return true
+  }
+  return false
+}
+
+const finishItemEntry = () => {
+  dismissFloatingLayers()
+  refreshOutboundView()
+  nextTick(() => {
+    const pageEl = document.querySelector('.sales-outbound-page') as HTMLElement | null
+    pageEl?.focus()
+  })
+}
+
+const reloadSavedOutboundView = () => {
+  const outboundNo = String(form.value.outboundNo || '').trim()
+  if (!outboundNo) {
+    refreshOutboundView()
+    return
+  }
+  if (loadOutboundRecord(outboundNo)) {
+    outboundViewRefreshTick.value += 1
+    nextTick(() => syncItemsTableLayout())
+  } else {
+    refreshOutboundView()
+  }
+}
+
+const handleEscapeSaveAndBlur = (e: KeyboardEvent) => {
+  e.preventDefault()
+  const saved = saveOutboundDraft()
+  finishItemEntry()
+  if (saved) {
+    nextTick(() => reloadSavedOutboundView())
+  }
+}
+
+const handlePageKeydown = (e: KeyboardEvent) => {
+  if (e.key !== 'Escape') return
+  if (showFieldSelector.value) {
+    showFieldSelector.value = false
+    e.preventDefault()
+    return
+  }
+  if (showItemColumnSelector.value) {
+    showItemColumnSelector.value = false
+    e.preventDefault()
+    return
+  }
+  // 联想/日期/下拉面板打开时先交给组件关闭面板，再次 ESC 再保存并退出编辑
+  if (isProductSuggestOpen() || isDatePickerPanelOpen() || isSelectDropdownOpen()) {
+    return
+  }
+  handleEscapeSaveAndBlur(e)
 }
 
 const buildPrintData = (): SalesOutboundData => {
@@ -1707,7 +1938,7 @@ const buildPrintData = (): SalesOutboundData => {
       unitPrice: item.unitPrice,
       amount: item.amount,
       batchNo: item.batchNo,
-      productionDate: item.mfgDate,
+      productionDate: item.productionDate || (item as Record<string, unknown>).mfgDate,
       expiryDate: item.expiryDate,
       registrationNo: item.registrationNo,
       productionLicenseNo: item.productionLicenseNo,
@@ -1741,6 +1972,10 @@ const handlePrintDirect = () => {
   runSalesOutboundPrint(false)
 }
 
+const openPrintSettings = () => {
+  router.push('/system/print')
+}
+
 const handlePrintPreview = () => {
   runSalesOutboundPrint(true)
 }
@@ -1766,7 +2001,7 @@ const handleMore = async (command: string) => {
       signStatus: '未签收',
       signPerson: '',
       signDate: '',
-      logisticsStatus: '',
+      logisticsStatus: 'noLogistics',
       logisticsCompany: '',
       logisticsNo: '',
       createDate: new Date().toISOString().slice(0, 10),
@@ -1829,7 +2064,7 @@ const mapOrderItemToOutbound = (item: Record<string, unknown>, idx: number): Out
   const unitPrice = Number(item.price ?? item.unitPrice ?? 0)
   const amount = Number(item.amount ?? qty * unitPrice)
   const discount = Number(item.discount ?? 0)
-  return {
+  const row: OutboundItem = {
     id: idx + 1,
     productCode: String(item.productCode || ''),
     productName: String(item.productName || ''),
@@ -1843,7 +2078,7 @@ const mapOrderItemToOutbound = (item: Record<string, unknown>, idx: number): Out
     locationCode: defaultLoc?.code || '',
     locationName: defaultLoc?.name || '',
     remark: String(item.itemRemark ?? item.remark ?? ''),
-    mfgDate: String(item.productionDate ?? item.mfgDate ?? ''),
+    productionDate: String(item.productionDate ?? item.mfgDate ?? ''),
     expiryDate: String(item.expiryDate || ''),
     batchNo: String(item.batchNo || ''),
     bidType: String(item.bidType || ''),
@@ -1852,6 +2087,8 @@ const mapOrderItemToOutbound = (item: Record<string, unknown>, idx: number): Out
     productionLicenseNo: String(item.productionLicenseNo || ''),
     storageCondition: String(item.storageCondition || '')
   }
+  applyItemBatchFields(row as Record<string, unknown>, item)
+  return row
 }
 
 const loadOutboundRecord = (recordId: string) => {
@@ -1867,7 +2104,11 @@ const loadOutboundRecord = (recordId: string) => {
   form.value.status = form.value.status || (form.value.auditStatus === '已审核' ? 'completed' : 'pending')
   form.value.closeStatus = form.value.closeStatus || 'notClosed'
   if (Array.isArray(record.items)) {
-    outboundItems.value = record.items as OutboundItem[]
+    outboundItems.value = (record.items as OutboundItem[]).map(item => {
+      const row = { ...item } as OutboundItem
+      applyItemBatchFields(row as Record<string, unknown>)
+      return row
+    })
     nextItemId = Math.max(...outboundItems.value.map(i => i.id || 0), 0) + 1
   }
   return true
@@ -1900,17 +2141,13 @@ const loadSalesOrderReference = (orderId: string) => {
     ensureOutboundWarehouseDefault()
   }
 
-  if (Array.isArray(order.detailItems) && order.detailItems.length > 0) {
-    outboundItems.value = (order.detailItems as Record<string, unknown>[]).map(mapOrderItemToOutbound)
-    nextItemId = Math.max(...outboundItems.value.map(i => i.id || 0), 0) + 1
-  }
+  applySalesOrderItemsToOutbound(order)
 }
 
 onMounted(() => {
   void (async () => {
-    await Promise.all([loadWarehousesFromApi(), loadLocationsFromApi(), hydrateCustomerListFromServer()])
+    await Promise.all([hydrateWarehouseOptionsFromServer(), loadLocationsFromApi(), hydrateCustomerListFromServer()])
     customerList.value = loadActiveCustomerList()
-    refreshWarehouseOptions()
 
     form.value.creator = form.value.creator || '当前用户'
     form.value.createDate = form.value.createDate || new Date().toISOString().slice(0, 10)
@@ -1965,10 +2202,23 @@ watch(sortedVisibleItemColumns, syncItemsTableLayout, { deep: true })
 watch(itemColumnWidths, syncItemsTableLayout, { deep: true })
 watch(itemsTableTotalWidth, syncItemsTableLayout)
 watch(() => form.value.warehouse, syncItemsTableLayout)
+
+const itemColumnSortKeys = computed(() => sortedVisibleItemColumns.value.map(c => c.key))
+
+const {
+  getItemSortIcon,
+  handleItemColumnSort,
+  isColumnSortable,
+  itemSortOrders
+} = useDocumentItemTableSort(outboundItems as Ref<Record<string, unknown>[]>, itemColumnSortKeys, {
+  documentKind: 'sales_outbound',
+  getColumnDef: key => ITEM_COLUMN_DEFINITIONS.find(c => c.key === key),
+  onSorted: syncItemsTableLayout
+})
 </script>
 
 <template>
-  <div class="erp-page">
+  <div class="erp-page sales-outbound-page" tabindex="0" @keydown="handlePageKeydown">
     <div v-if="form.auditStatus === '已审核'" class="audit-seal" aria-hidden="true">
       <div class="audit-seal-frame">
         <span class="audit-seal-text">已审核</span>
@@ -2017,17 +2267,18 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
           @click="handleDelivery"
         >发货</el-button>
         <el-button
-          v-if="form.deliveryStatus === '已发货' && form.signStatus === '未签收'"
+          v-if="form.deliveryStatus === '已发货' && resolveLogisticsStatusKey(form) !== 'signed'"
           size="small"
           type="primary"
           @click="handleSign"
-        >签收</el-button>
+        >客户签收确认</el-button>
         <el-dropdown split-button type="primary" size="small" class="btn-print" @click="handlePrint">
           打印
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item @click="handlePrintPreview">打印预览</el-dropdown-item>
               <el-dropdown-item @click="handlePrintDirect">直接打印</el-dropdown-item>
+              <el-dropdown-item divided @click="openPrintSettings">销售清单打印样式…</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -2121,14 +2372,19 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
                 :disabled="!isFieldEditable(field)"
                 @change="handleCustomerChange"
               >
-                <el-option v-for="c in customerList" :key="c.id" :label="c.name" :value="c.name" />
+                <el-option
+                  v-for="c in customerOptions"
+                  :key="c.code || c.value"
+                  :label="c.label"
+                  :value="c.value"
+                />
               </el-select>
 
               <el-tag
                 v-else-if="field.type === 'status'"
                 :type="getStatusTagType(field.key, String(form[field.key as keyof typeof form] || ''))"
                 size="small"
-              >{{ form[field.key as keyof typeof form] }}</el-tag>
+              >{{ getStatusDisplayText(field.key) }}</el-tag>
 
               <el-input
                 v-else-if="field.type === 'input'"
@@ -2204,11 +2460,6 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
       <div class="section-body items-section" v-show="!itemsCollapsed">
         <div class="items-toolbar">
           <p class="product-query-hint">商品查询：编码、名称、规格、厂家，空格隔开，不限顺序。</p>
-          <BatchNoFormatPicker
-            v-model="batchNoFormat"
-            :disabled="!isEditable"
-            @change="handleBatchNoFormatChange"
-          />
           <div class="toolbar-right">
             <el-button size="small" plain :disabled="!isEditable" @click="openBatchAdd">批量选择</el-button>
             <el-button size="small" plain :disabled="!isEditable" @click="addItem">添加行</el-button>
@@ -2262,8 +2513,18 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
               :align="col.align"
               header-align="center"
             >
-              <template v-if="col.required" #header>
-                <span class="required-col">{{ col.label }}</span>
+              <template #header>
+                <DocumentSortHeader
+                  v-if="isColumnSortable(col)"
+                  :label="col.label"
+                  :required="col.required"
+                  :sort-icon="getItemSortIcon(col.key)"
+                  :active="!!itemSortOrders[col.key]"
+                  :align="col.align === 'right' ? 'right' : 'center'"
+                  @sort="handleItemColumnSort(col.key)"
+                />
+                <span v-else-if="col.required" class="required-col">{{ col.label }}</span>
+                <span v-else>{{ col.label }}</span>
               </template>
               <template #default="{ row }">
                 <div v-if="col.key === 'productCode'" class="code-cell">
@@ -2272,7 +2533,6 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
                     :ref="(el: any) => setProductAutocompleteRef(row, 'productCode', el)"
                     size="small"
                     class="product-code-autocomplete"
-                    placeholder="编码 名称 规格 厂家"
                     popper-class="product-suggest-popper"
                     :debounce="150"
                     :trigger-on-focus="false"
@@ -2456,21 +2716,21 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
                   @change="calcRowAmount(row)"
                 />
                 <span v-else-if="col.key === 'netAmount'" class="amount-text">{{ formatMoney(row.netAmount) }}</span>
-                <BatchNoCell
+                <BatchNoCellKeyboard
                   v-else-if="col.key === 'batchNo'"
                   :row="row"
-                  :global-format="batchNoFormat"
+                  :global-format="loadBatchNoFormat()"
                   :disabled="!isEditable"
-                  @format-change="handleProductionDateChange(row)"
+                  @format-change="handleBatchFormatChange(row)"
                   @batch-input="handleBatchNoInput(row)"
                 />
                 <div
-                  v-else-if="col.key === 'mfgDate'"
+                  v-else-if="col.key === 'productionDate'"
                   class="cell-date-wrap"
-                  @keydown.capture="(e: KeyboardEvent) => handleItemDateKeydown(e, row, 'mfgDate')"
+                  @keydown.capture="(e: KeyboardEvent) => handleItemDateKeydown(e, row, 'productionDate')"
                 >
                   <el-date-picker
-                    v-model="row.mfgDate"
+                    v-model="row.productionDate"
                     type="date"
                     value-format="YYYY-MM-DD"
                     size="small"
@@ -2495,8 +2755,24 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
                     @change="handleExpiryDateChange(row)"
                   />
                 </div>
-                <el-input v-else-if="col.key === 'storageCondition'" v-model="row.storageCondition" size="small" :disabled="!isEditable" />
-                <el-input v-else-if="col.key === 'bidType'" v-model="row.bidType" size="small" :disabled="!isEditable" />
+                <el-input
+                  v-else-if="col.key === 'storageCondition'"
+                  v-model="row.storageCondition"
+                  size="small"
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'storageCondition')"
+                />
+                <el-input
+                  v-else-if="col.key === 'bidType'"
+                  v-model="row.bidType"
+                  size="small"
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'bidType')"
+                />
                 <el-select
                   v-else-if="col.key === 'locationName'"
                   v-model="row.locationCode"
@@ -2534,29 +2810,11 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
     </div>
   </div>
 
-  <el-dialog v-model="showBatchAdd" title="批量添加商品" width="800px" draggable>
-    <div class="batch-add-dialog">
-      <div class="batch-search">
-        <el-input v-model="batchSearchQuery" placeholder="搜索商品编码、名称、规格" clearable />
-      </div>
-      <el-table
-        :data="filteredBatchProducts"
-        border
-        max-height="360"
-        @selection-change="handleBatchSelectionChange"
-      >
-        <el-table-column type="selection" width="50" />
-        <el-table-column prop="code" label="商品编码" width="120" />
-        <el-table-column prop="name" label="商品名称" min-width="160" />
-        <el-table-column prop="spec" label="规格型号" width="120" />
-        <el-table-column prop="manufacturer" label="生产厂家" min-width="140" />
-      </el-table>
-    </div>
-    <template #footer>
-      <el-button @click="showBatchAdd = false">取消</el-button>
-      <el-button type="primary" @click="confirmBatchAdd">确定添加</el-button>
-    </template>
-  </el-dialog>
+  <ProductBatchSelectDialog
+    v-model="showBatchAdd"
+    :products="batchProductList"
+    @confirm="confirmBatchAdd"
+  />
 
   <el-dialog v-model="showFieldSelector" title="表头设置" width="720px" draggable>
     <div class="field-selector">
@@ -2612,6 +2870,8 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
 </template>
 
 <style lang="scss" scoped>
+@import '@/styles/document-table-sort.scss';
+
 .erp-page {
   position: relative;
   padding: 0;
@@ -2935,15 +3195,7 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
   }
 
   :deep(.items-detail-table.el-table) {
-    --table-line-color: #d9d9d9;
-    --table-row-odd-bg: #f0f7ff;
-    --table-row-even-bg: #f5f5f5;
-    --table-row-hover-bg: #fff3cd;
-    --table-header-bg: #f5f5f5;
-    --el-table-border-color: #d9d9d9;
-    --el-border-color-lighter: #d9d9d9;
-
-    border: 1px solid var(--table-line-color);
+    border: 1px solid var(--yx-table-line-color);
 
     .el-table__header-wrapper,
     .el-table__body-wrapper,
@@ -3139,18 +3391,6 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
       text-align: left;
     }
 
-    .el-table__body-wrapper tr:nth-child(odd) > td.el-table__cell {
-      background-color: var(--table-row-odd-bg) !important;
-    }
-
-    .el-table__body-wrapper tr:nth-child(even) > td.el-table__cell {
-      background-color: var(--table-row-even-bg) !important;
-    }
-
-    .el-table__body-wrapper tr:hover > td.el-table__cell {
-      background-color: var(--table-row-hover-bg) !important;
-    }
-
     .el-table__cell {
       .cell {
         overflow: hidden;
@@ -3264,6 +3504,16 @@ watch(() => form.value.warehouse, syncItemsTableLayout)
 
     .product-field-autocomplete {
       width: 100%;
+    }
+
+    .product-bound-field {
+      width: 100%;
+
+      :deep(.el-input__inner) {
+        cursor: default;
+        background-color: #f5f7fa;
+        color: #606266;
+      }
     }
 
     .cell-number {

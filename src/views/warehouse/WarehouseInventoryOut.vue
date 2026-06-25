@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
+import { activeWarehouseOptions, hydrateWarehouseOptionsFromServer } from '@/utils/warehouseSettings'
 
 const form = ref({ inventoryNo: '', warehouse: '', date: '', items: [] })
 const warehouseOptions = activeWarehouseOptions
 
-onMounted(() => refreshWarehouseOptions())
+onMounted(() => { void hydrateWarehouseOptionsFromServer() })
 </script>
 
 <template>

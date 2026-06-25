@@ -66,15 +66,20 @@ export class CompanyController {
     }
   }
 
-  async update(req: Request, res: Response) {
+  async update(req: AuthenticatedRequest, res: Response) {
     try {
       const { id } = req.params
       const updates = req.body
       const repository = this.getRepository()
+      const companyId = parseInt(id)
 
-      const company = await repository.findOne({ where: { id: parseInt(id) } })
+      const company = await repository.findOne({ where: { id: companyId } })
       if (!company) {
         return res.status(404).json({ message: '公司不存在' })
+      }
+
+      if (req.user?.role === 'company_admin' && req.user.companyId !== companyId) {
+        return res.status(403).json({ message: '权限不足' })
       }
 
       if (updates.code && updates.code !== company.code) {

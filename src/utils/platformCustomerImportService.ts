@@ -1,5 +1,6 @@
 import { normalizePartnerDocuments } from '@/utils/partnerLicenseDocuments'
 import type { CustomerDocument } from '@/utils/customerStore'
+import { isOwnCompanyPartnerRecord } from '@/utils/tenantIdentity'
 import {
   getCompanyTypeLabel,
   loadPlatformCustomerList,
@@ -19,7 +20,16 @@ export function mapPlatformCompanyTypeToCustomerType(companyType: string): strin
 
 export function loadImportablePlatformCustomers(): PlatformCustomer[] {
   return loadPlatformCustomerList().filter(
-    item => item.platformStatus === 'platformAudited' && item.status !== 'disabled'
+    item =>
+      item.platformStatus === 'platformAudited' &&
+      item.status !== 'disabled' &&
+      !isOwnCompanyPartnerRecord({
+        name: item.companyName,
+        code: item.companyCode,
+        id: item.companyCode,
+        creditCode: item.license || item.taxId,
+        taxNo: item.taxId || item.license
+      })
   )
 }
 

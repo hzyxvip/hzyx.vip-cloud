@@ -8,16 +8,17 @@ import { usePurchaseInboundRecordColumnSettings } from '@/composables/usePurchas
 import {
   onPurchaseInboundAudited,
   onPurchaseInboundDeleted,
-  backfillInboundAmounts,
+  onPurchaseInboundSigned,
   calcInboundItemsAmount,
   enrichInboundRecord,
   getCollabLinks
 } from '@/utils/platformCollaborationService'
+import { getLoggedInUserContext } from '@/utils/companyDataService'
 
 const router = useRouter()
 const showAdvancedFilter = ref(true)
 
-const PAGE_TITLE = '采购入库单记录'
+const PAGE_TITLE = '采购入库记录'
 
 const INBOUND_STORAGE_KEY = 'purchaseInboundList'
 const SEARCH_FORM_KEY = 'purchase-inbound-search-form'
@@ -337,7 +338,7 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('purchase-inbound-re
   { key: 'supplier', label: '供应商', defaultWidth: 180 },
   { key: 'warehouse', label: '仓库', defaultWidth: 120 },
   { key: 'date', label: '入库日期', defaultWidth: 110 },
-  { key: 'operator', label: '操作员', defaultWidth: 100 },
+  { key: 'operator', label: '审核入库人员', defaultWidth: 110 },
   { key: 'itemCount', label: '商品种类', defaultWidth: 90 },
   { key: 'totalQuantity', label: '总数量', defaultWidth: 90 },
   { key: 'amount', label: '入库金额', defaultWidth: 120 },
@@ -389,6 +390,15 @@ const resolveLinkedOutboundNo = (row: Record<string, unknown>): string => {
   return ''
 }
 
+const formatLocalDateTime = () =>
+  new Date().toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-')
+
+const resolveInboundAuditor = (row: Record<string, unknown>) =>
+  String(row.operator || row.auditor || '').trim()
+
+const displayInboundAuditor = (row: Record<string, unknown>) =>
+  resolveInboundAuditor(row) || '—'
+
 const resolveAuditStatus = (row: Record<string, unknown>) => {
   if (row.auditStatus) return String(row.auditStatus)
   const status = String(row.status || '')
@@ -406,7 +416,7 @@ const resolveInboundStatusKey = (row: Record<string, unknown>) => {
   if (row.signStatus === '已签收') {
     return String(row.remark || '').includes('部分') ? 'partiallyInWarehoused' : 'allInWarehoused'
   }
-  if (resolveAuditStatus(row) === 'audited') return 'partiallyInWarehoused'
+  if (resolveAuditStatus(row) === 'audited') return 'allInWarehoused'
   return 'notInWarehoused'
 }
 
@@ -427,6 +437,7 @@ const resolveLogisticsStatusKey = (row: Record<string, unknown>) => {
   if (row.logisticsStatus) return String(row.logisticsStatus)
   if (!hasLogisticsTracking(row)) return 'noLogistics'
   if (row.signStatus === '已签收' || row.signPerson) return 'signed'
+  if (row.deliveryStatus === '已发货') return 'inTransit'
   return 'inTransit'
 }
 
@@ -480,7 +491,6 @@ const persistInboundChanges = (inboundId: string, changes: Record<string, unknow
 }
 
 const loadData = () => {
-  backfillInboundAmounts()
   const savedList = JSON.parse(localStorage.getItem(INBOUND_STORAGE_KEY) || '[]')
   const existingIds = new Set(defaultData.map(item => item.id))
   const newRows = savedList
@@ -520,7 +530,7 @@ const filteredData = computed(() => {
         row.orderNo,
         row.supplier,
         row.warehouse,
-        row.operator,
+        resolveInboundAuditor(row),
         row.remark || ''
       ].map(v => String(v).toLowerCase())
       if (!keywords.every(kw => fields.some(f => f.includes(kw.toLowerCase())))) return false
@@ -619,31 +629,35 @@ const handleAudit = () => {
   if (!requireSelection()) return
   const targets = selectedRows.value.filter(row => resolveAuditStatus(row) !== 'audited')
   if (targets.length === 0) {
-    ElMessage.info('所选入库单均已审核')
+    ElMessage.info('所选入库单均已审核入库')
     return
   }
 
-  ElMessageBox.confirm(`确定要审核选中的 ${targets.length} 条入库单吗？`, '审核确认', {
+  ElMessageBox.confirm(`确定要审核入库选中的 ${targets.length} 条入库单吗？`, '审核入库确认', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
   }).then(() => {
+    const auditPerson = getLoggedInUserContext().realName || '系统管理员'
+    const auditTime = formatLocalDateTime()
+    const signDate = new Date().toISOString().split('T')[0]
     targets.forEach(row => {
-      const nextStatus =
-        row.status === 'pending' ? 'processing'
-        : row.status === 'processing' ? 'completed'
-        : row.status
       persistInboundChanges(row.id, {
         auditStatus: 'audited',
-        status: nextStatus
+        status: 'completed',
+        operator: auditPerson,
+        auditor: auditPerson,
+        auditTime,
+        inboundStatus: 'allInWarehoused',
+        signStatus: '已签收',
+        signPerson: auditPerson,
+        signDate
       })
       const updated = tableData.value.find(r => r.id === row.id) || row
-      if (updated.status === 'completed') {
-        onPurchaseInboundAudited(updated)
-      }
-      addOperationLog(row.id, 'audit', '系统管理员', '审核采购入库单')
+      onPurchaseInboundAudited(updated)
+      addOperationLog(row.id, 'audit', auditPerson, '审核入库')
     })
-    ElMessage.success(`已成功审核 ${targets.length} 条入库单`)
+    ElMessage.success(`已成功审核入库 ${targets.length} 条入库单`)
   }).catch(() => {})
 }
 
@@ -668,7 +682,14 @@ const handleUnAudit = () => {
     targets.forEach(row => {
       persistInboundChanges(row.id, {
         auditStatus: 'notAudited',
-        status: row.status === 'processing' || row.status === 'completed' ? 'pending' : row.status
+        status: row.status === 'processing' || row.status === 'completed' ? 'pending' : row.status,
+        operator: '',
+        auditor: '',
+        auditTime: '',
+        inboundStatus: 'notInWarehoused',
+        signStatus: '未签收',
+        signPerson: '',
+        signDate: ''
       })
       addOperationLog(row.id, 'unaudit', '系统管理员', '反审核采购入库单')
     })
@@ -677,8 +698,8 @@ const handleUnAudit = () => {
 }
 
 const auditActionLabel = computed(() => {
-  if (selectedRows.value.length === 0) return '审核'
-  return selectedRows.value.every(row => resolveAuditStatus(row) === 'audited') ? '反审核' : '审核'
+  if (selectedRows.value.length === 0) return '审核入库'
+  return selectedRows.value.every(row => resolveAuditStatus(row) === 'audited') ? '反审核' : '审核入库'
 })
 
 const handleAuditToggle = () => {
@@ -695,7 +716,7 @@ const handleDelete = () => {
   const blocked = selectedRows.value.filter(row => !canDeleteInbound(row))
 
   if (deletable.length === 0) {
-    ElMessage.warning('仅未审核、未关闭的入库单允许删除')
+    ElMessage.warning('仅未审核入库、未关闭的入库单允许删除')
     return
   }
 
@@ -784,82 +805,50 @@ const handleToSalesOutbound = () => {
   router.push({ path: '/sales/outbound', query: { id: outboundNo } })
 }
 
-const handleSign = () => {
+const handleLogisticsSign = () => {
   const row = getSelectedRow()
   if (!row) return
-  if (resolveInboundStatusKey(row) === 'allInWarehoused') {
-    ElMessage.info('入库单已全部入库')
+
+  if (row.signStatus === '已签收' || row.signPerson) {
+    ElMessage.info('入库单已签收')
     return
   }
-  ElMessageBox.prompt('请输入签收人姓名', '入库确认', {
-    confirmButtonText: '确认入库',
-    cancelButtonText: '取消',
-    inputPlaceholder: '请输入签收人姓名'
+
+  if (!hasLogisticsTracking(row) && row.logisticsCompany !== 'self') {
+    ElMessage.warning('暂无物流信息，无法签收')
+    return
+  }
+
+  ElMessageBox.prompt('请输入签收人姓名', '物流签收确认', {
+    confirmButtonText: '确认签收',
+    cancelButtonText: '取消'
   }).then(({ value }) => {
-    if (!value) {
+    const signPerson = String(value || '').trim()
+    if (!signPerson) {
       ElMessage.warning('请输入签收人姓名')
       return
     }
-    persistInboundChanges(row.id, {
-      inboundStatus: 'allInWarehoused',
+    const operator = getLoggedInUserContext().realName || '系统管理员'
+    const signDate = new Date().toISOString().slice(0, 10)
+    persistInboundChanges(String(row.id), {
       signStatus: '已签收',
-      signPerson: value,
-      signDate: new Date().toISOString().split('T')[0]
+      logisticsStatus: 'signed',
+      signPerson,
+      signDate
     })
-    addOperationLog(row.id, 'inbound', value, '确认采购入库')
-    ElMessage.success(`入库单 ${row.id} 已全部入库`)
-  }).catch(() => {})
-}
-
-const handleTrackLogistics = (row?: Record<string, unknown>) => {
-  const target = row || getSelectedRow()
-  if (!target) return
-
-  if (!target.logisticsNo && target.logisticsCompany !== 'self') {
-    ElMessage.warning('暂无物流信息')
-    return
-  }
-
-  if (target.logisticsCompany === 'self') {
-    ElMessage.info('此入库单为上门自提，无需物流跟踪')
-    return
-  }
-
-  const logisticsDetail = {
-    company: logisticsCompanyMap[String(target.logisticsCompany)] || '未知',
-    trackingNo: target.logisticsNo,
-    steps: [
-      { time: '2026-06-18 10:30:00', status: '已发出', location: '供应商仓库', remark: '货物已从供应商发出' },
-      { time: '2026-06-18 14:20:00', status: '运输中', location: '物流中转站', remark: '货物正在运输途中' },
-      { time: '2026-06-18 20:45:00', status: '到达目的城市', location: '目的地城市', remark: '货物已到达目的城市' },
-      { time: '2026-06-19 08:15:00', status: '派送中', location: '配送点', remark: '快递员正在派送中' },
-      { time: '2026-06-19 10:30:00', status: '已签收', location: '公司仓库', remark: `签收人：${target.signPerson || '仓库管理员'}` }
-    ]
-  }
-
-  ElMessageBox.alert(
-    `<div style="text-align: left; width: 460px;">
-      <p style="margin: 10px 0;"><strong>物流公司：</strong>${logisticsDetail.company}</p>
-      <p style="margin: 10px 0;"><strong>运单号：</strong>${logisticsDetail.trackingNo}</p>
-      <div style="margin-top: 20px;">
-        <strong>物流轨迹：</strong>
-        <ul style="padding-left: 20px; margin-top: 10px;">
-          ${logisticsDetail.steps.map(step => `
-            <li style="margin: 8px 0; padding-left: 10px; border-left: 2px solid #00bfa5;">
-              <strong>${step.time}</strong> - ${step.status}<br/>
-              <span style="color: #667085;">${step.location}</span><br/>
-              <span style="color: #999;">${step.remark}</span>
-            </li>
-          `).join('')}
-        </ul>
-      </div>
-    </div>`,
-    '物流跟踪详情',
-    {
-      confirmButtonText: '关闭',
-      dangerouslyUseHTMLString: true
+    const updated = tableData.value.find(r => r.id === row.id) || {
+      ...row,
+      signStatus: '已签收',
+      logisticsStatus: 'signed',
+      signPerson,
+      signDate
     }
-  )
+    onPurchaseInboundSigned(updated)
+    addOperationLog(String(row.id), 'logisticsSign', operator, `物流签收，签收人：${signPerson}`)
+    ElMessage.success('入库单已签收')
+  }).catch(() => {
+    ElMessage.info('已取消签收')
+  })
 }
 
 const handleSearch = () => {
@@ -977,7 +966,7 @@ onMounted(() => {
           <el-form-item class="keyword-input">
             <el-input
               v-model="searchForm.keyword"
-              placeholder="入库单号/订单号/供应商/仓库/操作员/备注"
+              placeholder="入库单号/订单号/供应商/仓库/审核入库人员/备注"
               clearable
               style="width: 300px;"
             />
@@ -1042,8 +1031,7 @@ onMounted(() => {
         <el-button type="primary" link size="small" @click="handleBatchModify">批量修改</el-button>
         <el-button type="primary" link size="small" @click="handleToSalesOrder">转销售订单</el-button>
         <el-button type="primary" link size="small" @click="handleToSalesOutbound">转销售出库单</el-button>
-        <el-button type="primary" link size="small" @click="handleSign">入库</el-button>
-        <el-button type="primary" link size="small" @click="handleTrackLogistics()">物流</el-button>
+        <el-button type="primary" link size="small" @click="handleLogisticsSign">物流签收</el-button>
         <el-button type="primary" link size="small" @click="openColumnSettings">列表设置</el-button>
       </div>
       <div class="action-bar-extra">
@@ -1113,11 +1101,7 @@ onMounted(() => {
             <span v-else-if="col.key === 'logisticsCompany'">
               {{ logisticsCompanyMap[row.logisticsCompany] || '-' }}
             </span>
-            <span
-              v-else-if="col.key === 'logisticsNo'"
-              :class="{ 'code-link': row.logisticsNo }"
-              @click="row.logisticsNo && handleTrackLogistics(row)"
-            >{{ row.logisticsNo || '-' }}</span>
+            <span v-else-if="col.key === 'logisticsNo'">{{ row.logisticsNo || '-' }}</span>
             <el-tag
               v-else-if="col.key === 'closeStatus'"
               size="small"
@@ -1132,6 +1116,7 @@ onMounted(() => {
             >
               {{ statusLabels[row.status]?.text || row.status }}
             </el-tag>
+            <span v-else-if="col.key === 'operator'">{{ displayInboundAuditor(row) }}</span>
             <span v-else>{{ col.prop ? row[col.prop] : '' }}</span>
           </template>
         </el-table-column>
@@ -1150,7 +1135,7 @@ onMounted(() => {
     </div>
   </div>
 
-  <el-dialog v-model="showColumnSelector" title="采购入库单列表设置" width="720px" draggable>
+  <el-dialog v-model="showColumnSelector" title="采购入库记录列表设置" width="720px" draggable>
     <div class="field-selector">
       <p class="sort-tip">勾选需要在列表中显示的列，拖拽可调整顺序</p>
       <el-checkbox-group v-model="selectedColumns">

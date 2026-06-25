@@ -1,0 +1,109 @@
+// 采购订单 / 销售订单 — 基本信息区统一行高与控件样式
+.form-grid.basic-info-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px 24px;
+
+  .form-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 52px;
+
+    &.span-2 {
+      grid-column: span 2;
+    }
+
+    &.full-width {
+      grid-column: 1 / -1;
+    }
+
+    &.required label::after {
+      content: '*';
+      color: #f53f3f;
+      margin-left: 2px;
+    }
+
+    label {
+      font-size: 12px;
+      color: #666;
+      line-height: 20px;
+      min-height: 20px;
+    }
+
+    .label-with-tip,
+    .label-with-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      line-height: 20px;
+      min-height: 20px;
+    }
+
+    .tip-icon {
+      color: #1677ff;
+      font-size: 14px;
+      cursor: help;
+    }
+
+    :deep(.el-input),
+    :deep(.el-select),
+    :deep(.el-textarea) {
+      border: none !important;
+      outline: none !important;
+    }
+
+    :deep(.el-input__wrapper),
+    :deep(.el-select__wrapper) {
+      box-shadow: 0 1px 0 0 #e4e7ed !important;
+      border: none !important;
+      background: transparent;
+      border-radius: 0;
+      padding: 1px 0 4px 0 !important;
+      outline: none !important;
+      height: 28px !important;
+      min-height: 28px !important;
+      line-height: 22px !important;
+    }
+
+    :deep(.el-input__wrapper::before),
+    :deep(.el-input__wrapper::after),
+    :deep(.el-select__wrapper::before),
+    :deep(.el-select__wrapper::after) {
+      display: none !important;
+    }
+
+    :deep(.el-input__inner) {
+      border: none !important;
+      outline: none !important;
+      background: transparent;
+      height: 22px !important;
+      line-height: 22px !important;
+    }
+
+    :deep(.el-textarea__inner) {
+      border: none !important;
+      outline: none !important;
+      background: transparent;
+      box-shadow: 0 1px 0 0 #e4e7ed !important;
+      border-radius: 0;
+      resize: vertical;
+      min-height: 28px !important;
+      padding: 1px 0 4px 0 !important;
+    }
+
+    :deep(.el-textarea__inner::before),
+    :deep(.el-textarea__inner::after) {
+      display: none !important;
+    }
+
+    :deep(.el-select__selected-item),
+    :deep(.el-select__selected-text) {
+      line-height: 22px !important;
+    }
+
+    :deep(.el-date-editor.el-input) {
+      height: 28px !important;
+    }
+  }
+}

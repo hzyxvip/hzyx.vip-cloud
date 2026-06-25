@@ -1,3 +1,5 @@
+import { requiresConfirmBeforeAudit } from '@/utils/auditSystemSettings'
+
 export type DocumentFunctionCategory = 'order' | 'inbound' | 'outbound' | 'document'
 
 export type DocumentFunctionKey =
@@ -71,8 +73,9 @@ export function saveDocumentConfirmSettings(settings: Record<DocumentFunctionKey
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
 }
 
-export function isDocumentConfirmEnabled(key: DocumentFunctionKey): boolean {
-  return loadDocumentConfirmSettings()[key] ?? true
+/** 确定步骤是否启用：由「审核制度」全系统统一控制 */
+export function isDocumentConfirmEnabled(_key: DocumentFunctionKey): boolean {
+  return requiresConfirmBeforeAudit()
 }
 
 export function getDocumentFunctionItem(key: DocumentFunctionKey): DocumentFunctionItem | undefined {

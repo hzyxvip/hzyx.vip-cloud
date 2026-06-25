@@ -6,9 +6,12 @@ import router from './router'
 import App from './App.vue'
 import './styles/index.scss'
 import { elementPlusZhCn, setupChineseLocale } from './utils/localeSetup'
-import { initPrint, registerTemplate, createSalesOutboundTemplate, createSalesReturnTemplate, createPurchaseInboundTemplate, createPurchaseReturnTemplate, createSalesOrderTemplate } from './utils/printService'
+import { initPrint, registerTemplate, createSalesOutboundTemplate, createSalesReturnTemplate, createPurchaseInboundTemplate, createPurchaseReturnTemplate, createSalesOrderTemplate, applyCustomPrintTemplate } from './utils/printService'
+import { loadAllCustomTemplateBodies } from './utils/printTemplateSettings'
+import { repairAllTenantProfileCaches } from './utils/companyDataService'
 
 setupChineseLocale()
+repairAllTenantProfileCaches()
 
 const app = createApp(App)
 const pinia = createPinia()
@@ -23,5 +26,10 @@ registerTemplate(createSalesReturnTemplate())
 registerTemplate(createPurchaseInboundTemplate())
 registerTemplate(createPurchaseReturnTemplate())
 registerTemplate(createSalesOrderTemplate())
+
+const customTemplateBodies = loadAllCustomTemplateBodies()
+Object.entries(customTemplateBodies).forEach(([templateId, body]) => {
+  if (body) applyCustomPrintTemplate(templateId, body)
+})
 
 app.mount('#app')

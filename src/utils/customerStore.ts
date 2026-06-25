@@ -7,7 +7,8 @@ import {
   formatPlatformPartnerCode,
   getNextPlatformPartnerCode,
   buildUsedPlatformPartnerCodeSet,
-  rememberRetiredPlatformPartnerCodes
+  rememberRetiredPlatformPartnerCodes,
+  isPlatformPartnerCode
 } from '@/utils/partnerPlatformCode'
 
 export const CUSTOMERS_KEY = 'customers'
@@ -60,7 +61,59 @@ function mergeCustomerListsByCode(local: CustomerMaster[], remote: CustomerMaste
     const existing = map.get(code)
     map.set(code, existing ? mergeCustomerRecord(item, existing) : item)
   }
-  return Array.from(map.values())
+  return dedupeCustomerListByName(Array.from(map.values()))
+}
+
+function normalizeCustomerName(name: unknown): string {
+  return String(name || '').trim()
+}
+
+function compareCustomerPreference(a: CustomerMaster, b: CustomerMaster): number {
+  const score = (item: CustomerMaster) => {
+    let value = 0
+    if (item.auditStatus === 'audited') value += 100
+    if (item.platformCustomerId) value += 50
+    if (isPlatformPartnerCode(customerCodeOf(item))) value += 20
+    if (item.status === 'normal') value += 10
+    value += parseAuditTime(item.auditTime) / 1e15
+    return value
+  }
+  return score(a) - score(b)
+}
+
+/** 同名客户只保留一条（优先已审核、已关联平台客户、有效 YY 编号） */
+export function dedupeCustomerListByName(list: CustomerMaster[]): CustomerMaster[] {
+  const byName = new Map<string, CustomerMaster>()
+  const unnamed: CustomerMaster[] = []
+
+  list.forEach(item => {
+    const name = normalizeCustomerName(item.name)
+    if (!name) {
+      unnamed.push(item)
+      return
+    }
+    const existing = byName.get(name)
+    if (!existing || compareCustomerPreference(item, existing) > 0) {
+      byName.set(name, item)
+    }
+  })
+
+  return [...unnamed, ...Array.from(byName.values())]
+}
+
+function findCustomerIndex(list: CustomerMaster[], record: CustomerMaster): number {
+  const code = customerCodeOf(record)
+  const name = normalizeCustomerName(record.name)
+  const platformId = Number(record.platformCustomerId)
+  return list.findIndex(item => {
+    if (item.id === record.id) return true
+    if (code && customerCodeOf(item) === code) return true
+    if (name && normalizeCustomerName(item.name) === name) return true
+    if (Number.isFinite(platformId) && platformId > 0 && Number(item.platformCustomerId) === platformId) {
+      return true
+    }
+    return false
+  })
 }
 
 export type CustomerDocument = PartnerDocument
@@ -234,8 +287,9 @@ export function getNextCustomerCode(list: CustomerMaster[]): string {
 
 function persistCustomerList(list: CustomerMaster[]): CustomerMaster[] {
   const withCodes = ensureCustomerPlatformCodes(list)
-  writeCustomerListRaw(withCodes)
-  return withCodes
+  const deduped = dedupeCustomerListByName(withCodes)
+  writeCustomerListRaw(deduped)
+  return deduped
 }
 
 function readCustomerListRaw(): CustomerMaster[] {
@@ -333,8 +387,14 @@ export async function hydrateCustomerListFromServer(options?: { timeoutMs?: numb
 export function resolveCustomerMaster(nameOrCode?: string): CustomerMaster | undefined {
   const key = String(nameOrCode || '').trim()
   if (!key) return undefined
-  return loadCustomerList().find(
-    item => item.name === key || item.code === key || item.id === key
+  const list = loadAndEnsureCustomerList()
+  const byCode = list.find(item => item.code === key || item.id === key)
+  if (byCode) return byCode
+  const matches = list.filter(item => normalizeCustomerName(item.name) === key)
+  if (matches.length === 0) return undefined
+  if (matches.length === 1) return matches[0]
+  return matches.reduce((best, item) =>
+    compareCustomerPreference(item, best) > 0 ? item : best
   )
 }
 
@@ -400,16 +460,18 @@ export function loadAndEnsureCustomerList(): CustomerMaster[] {
     code: item.code || item.id
   }))
   const withCodes = ensureCustomerPlatformCodes(normalized)
+  const deduped = dedupeCustomerListByName(withCodes)
   const shouldWrite =
     !hasStoredList ||
     missing.length > 0 ||
     stored.length !== rawStored.length ||
-    withCodes.some((item, index) => item.code !== normalized[index]?.code)
+    withCodes.some((item, index) => item.code !== normalized[index]?.code) ||
+    deduped.length !== withCodes.length
 
   if (shouldWrite) {
-    writeCustomerListRaw(withCodes)
+    writeCustomerListRaw(deduped)
   }
-  return withCodes
+  return deduped
 }
 
 export function getCustomerById(id: string): CustomerMaster | undefined {
@@ -424,12 +486,7 @@ export function getCurrentUserName(): string {
   if (user) {
     return String(user.realName || user.username || user.name || '系统管理员')
   }
-  try {
-    const legacy = JSON.parse(localStorage.getItem('user') || '{}')
-    return legacy.realName || legacy.username || legacy.name || '系统管理员'
-  } catch {
-    return '系统管理员'
-  }
+  return '系统管理员'
 }
 
 export function upsertCustomer(customer: CustomerMaster): void {
@@ -438,12 +495,9 @@ export function upsertCustomer(customer: CustomerMaster): void {
     ...customer,
     code: customer.code || customer.id
   }
-  const code = customerCodeOf(record)
-  const index = list.findIndex(
-    item => item.id === record.id || (code && customerCodeOf(item) === code)
-  )
+  const index = findCustomerIndex(list, record)
   if (index >= 0) {
-    list[index] = { ...list[index], ...record, id: record.id }
+    list[index] = { ...list[index], ...record, id: list[index].id || record.id }
   } else {
     list.unshift(record)
   }
@@ -457,11 +511,9 @@ export async function saveCustomerRecord(customer: CustomerMaster): Promise<bool
     code: customer.code || customer.id
   }
   const code = customerCodeOf(record)
-  const index = list.findIndex(
-    item => item.id === record.id || (code && customerCodeOf(item) === code)
-  )
+  const index = findCustomerIndex(list, record)
   if (index >= 0) {
-    list[index] = { ...list[index], ...record, id: record.id }
+    list[index] = { ...list[index], ...record, id: list[index].id || record.id }
   } else {
     list.unshift(record)
   }
@@ -524,9 +576,9 @@ export function batchSetCustomerStatus(
   return next
 }
 
-/** 业务单据下拉用：正常且已审核的客户 */
+/** 业务单据下拉用：正常且已审核的客户（同名去重） */
 export function loadActiveCustomerList(): CustomerMaster[] {
-  return loadCustomerList().filter(
+  return loadAndEnsureCustomerList().filter(
     item => item.status !== 'disabled' && item.auditStatus === 'audited'
   )
 }

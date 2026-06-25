@@ -72,6 +72,8 @@ const handleSave = async () => {
     })
     ElMessage.success('企业证照保存成功')
     await loadData()
+  } catch (error: unknown) {
+    ElMessage.error(error instanceof Error ? error.message : '企业证照保存失败')
   } finally {
     saving.value = false
   }

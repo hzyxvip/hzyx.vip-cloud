@@ -16,9 +16,12 @@ import {
   TurnOff,
   ArrowRight,
   Close,
-  OfficeBuilding
+  OfficeBuilding,
+  Menu
 } from '@element-plus/icons-vue'
-import { getCurrentCompany, setCurrentCompany, type Company } from '@/utils/dataStore'
+import { getCurrentCompany, setCurrentCompany, companies as globalCompanies, type Company } from '@/utils/dataStore'
+import { cacheTenantCompanyDirectory } from '@/utils/tenantCompanyDirectory'
+import { scheduleCollaborationMaintenance } from '@/utils/platformCollaborationService'
 import { companyApi } from '@/utils/api'
 import { isPlatformOperator } from '@/utils/customerProductService'
 import { isPlatformCompanyRecord, PLATFORM_COMPANY_NAME } from '@/constants/platformCompany'
@@ -33,6 +36,7 @@ const route = useRoute()
 useEscNavigateBack()
 
 const hoverMenu = ref('')
+const mobileSidebarOpen = ref(false)
 const openTabs = ref<Array<{ name: string; path: string }>>([
   { name: '首页', path: '/dashboard' }
 ])
@@ -116,6 +120,10 @@ const resolveCurrentCompany = async () => {
       companies.value = [currentCompanyInfo.value]
     }
   }
+
+  globalCompanies.value = [...companies.value]
+  cacheTenantCompanyDirectory(companies.value)
+  scheduleCollaborationMaintenance()
 }
 
 const isPlatformBoss = computed(() => {
@@ -176,9 +184,18 @@ const panelMaxHeight = computed(() => {
 })
 
 onMounted(() => {
-  resolveCurrentCompany()
+  void resolveCurrentCompany().then(() => {
+    void import('@/utils/warehouseSettings').then(({ hydrateWarehouseOptionsFromServer }) =>
+      hydrateWarehouseOptionsFromServer()
+    )
+  })
   void import('@/utils/productStore').then(({ hydrateProductListFromServer }) => hydrateProductListFromServer())
   void import('@/utils/customerStore').then(({ hydrateCustomerListFromServer }) => hydrateCustomerListFromServer())
+  void import('@/utils/supplierStore').then(({ hydrateSupplierListFromServer }) => hydrateSupplierListFromServer())
+  void import('@/utils/orderSyncService').then(({ hydratePurchaseOrdersFromServer, hydrateSalesOrdersFromServer }) => {
+    void hydratePurchaseOrdersFromServer()
+    void hydrateSalesOrdersFromServer()
+  })
   document.addEventListener('click', handleDocumentClick)
 })
 
@@ -198,6 +215,9 @@ const switchCompany = (companyId: number) => {
   currentCompanyId.value = companyId
   setCurrentCompany(companyId)
   currentCompanyInfo.value = companies.value.find(c => c.id === companyId) || null
+  void import('@/utils/warehouseSettings').then(({ hydrateWarehouseOptionsFromServer }) =>
+    hydrateWarehouseOptionsFromServer()
+  )
   router.push('/dashboard')
 }
 
@@ -265,7 +285,7 @@ const baseMenuItems = [
           { label: '采购订单', path: '/purchase/order-list/create' },
           { label: '采购订单记录', path: '/purchase/order-list' },
           { label: '采购入库', path: '/purchase/inbound' },
-          { label: '采购入库单记录', path: '/purchase/inbound-record' },
+          { label: '采购入库记录', path: '/purchase/inbound-record' },
           { label: '采购退货', path: '/purchase/return' },
           { label: '采购税票登记表', path: '/purchase/invoice' }
         ]
@@ -431,7 +451,8 @@ const baseMenuItems = [
           { label: '权限管理', path: '/system/permission' },
           { label: '账号设定', path: '/system/account' },
           { label: '角色设定', path: '/data/role' },
-          { label: '权限设定', path: '/data/permission' }
+          { label: '权限设定', path: '/data/permission' },
+          { label: '审核制度', path: '/system/audit-policy' }
         ]
       },
       {
@@ -441,6 +462,7 @@ const baseMenuItems = [
           { label: '单据编号设定', path: '/system/document-number' },
           { label: '生产批号设定', path: '/system/batch-no' },
           { label: '打印设置', path: '/system/print' },
+          { label: '打印模板', path: '/system/print-template' },
           { label: '参数配置', path: '/data/param-config' },
           { label: '出入库类别', path: '/data/inout-type' }
         ]
@@ -563,7 +585,8 @@ const dropdownMenu = [
 </script>
 
 <template>
-  <el-container class="layout-container">
+  <el-container class="layout-container" :class="{ 'mobile-sidebar-open': mobileSidebarOpen }">
+    <div v-if="mobileSidebarOpen" class="sidebar-backdrop" @click="mobileSidebarOpen = false" />
     <el-aside width="200px" class="sidebar">
       <div class="logo" @click="handleHomeClick">
         <el-icon :size="32" class="logo-icon">
@@ -601,6 +624,9 @@ const dropdownMenu = [
     <el-container>
       <el-header class="header">
         <div class="header-left">
+          <el-button class="mobile-menu-btn" text @click="mobileSidebarOpen = !mobileSidebarOpen">
+            <el-icon :size="20"><Menu /></el-icon>
+          </el-button>
           <div 
             v-for="(tab, index) in openTabs" 
             :key="tab.path"
@@ -1066,5 +1092,61 @@ $light-header: #FFFFFF;
   padding: 12px;
   overflow-y: auto;
   flex: 1;
+}
+
+.mobile-menu-btn {
+  display: none;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .mobile-menu-btn {
+    display: inline-flex;
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 998;
+  }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 999;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.12);
+  }
+
+  .layout-container.mobile-sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .header-left {
+    overflow-x: auto;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .header-right {
+    flex-shrink: 0;
+  }
+
+  .company-info span {
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 </style>

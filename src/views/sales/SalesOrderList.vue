@@ -3,15 +3,21 @@ import '@/styles/product-list-table.scss'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { TableInstance } from 'element-plus'
+import { ArrowLeft, ArrowRight, DArrowLeft, DArrowRight } from '@element-plus/icons-vue'
 import { useTableStyle } from '@/composables/useTableStyle'
-import { useSalesOrderListColumnSettings } from '@/composables/useSalesOrderListColumnSettings'
+import { useListTableNav } from '@/composables/useListTableNav'
+import { useSalesOrderListColumnSettings, SALES_ORDER_LIST_COLUMN_DEFINITIONS } from '@/composables/useSalesOrderListColumnSettings'
+import { parseDocumentMoneySortValue } from '@/utils/documentTableSort'
+import { useDocumentColumnSort } from '@/composables/useDocumentColumnSort'
+import DocumentSortHeader from '@/components/common/DocumentSortHeader.vue'
 import { resolveWarehouseLabel } from '@/utils/warehouseSettings'
 import {
   onSalesOrderAudited,
   approveModificationRequest,
   hasPendingModification,
-  backfillSalesOrderExternalNos,
-  resolveSalesOrderExternalNo
+  resolveSalesOrderExternalNo,
+  resolveSalesOrderCustomerFields
 } from '@/utils/platformCollaborationService'
 import {
   CONFIRM_STATUS_CONFIRMED,
@@ -19,9 +25,29 @@ import {
   normalizeConfirmStatus
 } from '@/utils/documentFunctionSettings'
 import { resolveCustomerPlatformCode } from '@/utils/orderListPartnerCodes'
+import { calcDealAmountFromSalesOrder } from '@/utils/salesOrderAmount'
+import { getCurrentUserName } from '@/utils/customerStore'
+import {
+  mergeSalesOrderListRows,
+  loadRawSalesOrdersFromStorage
+} from '@/utils/salesOrderListData'
+import { applySalesOrderSettlementToStorage } from '@/utils/fundOrderAllocation'
+import { syncSalesOrderExecuteStatus } from '@/utils/salesOrderExecution'
+import {
+  SALES_BUSINESS_PROCESS_OPTIONS,
+  buildCollabIndexForCompany,
+  matchesBusinessProcessFilter,
+  normalizeBusinessProcessFilter,
+  resolveSalesOrderBusinessProcess,
+  stampOrderCompanyId
+} from '@/utils/orderBusinessProcess'
+import { requireTenantCompanyId } from '@/utils/tenantGuard'
+import { syncSalesOrdersToServer } from '@/utils/orderSyncService'
 
 const router = useRouter()
-const showAdvancedFilter = ref(true)
+
+const PAGE_TITLE = '销售订单记录'
+const PAGE_BREADCRUMB = '首页 / 销售管理 / 销售单据 / 销售订单记录'
 
 const operationLogs = ref<any[]>(JSON.parse(localStorage.getItem('sales-operation-logs') || '[]'))
 
@@ -49,12 +75,7 @@ const timePresets = [
   { label: '近一年', value: 'lastYear' }
 ]
 
-const businessProcessOptions = [
-  { label: '全部流程', value: '' },
-  { label: '标准销售', value: 'standard' },
-  { label: '跨公司销售', value: 'crossCompany' },
-  { label: '平台销售', value: 'platform' }
-]
+const businessProcessOptions = SALES_BUSINESS_PROCESS_OPTIONS
 
 const auditStatusOptions = [
   { label: '未审核', value: 'notAudited' },
@@ -70,12 +91,6 @@ const executeStatusOptions = [
   { label: '未执行', value: 'notExecuted' },
   { label: '部分执行', value: 'partiallyExecuted' },
   { label: '全部执行', value: 'allExecuted' }
-]
-
-const warehouseStatusOptions = [
-  { label: '未出库', value: 'notOutWarehoused' },
-  { label: '部分出库', value: 'partiallyOutWarehoused' },
-  { label: '全部出库', value: 'allOutWarehoused' }
 ]
 
 const closeStatusOptions = [
@@ -150,7 +165,6 @@ type StatusFilterField =
   | 'auditStatus'
   | 'confirmStatus'
   | 'executeStatus'
-  | 'warehouseStatus'
   | 'closeStatus'
   | 'prepaymentStatus'
   | 'receiveStatus'
@@ -163,7 +177,6 @@ const searchForm = ref({
   auditStatus: ALL_FILTER_VALUE,
   confirmStatus: ALL_FILTER_VALUE,
   executeStatus: ALL_FILTER_VALUE,
-  warehouseStatus: ALL_FILTER_VALUE,
   closeStatus: ALL_FILTER_VALUE,
   prepaymentStatus: ALL_FILTER_VALUE,
   receiveStatus: ALL_FILTER_VALUE
@@ -173,11 +186,10 @@ const filterGroupsRow1 = [
   { field: 'auditStatus' as StatusFilterField, label: '审核状态', options: auditStatusOptions },
   { field: 'confirmStatus' as StatusFilterField, label: '确定状态', options: confirmStatusOptions },
   { field: 'executeStatus' as StatusFilterField, label: '执行状态', options: executeStatusOptions },
-  { field: 'warehouseStatus' as StatusFilterField, label: '出库状态', options: warehouseStatusOptions }
+  { field: 'closeStatus' as StatusFilterField, label: '关闭状态', options: closeStatusOptions }
 ]
 
 const filterGroupsRow2 = [
-  { field: 'closeStatus' as StatusFilterField, label: '关闭状态', options: closeStatusOptions },
   { field: 'prepaymentStatus' as StatusFilterField, label: '预收单据', options: prepaymentAuditOptions },
   { field: 'receiveStatus' as StatusFilterField, label: '接单状态', options: receiveStatusFilterOptions }
 ]
@@ -191,17 +203,6 @@ const currentPage = ref(1)
 const pageSize = ref(10)
 
 const tableData = ref<any[]>([])
-
-const defaultData = [
-  { id: 'SO20260620001', orderNo: 'SO-20260620-0001', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-20', amount: '¥12,500.00', itemCount: 5, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'pending', creator: '系统管理员' },
-  { id: 'SO20260619002', orderNo: 'SO-20260619-0002', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-19', amount: '¥28,800.00', itemCount: 8, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'closed', prepaymentStatus: 'prepaidAudited', receiveStatus: 'received', status: 'completed', creator: '系统管理员' },
-  { id: 'SO20260618003', orderNo: 'SO-20260618-0003', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-18', amount: '¥15,200.00', itemCount: 3, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidPartiallyAudited', receiveStatus: 'received', status: 'processing', creator: '系统管理员' },
-  { id: 'SO20260617004', orderNo: 'SO-20260617-0004', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-17', amount: '¥45,600.00', itemCount: 12, auditStatus: 'notAudited', executeStatus: 'partiallyExecuted', warehouseStatus: 'partiallyOutWarehoused', closeStatus: 'manualClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'pending', creator: '系统管理员' },
-  { id: 'SO20260616005', orderNo: 'SO-20260616-0005', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-16', amount: '¥8,900.00', itemCount: 2, auditStatus: 'audited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidAudited', receiveStatus: 'received', status: 'processing', creator: '系统管理员' },
-  { id: 'SO20260615006', orderNo: 'SO-20260615-0006', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-15', amount: '¥35,000.00', itemCount: 6, auditStatus: 'audited', executeStatus: 'partiallyExecuted', warehouseStatus: 'partiallyOutWarehoused', closeStatus: 'closed', prepaymentStatus: 'prepaidPartiallyAudited', receiveStatus: 'notReceived', status: 'processing', creator: '系统管理员' },
-  { id: 'SO20260614007', orderNo: 'SO-20260614-0007', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-14', amount: '¥9,500.00', itemCount: 3, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notOutWarehoused', closeStatus: 'manualClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'cancelled', creator: '系统管理员' },
-  { id: 'SO20260613008', orderNo: 'SO-20260613-0008', customer: '广西可盟医疗科技有限公司', customerCode: 'GX01671', warehouse: '公司库', date: '2026-06-13', amount: '¥18,900.00', itemCount: 6, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allOutWarehoused', closeStatus: 'closed', prepaymentStatus: '', receiveStatus: 'received', status: 'completed', creator: '系统管理员' }
-]
 
 const auditStatusLabels: Record<string, string> = {
   notAudited: '未审核',
@@ -217,12 +218,6 @@ const executeStatusLabels: Record<string, string> = {
   notExecuted: '未执行',
   partiallyExecuted: '部分执行',
   allExecuted: '全部执行'
-}
-
-const warehouseStatusLabels: Record<string, string> = {
-  notOutWarehoused: '未出库',
-  partiallyOutWarehoused: '部分出库',
-  allOutWarehoused: '全部出库'
 }
 
 const closeStatusLabels: Record<string, string> = {
@@ -253,7 +248,7 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('sales-order-list', 
   { key: 'orderNo', label: '订单号', defaultWidth: 150 },
   { key: 'externalNo', label: '外部单号', defaultWidth: 150 },
   { key: 'customer', label: '客户', defaultWidth: 180 },
-  { key: 'customerPlatformCode', label: '客户医享平台编号', defaultWidth: 150 },
+  { key: 'customerPlatformCode', label: '医享平台编号', defaultWidth: 150 },
   { key: 'warehouse', label: '仓库', defaultWidth: 110 },
   { key: 'date', label: '下单日期', defaultWidth: 110 },
   { key: 'itemCount', label: '商品种类', defaultWidth: 90 },
@@ -261,10 +256,12 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('sales-order-list', 
   { key: 'auditStatus', label: '审核状态', defaultWidth: 90 },
   { key: 'confirmStatus', label: '确定状态', defaultWidth: 90 },
   { key: 'executeStatus', label: '执行状态', defaultWidth: 100 },
-  { key: 'warehouseStatus', label: '出库状态', defaultWidth: 100 },
   { key: 'closeStatus', label: '关闭状态', defaultWidth: 100 },
   { key: 'prepaymentStatus', label: '预收单据', defaultWidth: 130 },
   { key: 'receiveStatus', label: '接单状态', defaultWidth: 90 },
+  { key: 'creator', label: '制单人', defaultWidth: 90 },
+  { key: 'salesman', label: '业务员', defaultWidth: 90 },
+  { key: 'auditor', label: '审核人', defaultWidth: 90 },
   { key: 'status', label: '状态', defaultWidth: 90 }
 ])
 
@@ -281,33 +278,35 @@ const {
   confirmColumnSelection
 } = useSalesOrderListColumnSettings('sales-order-list')
 
-const normalizeSavedOrder = (o: Record<string, unknown>) => ({
-  ...o,
-  orderNo: o.orderNo || o.id,
-  externalNo: resolveSalesOrderExternalNo(o),
-  customerPlatformCode: resolveCustomerPlatformCode(o),
-  warehouse: resolveWarehouseLabel(String(o.warehouse || '')) || String(o.warehouse || ''),
-  itemCount: o.itemCount || parseInt(String(o.items || '0'), 10) || 0,
-  auditStatus: o.auditStatus || 'notAudited',
-  confirmStatus: normalizeConfirmStatus(o.confirmStatus),
-  executeStatus: o.executeStatus || 'notExecuted',
-  warehouseStatus: o.warehouseStatus || 'notOutWarehoused',
-  closeStatus: o.closeStatus || 'notClosed',
-  receiveStatus: o.receiveStatus || 'notReceived',
-  status: o.status || 'pending',
-  amount: o.amount || '¥0.00'
-})
+const normalizeSavedOrder = (o: Record<string, unknown>) => {
+  const customerFields = resolveSalesOrderCustomerFields(o)
+  return {
+    ...o,
+    orderNo: o.orderNo || o.id,
+    externalNo: resolveSalesOrderExternalNo(o),
+    customer: customerFields.customer || String(o.customer || ''),
+    customerPlatformCode:
+      customerFields.customerPlatformCode || resolveCustomerPlatformCode(o),
+    warehouse: resolveWarehouseLabel(String(o.warehouse || '')) || String(o.warehouse || ''),
+    itemCount: o.itemCount || parseInt(String(o.items || '0'), 10) || 0,
+    auditStatus: o.auditStatus || 'notAudited',
+    confirmStatus: normalizeConfirmStatus(o.confirmStatus),
+    executeStatus: o.executeStatus || 'notExecuted',
+    closeStatus: o.closeStatus || 'notClosed',
+    receiveStatus: o.receiveStatus || 'notReceived',
+    status: o.status || 'pending',
+    amount: calcDealAmountFromSalesOrder(o),
+    creator: String(o.creator || o.operator || ''),
+    salesman: String(o.salesman || ''),
+    auditor: String(o.auditor || '')
+  }
+}
 
 const loadData = () => {
-  const savedOrders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
-  const existingIds = new Set(defaultData.map(item => item.id))
-  const newOrders = savedOrders
-    .filter((o: Record<string, unknown>) => !existingIds.has(String(o.id)))
-    .map(normalizeSavedOrder)
-  tableData.value = [...newOrders, ...defaultData.map(row => {
-    const saved = savedOrders.find((o: Record<string, unknown>) => o.id === row.id)
-    return saved ? normalizeSavedOrder({ ...saved, ...row }) : row
-  })]
+  applySalesOrderSettlementToStorage()
+  syncSalesOrderExecuteStatus()
+  const savedOrders = loadRawSalesOrdersFromStorage()
+  tableData.value = mergeSalesOrderListRows(savedOrders).map(normalizeSavedOrder)
 }
 
 const formatLocalDateTime = (d = new Date()) => {
@@ -321,26 +320,32 @@ const formatLocalDateTime = (d = new Date()) => {
 }
 
 const persistOrderChanges = (orderId: string, changes: Record<string, any>) => {
+  const companyId = requireTenantCompanyId()
+  if (!companyId) return
   const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
   const row = tableData.value.find(r => r.id === orderId)
   if (row) Object.assign(row, changes)
 
   const index = orders.findIndex((o: any) => o.id === orderId)
   if (index > -1) {
-    orders[index] = { ...orders[index], ...changes }
+    orders[index] = stampOrderCompanyId({ ...orders[index], ...changes }, companyId)
   } else if (row) {
-    orders.unshift({ ...row })
+    orders.unshift(stampOrderCompanyId({ ...row, ...changes }, companyId))
   }
   localStorage.setItem('sales-orders', JSON.stringify(orders))
+  void syncSalesOrdersToServer()
 }
 
 const canUnAuditOrder = (row: any) =>
-  row.auditStatus === 'audited' && row.warehouseStatus === 'notOutWarehoused'
+  row.auditStatus === 'audited' && row.executeStatus === 'notExecuted'
 
 const canDeleteOrder = (row: any) =>
   row.auditStatus === 'notAudited' && row.closeStatus === 'notClosed'
 
 const selectedRows = ref<any[]>([])
+const tableRef = ref<TableInstance>()
+
+const collabIndex = computed(() => buildCollabIndexForCompany())
 
 const filteredData = computed(() => {
   return tableData.value.filter(row => {
@@ -364,10 +369,20 @@ const filteredData = computed(() => {
       if (!itemKey || itemKey < startKey || itemKey > endKey) return false
     }
 
+    if (
+      !matchesBusinessProcessFilter(
+        row,
+        searchForm.value.businessProcess,
+        resolveSalesOrderBusinessProcess,
+        collabIndex.value
+      )
+    ) {
+      return false
+    }
+
     if (!matchStatusFilter(row.auditStatus, searchForm.value.auditStatus)) return false
     if (!matchStatusFilter(row.confirmStatus, searchForm.value.confirmStatus)) return false
     if (!matchStatusFilter(row.executeStatus, searchForm.value.executeStatus)) return false
-    if (!matchStatusFilter(row.warehouseStatus, searchForm.value.warehouseStatus)) return false
     if (!matchStatusFilter(row.closeStatus, searchForm.value.closeStatus)) return false
     if (!matchStatusFilter(row.prepaymentStatus, searchForm.value.prepaymentStatus)) return false
     if (!matchStatusFilter(row.receiveStatus, searchForm.value.receiveStatus)) return false
@@ -376,9 +391,74 @@ const filteredData = computed(() => {
   })
 })
 
+const {
+  sortOrders,
+  getSortIcon,
+  handleSort,
+  sortRows: sortListRows
+} = useDocumentColumnSort(
+  computed(() => SALES_ORDER_LIST_COLUMN_DEFINITIONS.map(col => col.key))
+)
+
+const getSalesOrderSortValue = (row: Record<string, unknown>, colKey: string): string | number => {
+  switch (colKey) {
+    case 'amount':
+      return parseDocumentMoneySortValue(row.amount)
+    case 'itemCount':
+      return Number(row.itemCount) || 0
+    case 'auditStatus':
+      return auditStatusLabels[String(row.auditStatus)] || String(row.auditStatus ?? '')
+    case 'confirmStatus':
+      return confirmStatusLabels[String(row.confirmStatus)] || String(row.confirmStatus ?? '')
+    case 'executeStatus':
+      return executeStatusLabels[String(row.executeStatus)] || String(row.executeStatus ?? '')
+    case 'closeStatus':
+      return closeStatusLabels[String(row.closeStatus)] || String(row.closeStatus ?? '')
+    case 'prepaymentStatus':
+      return prepaymentLabels[String(row.prepaymentStatus)] || String(row.prepaymentStatus ?? '-')
+    case 'receiveStatus':
+      return receiveStatusLabels[String(row.receiveStatus)] || '未接单'
+    case 'status':
+      return statusLabels[String(row.status)]?.text || String(row.status ?? '')
+    default: {
+      const col = SALES_ORDER_LIST_COLUMN_DEFINITIONS.find(c => c.key === colKey)
+      const prop = col?.prop || colKey
+      return String(row[prop] ?? '')
+    }
+  }
+}
+
+const sortedFilteredData = computed(() =>
+  sortListRows(filteredData.value, getSalesOrderSortValue)
+)
+
+const onListColumnSort = (colKey: string) => {
+  handleSort(colKey, () => {
+    currentPage.value = 1
+  })
+}
+
 const pagedData = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
-  return filteredData.value.slice(start, start + pageSize.value)
+  return sortedFilteredData.value.slice(start, start + pageSize.value)
+})
+
+const {
+  canNavFirst,
+  canNavPrev,
+  canNavNext,
+  canNavLast,
+  handleNavFirst,
+  handleNavPrev,
+  handleNavNext,
+  handleNavLast,
+  handleSelectionChange
+} = useListTableNav({
+  filteredData,
+  selectedRows,
+  currentPage,
+  pageSize,
+  tableRef
 })
 
 const matchStatusFilter = (rowValue: string, filterValue: string) => {
@@ -411,10 +491,6 @@ const getSelectedRow = () => {
     return null
   }
   return selectedRows.value[0]
-}
-
-const handleSelectionChange = (val: any[]) => {
-  selectedRows.value = val
 }
 
 const handleCreate = () => router.push('/sales/order-list/create')
@@ -451,20 +527,39 @@ const handleAudit = () => {
     type: 'warning'
   }).then(() => {
     const auditTime = formatLocalDateTime()
-    const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
+    const auditPerson = getCurrentUserName()
+    let collabWarnings = 0
+    let collabSuccess = 0
+    let collabPushed = 0
     targets.forEach(row => {
       persistOrderChanges(row.id, {
         auditStatus: 'audited',
-        auditor: '系统管理员',
+        auditor: auditPerson,
         auditTime,
-        status: row.status === 'pending' ? 'processing' : row.status,
-        receiveStatus: 'received'
+        status: row.status === 'pending' ? 'processing' : row.status
       })
-      const fullOrder = orders.find((o: any) => o.id === row.id) || row
-      onSalesOrderAudited(fullOrder)
-      addOperationLog(row.id, 'audit', '系统管理员', '审核销售订单')
+      const stored = JSON.parse(localStorage.getItem('sales-orders') || '[]')
+      const fullOrder = stored.find((o: any) => o.id === row.id || o.orderNo === row.id) || row
+      const collabResult = onSalesOrderAudited(fullOrder)
+      if (collabResult.poUpdated) {
+        persistOrderChanges(row.id, { receiveStatus: 'received' })
+        collabSuccess += 1
+      } else if (collabResult.poPushed) {
+        collabPushed += 1
+      } else if (collabResult.message) {
+        collabWarnings += 1
+      }
+      addOperationLog(row.id, 'audit', auditPerson, '审核销售订单')
     })
-    ElMessage.success(`已成功审核 ${targets.length} 条订单`)
+    if (collabWarnings > 0) {
+      ElMessage.warning(`已审核 ${targets.length} 条销售订单，其中 ${collabWarnings} 条协同处理需关注`)
+    } else if (collabPushed > 0) {
+      ElMessage.success(`已成功审核 ${targets.length} 条订单，并向买方推送 ${collabPushed} 条待审采购单`)
+    } else if (collabSuccess > 0) {
+      ElMessage.success(`已成功审核 ${targets.length} 条订单，并回写 ${collabSuccess} 条采购接单状态`)
+    } else {
+      ElMessage.success(`已成功审核 ${targets.length} 条订单`)
+    }
   }).catch(() => {})
 }
 
@@ -597,16 +692,6 @@ const handleBatchModify = () => {
   ElMessage.info(`批量修改：已选择 ${selectedRows.value.length} 条销售订单`)
 }
 
-const handleToSalesOutbound = () => {
-  if (!requireSelection(false)) return
-  const row = selectedRows.value[0]
-  if (row.auditStatus !== 'audited') {
-    ElMessage.warning('请先审核销售订单')
-    return
-  }
-  router.push({ path: '/sales/outbound', query: { orderId: row.id, from: 'salesOrder' } })
-}
-
 const handleApproveModify = () => {
   if (!requireSelection(false)) return
   const row = selectedRows.value[0]
@@ -672,8 +757,7 @@ const syncPresetDateRange = () => {
 
 const saveSearchForm = () => {
   localStorage.setItem('sales-search-form', JSON.stringify({
-    ...searchForm.value,
-    showAdvancedFilter: showAdvancedFilter.value
+    ...searchForm.value
   }))
 }
 
@@ -686,14 +770,13 @@ const loadSearchForm = () => {
       searchForm.value.auditStatus = migrateSavedFilter(parsed.auditStatus ?? parsed.selectedAuditStatus)
       searchForm.value.confirmStatus = migrateSavedFilter(parsed.confirmStatus)
       searchForm.value.executeStatus = migrateSavedFilter(parsed.executeStatus ?? parsed.selectedExecuteStatus)
-      searchForm.value.warehouseStatus = migrateSavedFilter(parsed.warehouseStatus ?? parsed.selectedWarehouseStatus)
       searchForm.value.closeStatus = migrateSavedFilter(parsed.closeStatus ?? parsed.selectedCloseStatus)
       searchForm.value.prepaymentStatus = migrateSavedFilter(parsed.prepaymentStatus ?? parsed.selectedPrepaymentStatus)
       searchForm.value.receiveStatus = migrateSavedFilter(parsed.receiveStatus ?? parsed.selectedReceiveStatus)
+      searchForm.value.businessProcess = normalizeBusinessProcessFilter(parsed.businessProcess)
       if (parsed.dateRange?.length) {
         searchForm.value.dateRange = parsed.dateRange.map((d: string) => new Date(d))
       }
-      showAdvancedFilter.value = parsed.showAdvancedFilter !== false
     } catch {
       /* ignore */
     }
@@ -704,7 +787,6 @@ watch(() => [
   searchForm.value.auditStatus,
   searchForm.value.confirmStatus,
   searchForm.value.executeStatus,
-  searchForm.value.warehouseStatus,
   searchForm.value.closeStatus,
   searchForm.value.prepaymentStatus,
   searchForm.value.receiveStatus
@@ -720,7 +802,6 @@ const resetSearchForm = () => {
     auditStatus: ALL_FILTER_VALUE,
     confirmStatus: ALL_FILTER_VALUE,
     executeStatus: ALL_FILTER_VALUE,
-    warehouseStatus: ALL_FILTER_VALUE,
     closeStatus: ALL_FILTER_VALUE,
     prepaymentStatus: ALL_FILTER_VALUE,
     receiveStatus: ALL_FILTER_VALUE
@@ -731,8 +812,7 @@ const resetSearchForm = () => {
 }
 
 onMounted(() => {
-  document.title = '销售订单记录'
-  backfillSalesOrderExternalNos()
+  document.title = PAGE_TITLE
   loadSearchForm()
   if (!searchForm.value.selectedPreset) {
     searchForm.value.selectedPreset = 'thisMonth'
@@ -748,14 +828,22 @@ onMounted(() => {
 
 <template>
   <div class="page-container">
+    <div class="page-header">
+      <div class="page-info">
+        <h1>{{ PAGE_TITLE }}</h1>
+        <div class="breadcrumb">{{ PAGE_BREADCRUMB }}</div>
+      </div>
+      <div class="nav-actions">
+        <el-button size="small" :icon="DArrowLeft" circle :disabled="!canNavFirst" title="首张" @click="handleNavFirst" />
+        <el-button size="small" :icon="ArrowLeft" circle :disabled="!canNavPrev" title="上一张" @click="handleNavPrev" />
+        <el-button size="small" :icon="ArrowRight" circle :disabled="!canNavNext" title="下一张" @click="handleNavNext" />
+        <el-button size="small" :icon="DArrowRight" circle :disabled="!canNavLast" title="末张" @click="handleNavLast" />
+      </div>
+    </div>
+
     <div class="search-card">
       <div class="search-row">
         <el-form :model="searchForm" inline class="search-form">
-          <el-form-item label="业务流程">
-            <el-select v-model="searchForm.businessProcess" placeholder="全部" clearable style="width: 120px;">
-              <el-option v-for="opt in businessProcessOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
-            </el-select>
-          </el-form-item>
           <el-form-item label="时间范围">
             <el-select v-model="searchForm.selectedPreset" placeholder="时间段" style="width: 100px;" @change="handlePresetChange">
               <el-option v-for="preset in timePresets" :key="preset.value" :label="preset.label" :value="preset.value" />
@@ -768,6 +856,11 @@ onMounted(() => {
               end-placeholder="结束"
               style="width: 240px; margin-left: 8px;"
             />
+          </el-form-item>
+          <el-form-item label="业务流程">
+            <el-select v-model="searchForm.businessProcess" placeholder="全部" clearable style="width: 120px;">
+              <el-option v-for="opt in businessProcessOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+            </el-select>
           </el-form-item>
           <el-form-item class="keyword-input">
             <el-input
@@ -782,13 +875,16 @@ onMounted(() => {
           <el-button type="primary" class="btn-teal" @click="handleSearch">查询</el-button>
           <el-button @click="handleRefresh">刷新</el-button>
           <el-button type="primary" class="btn-teal" @click="handleReset">重置</el-button>
-          <el-button type="primary" class="btn-teal" @click="showAdvancedFilter = !showAdvancedFilter">
-            {{ showAdvancedFilter ? '隐藏筛选' : '显示筛选' }}
-          </el-button>
         </div>
       </div>
+    </div>
 
-      <div class="search-advanced" v-show="showAdvancedFilter">
+    <div class="status-query-card">
+      <div class="status-query-header">
+        <span class="status-query-title">状态查询</span>
+        <span class="status-query-tip">与列表状态列对应，点击标签快速筛选</span>
+      </div>
+      <div class="status-query-rows">
         <div class="filter-row">
           <div v-for="group in filterGroupsRow1" :key="group.field" class="filter-item">
             <span class="filter-label">{{ group.label }}</span>
@@ -831,9 +927,8 @@ onMounted(() => {
         <el-button type="danger" link size="small" class="btn-delete-link" @click="handleDelete">删除</el-button>
         <el-button type="primary" link size="small" @click="handleEnable">启用</el-button>
         <el-button type="primary" link size="small" @click="handleClose">关闭</el-button>
-        <el-button type="primary" link size="small" @click="handleOutbound">出库</el-button>
+        <el-button type="primary" link size="small" class="btn-outbound-link" @click="handleOutbound">出库</el-button>
         <el-button type="primary" link size="small" @click="handleBatchModify">批量修改</el-button>
-        <el-button type="primary" link size="small" @click="handleToSalesOutbound">转销售出库单</el-button>
         <el-button type="primary" link size="small" class="btn-modify-pending" @click="handleApproveModify">同意修改</el-button>
         <el-button type="primary" link size="small" @click="handlePrint">打印</el-button>
         <el-button type="primary" link size="small" @click="handleCopy">复制</el-button>
@@ -851,6 +946,7 @@ onMounted(() => {
       </div>
       <div v-else class="table-scroll product-list-table-scroll">
       <el-table
+        ref="tableRef"
         :key="tableColumnRenderKey"
         :data="pagedData"
         class="common-table"
@@ -869,6 +965,15 @@ onMounted(() => {
           :align="col.align"
           :header-align="col.headerAlign || col.align || 'center'"
         >
+          <template v-if="col.sortable !== false" #header>
+            <DocumentSortHeader
+              :label="col.label"
+              :sort-icon="getSortIcon(col.key)"
+              :active="!!sortOrders[col.key]"
+              :align="col.headerAlign || col.align || 'center'"
+              @sort="onListColumnSort(col.key)"
+            />
+          </template>
           <template #default="{ row }">
             <span
               v-if="col.key === 'orderNo'"
@@ -900,13 +1005,6 @@ onMounted(() => {
               {{ executeStatusLabels[row.executeStatus] }}
             </el-tag>
             <el-tag
-              v-else-if="col.key === 'warehouseStatus'"
-              size="small"
-              :type="row.warehouseStatus === 'allOutWarehoused' ? 'success' : row.warehouseStatus === 'partiallyOutWarehoused' ? 'warning' : 'info'"
-            >
-              {{ warehouseStatusLabels[row.warehouseStatus] }}
-            </el-tag>
-            <el-tag
               v-else-if="col.key === 'closeStatus'"
               size="small"
               :type="row.closeStatus === 'closed' ? 'danger' : row.closeStatus === 'manualClosed' ? 'warning' : 'info'"
@@ -923,6 +1021,9 @@ onMounted(() => {
             >
               {{ receiveStatusLabels[row.receiveStatus] || '未接单' }}
             </el-tag>
+            <span v-else-if="col.key === 'creator'">{{ row.creator || '—' }}</span>
+            <span v-else-if="col.key === 'salesman'">{{ row.salesman || '—' }}</span>
+            <span v-else-if="col.key === 'auditor'">{{ row.auditor || '—' }}</span>
             <el-tag
               v-else-if="col.key === 'status'"
               size="small"
@@ -942,7 +1043,7 @@ onMounted(() => {
           v-model:page-size="pageSize"
           :page-sizes="[10, 20, 50, 100]"
           layout="total, sizes, prev, pager, next, jumper"
-          :total="filteredData.length"
+          :total="sortedFilteredData.length"
         />
       </div>
     </div>
@@ -976,10 +1077,132 @@ onMounted(() => {
 </template>
 
 <style lang="scss" scoped>
+@import '@/styles/document-table-sort.scss';
+
 .page-container {
   padding: 16px 20px;
   background: #f5f7fa;
   min-height: calc(100vh - 60px);
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+
+  .page-info {
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #333;
+      margin: 0 0 6px;
+      line-height: 24px;
+    }
+
+    .breadcrumb {
+      font-size: 13px;
+      color: #667085;
+      line-height: 20px;
+    }
+  }
+
+  .nav-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+    padding-left: 8px;
+    border-left: 1px solid #e8e8e8;
+  }
+}
+
+.status-query-card {
+  background: #fff;
+  border-radius: 4px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+
+  .status-query-header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px dashed #e4e7ed;
+  }
+
+  .status-query-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #333;
+  }
+
+  .status-query-tip {
+    font-size: 12px;
+    color: #909399;
+  }
+
+  .status-query-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .filter-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px 24px;
+    align-items: center;
+  }
+
+  .filter-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .filter-label {
+    font-size: 13px;
+    color: #666;
+    width: 64px;
+    flex-shrink: 0;
+    text-align: right;
+    line-height: 28px;
+  }
+
+  .filter-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .filter-tag {
+    padding: 4px 12px;
+    font-size: 12px;
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #606266;
+    background: #fff;
+    transition: all 0.2s;
+    user-select: none;
+
+    &:hover {
+      color: #00bfa5;
+      border-color: #00bfa5;
+    }
+
+    &.active {
+      background: #00bfa5;
+      border-color: #00bfa5;
+      color: #fff;
+    }
+  }
 }
 
 .btn-teal {
@@ -1020,71 +1243,6 @@ onMounted(() => {
     gap: 8px;
     flex-shrink: 0;
     flex-wrap: wrap;
-  }
-
-  .search-advanced {
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px dashed #e4e7ed;
-
-    .filter-row {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px 24px;
-      align-items: center;
-      margin-bottom: 12px;
-
-      &:last-child {
-        margin-bottom: 0;
-      }
-    }
-
-    .filter-item {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-    }
-
-    .filter-label {
-      font-size: 13px;
-      color: #666;
-      width: 64px;
-      flex-shrink: 0;
-      text-align: right;
-      line-height: 28px;
-    }
-
-    .filter-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-      min-width: 0;
-    }
-
-    .filter-tag {
-      padding: 4px 12px;
-      font-size: 12px;
-      border: 1px solid #dcdfe6;
-      border-radius: 4px;
-      cursor: pointer;
-      color: #606266;
-      background: #fff;
-      transition: all 0.2s;
-      user-select: none;
-
-      &:hover {
-        color: #00bfa5;
-        border-color: #00bfa5;
-      }
-
-      &.active {
-        background: #00bfa5;
-        border-color: #00bfa5;
-        color: #fff;
-      }
-    }
   }
 }
 
@@ -1139,6 +1297,16 @@ onMounted(() => {
     &:hover,
     &:focus {
       color: #f89898 !important;
+    }
+  }
+
+  .btn-outbound-link {
+    color: #409eff !important;
+    font-weight: 600;
+
+    &:hover,
+    &:focus {
+      color: #66b1ff !important;
     }
   }
 

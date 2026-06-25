@@ -51,7 +51,7 @@ const toggleAll = (category: DocumentFunctionCategory, enabled: boolean) => {
       <div>
         <div class="breadcrumb">首页 / 系统设置 / 单据功能设定</div>
         <h2>单据功能设定</h2>
-        <p class="page-desc">配置各类单据是否启用「确定」步骤；启用后须先确定，方可审核。</p>
+        <p class="page-desc">「确定」步骤是否启用，由「权限与用户 → 审核制度」统一控制（双重审核时启用，一级审核时不启用）。</p>
       </div>
       <div class="header-actions">
         <el-button size="small" @click="handleReset">恢复默认</el-button>

@@ -50,15 +50,13 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   })
 }
 
+import { getAuthUser } from '@/utils/authSession'
+
 function getDownloaderContext() {
-  try {
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
-    return {
-      companyName: String(user.companyName || ''),
-      downloader: String(user.realName || user.username || '')
-    }
-  } catch {
-    return { companyName: '', downloader: '' }
+  const user = getAuthUser<Record<string, unknown>>() || {}
+  return {
+    companyName: String(user.companyName || ''),
+    downloader: String(user.realName || user.username || '')
   }
 }
 

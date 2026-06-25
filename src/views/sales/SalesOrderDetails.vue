@@ -31,7 +31,6 @@ const orderData = ref({
   items: [] as OrderItem[],
   auditStatus: '',
   executeStatus: '',
-  warehouseStatus: '',
   closeStatus: '',
   prepaymentAudit: '',
   receiveStatus: '',
@@ -61,7 +60,6 @@ const mockOrderData: Record<string, any> = {
     ],
     auditStatus: 'audited',
     executeStatus: 'partiallyExecuted',
-    warehouseStatus: 'partiallyOutWarehoused',
     closeStatus: 'notClosed',
     prepaymentAudit: 'prepaidAudited',
     receiveStatus: 'received',
@@ -86,7 +84,6 @@ const mockOrderData: Record<string, any> = {
     ],
     auditStatus: 'notAudited',
     executeStatus: 'notExecuted',
-    warehouseStatus: 'notOutWarehoused',
     closeStatus: 'notClosed',
     prepaymentAudit: 'prepaidNotAudited',
     receiveStatus: 'received',
@@ -111,7 +108,6 @@ const mockOrderData: Record<string, any> = {
     ],
     auditStatus: 'audited',
     executeStatus: 'allExecuted',
-    warehouseStatus: 'allOutWarehoused',
     closeStatus: 'closed',
     prepaymentAudit: 'prepaidPartiallyAudited',
     receiveStatus: 'received',
@@ -139,12 +135,6 @@ const executeStatusLabels: Record<string, string> = {
   notExecuted: '未执行',
   partiallyExecuted: '部分执行',
   allExecuted: '全部执行'
-}
-
-const warehouseStatusLabels: Record<string, string> = {
-  notOutWarehoused: '未出库',
-  partiallyOutWarehoused: '部分出库',
-  allOutWarehoused: '全部出库'
 }
 
 const closeStatusLabels: Record<string, string> = {
@@ -331,12 +321,6 @@ const handlePrintPreview = () => {
             <span class="label">执行状态：</span>
             <el-tag size="small" :type="orderData.executeStatus === 'allExecuted' ? 'success' : (orderData.executeStatus === 'partiallyExecuted' ? 'warning' : 'info')">
               {{ executeStatusLabels[orderData.executeStatus] }}
-            </el-tag>
-          </div>
-          <div class="status-item">
-            <span class="label">出库状态：</span>
-            <el-tag size="small" :type="orderData.warehouseStatus === 'allOutWarehoused' ? 'success' : (orderData.warehouseStatus === 'partiallyOutWarehoused' ? 'warning' : 'info')">
-              {{ warehouseStatusLabels[orderData.warehouseStatus] }}
             </el-tag>
           </div>
           <div class="status-item">

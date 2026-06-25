@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Download, Upload } from '@element-plus/icons-vue'
 import * as XLSX from 'xlsx'
 import { warehouses, loadWarehousesFromApi, getCurrentCompany, saveWarehouseRecord, patchWarehouseRecord, removeWarehouseRecord } from '@/utils/dataStore'
-import { refreshWarehouseOptions } from '@/utils/warehouseSettings'
+import { hydrateWarehouseOptionsFromServer, refreshWarehouseOptions } from '@/utils/warehouseSettings'
 import { formatWarehouseAddress, parseWarehouseAddress } from '@/utils/warehouseAddress'
 import { useTableStyle } from '@/composables/useTableStyle'
 import { useStockBatchModifyActions } from '@/composables/useStockBatchModifyActions'
@@ -477,8 +477,7 @@ const getCities = () => cities[editForm.value.province] || []
 const getDistricts = () => districts[editForm.value.city] || []
 
 onMounted(async () => {
-  await loadWarehousesFromApi()
-  refreshWarehouseOptions()
+  await hydrateWarehouseOptionsFromServer()
 })
 </script>
 

@@ -1,0 +1,28 @@
+.sort-header {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  white-space: nowrap;
+  user-select: none;
+
+  &.is-right {
+    justify-content: flex-end;
+  }
+
+  &.is-left {
+    justify-content: flex-start;
+  }
+
+  .sort-icon {
+    font-size: 12px;
+    color: #98a2b3;
+  }
+
+  &.is-active .sort-icon {
+    color: #00bfa5;
+    font-weight: 700;
+  }
+}

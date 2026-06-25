@@ -39,12 +39,6 @@ const executeStatusOptions = [
   { label: '全部执行', value: 'allExecuted' }
 ]
 
-const warehouseStatusOptions = [
-  { label: '未出库', value: 'notOutWarehoused' },
-  { label: '部分出库', value: 'partiallyOutWarehoused' },
-  { label: '全部出库', value: 'allOutWarehoused' }
-]
-
 const closeStatusOptions = [
   { label: '未关闭', value: 'notClosed' },
   { label: '已关闭', value: 'closed' },
@@ -94,7 +88,6 @@ const searchForm = ref({
   orderId: '' as string,
   auditStatus: '' as string,
   executeStatus: '' as string,
-  warehouseStatus: '' as string,
   closeStatus: '' as string
 })
 
@@ -114,12 +107,6 @@ const executeStatusLabels: Record<string, string> = {
   notExecuted: '未执行',
   partiallyExecuted: '部分执行',
   allExecuted: '全部执行'
-}
-
-const warehouseStatusLabels: Record<string, string> = {
-  notOutWarehoused: '未出库',
-  partiallyOutWarehoused: '部分出库',
-  allOutWarehoused: '全部出库'
 }
 
 const closeStatusLabels: Record<string, string> = {
@@ -224,11 +211,6 @@ const filteredOrderRecords = computed(() => {
       return false
     }
     
-    // 按出库状态筛选
-    if (searchForm.value.warehouseStatus && item.warehouseStatus !== searchForm.value.warehouseStatus) {
-      return false
-    }
-    
     // 按关闭状态筛选
     if (searchForm.value.closeStatus && item.closeStatus !== searchForm.value.closeStatus) {
       return false
@@ -265,7 +247,6 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('sales-record', [
   { key: 'amount', label: '订单金额', defaultWidth: 120 },
   { key: 'auditStatus', label: '审核状态', defaultWidth: 100 },
   { key: 'executeStatus', label: '执行状态', defaultWidth: 100 },
-  { key: 'warehouseStatus', label: '出库状态', defaultWidth: 100 },
   { key: 'closeStatus', label: '关闭状态', defaultWidth: 100 },
   { key: 'action', label: '操作', defaultWidth: 120 }
 ])
@@ -298,7 +279,6 @@ const handleReset = () => {
     orderId: '',
     auditStatus: '',
     executeStatus: '',
-    warehouseStatus: '',
     closeStatus: ''
   }
   const range = getDateRange('thisMonth')
@@ -409,20 +389,6 @@ const handleCurrentChange = () => {}
               </el-radio-button>
             </el-radio-group>
           </div>
-          
-          <div class="filter-item">
-            <span class="filter-label">出库状态：</span>
-            <el-radio-group v-model="searchForm.warehouseStatus">
-              <el-radio-button label="">全部</el-radio-button>
-              <el-radio-button 
-                v-for="opt in warehouseStatusOptions" 
-                :key="opt.value" 
-                :value="opt.value"
-              >
-                {{ opt.label }}
-              </el-radio-button>
-            </el-radio-group>
-          </div>
         </div>
         
         <div class="filter-row">
@@ -469,14 +435,6 @@ const handleCurrentChange = () => {}
           <template #default="{ row }">
             <el-tag size="small" :type="row.executeStatus === 'allExecuted' ? 'success' : (row.executeStatus === 'partiallyExecuted' ? 'warning' : 'info')">
               {{ executeStatusLabels[row.executeStatus] }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        
-        <el-table-column label="出库状态" :width="columnWidths.warehouseStatus" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.warehouseStatus === 'allOutWarehoused' ? 'success' : (row.warehouseStatus === 'partiallyOutWarehoused' ? 'warning' : 'info')">
-              {{ warehouseStatusLabels[row.warehouseStatus] }}
             </el-tag>
           </template>
         </el-table-column>

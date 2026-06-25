@@ -2,6 +2,9 @@
 import { useRouter } from 'vue-router'
 import { clearAuthSession, getAuthToken } from '@/utils/authSession'
 import { elementPlusZhCn } from '@/utils/localeSetup'
+import { applyTableAppearanceSettings } from '@/utils/tableAppearanceSettings'
+
+applyTableAppearanceSettings()
 
 const router = useRouter()
 

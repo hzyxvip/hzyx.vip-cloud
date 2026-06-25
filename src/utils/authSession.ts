@@ -62,6 +62,7 @@ export function saveAuthSession(payload: {
 
 export function clearAuthSession() {
   AUTH_KEYS.forEach(removeAuthStorage)
+  sessionStorage.removeItem('warehouse_server_synced_company')
 }
 
 /** 将旧版 localStorage 登录态迁移到 sessionStorage（仅当前标签） */

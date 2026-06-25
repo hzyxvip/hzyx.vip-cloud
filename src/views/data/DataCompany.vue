@@ -18,7 +18,8 @@ import {
   saveTenantCompanyProfile,
   syncCompanyFieldFormatFromPlatform,
   validateCompanyByFieldDefs,
-  getCompanyFormKey
+  getCompanyFormKey,
+  resolveTenantPlatformPartnerCode
 } from '@/utils/companyDataService'
 import { shouldWarnOnCloseIntro } from '@/utils/companyPublicDisplayService'
 
@@ -31,6 +32,7 @@ const form = ref<Record<string, unknown>>({})
 
 const userContext = computed(() => getLoggedInUserContext())
 const includePlatformType = computed(() => isPlatformOperator())
+const tenantPlatformCode = computed(() => resolveTenantPlatformPartnerCode(tenantProfile.value))
 
 const refreshFieldLayout = () => {
   platformFields.value = getTenantEditableFieldDefs()
@@ -185,9 +187,17 @@ onMounted(async () => {
     </div>
 
     <div v-if="tenantProfile" class="summary-card">
-      <div class="summary-item">
-        <span class="label">企业名称</span>
-        <span class="value">{{ tenantProfile.name || '-' }}</span>
+      <div class="summary-primary">
+        <div class="summary-item">
+          <span class="label">企业名称</span>
+          <span class="value">{{ tenantProfile.name || '-' }}</span>
+        </div>
+        <div v-if="tenantPlatformCode" class="summary-item summary-item-vip">
+          <span class="label">
+            医享平台<span class="vip-accent">VIP</span>编号
+          </span>
+          <span class="value vip-value">{{ tenantPlatformCode }}</span>
+        </div>
       </div>
       <div class="summary-item summary-item-status">
         <span class="label">账户状态</span>
@@ -388,9 +398,30 @@ onMounted(async () => {
   gap: 32px;
 }
 
+.summary-primary {
+  display: flex;
+  align-items: flex-start;
+  gap: 48px;
+  flex-wrap: wrap;
+}
+
 .summary-item-status {
   align-items: flex-end;
   text-align: right;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.summary-item-vip {
+  .label .vip-accent {
+    color: #c9920a;
+    font-weight: 600;
+  }
+
+  .vip-value {
+    color: #b8860b;
+    letter-spacing: 0.04em;
+  }
 }
 
 .quick-entry-row {

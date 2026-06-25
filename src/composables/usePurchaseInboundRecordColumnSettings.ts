@@ -16,7 +16,7 @@ export const PURCHASE_INBOUND_RECORD_COLUMN_DEFINITIONS: PurchaseInboundRecordCo
   { key: 'supplier', label: '供应商', prop: 'supplier' },
   { key: 'warehouse', label: '仓库', prop: 'warehouse' },
   { key: 'date', label: '入库日期', prop: 'date' },
-  { key: 'operator', label: '操作员', prop: 'operator' },
+  { key: 'operator', label: '审核入库人员', prop: 'operator' },
   { key: 'itemCount', label: '商品种类', prop: 'itemCount', align: 'center', headerAlign: 'center' },
   { key: 'totalQuantity', label: '总数量', prop: 'totalQuantity', align: 'center', headerAlign: 'center' },
   { key: 'amount', label: '入库金额', align: 'right', headerAlign: 'right' },

@@ -34,7 +34,13 @@ export function formatProductionDateToBatchNo(
   if (!productionDate || format === 'custom') return ''
   const d = dayjs(productionDate)
   if (!d.isValid()) return ''
-  return format === 'YYMMDD' ? d.format('YYMMDD') : d.format('YYYYMMDD')
+  if (format === 'YYMMDD') {
+    const yy = String(d.year()).slice(-2)
+    const mm = String(d.month() + 1).padStart(2, '0')
+    const dd = String(d.date()).padStart(2, '0')
+    return `${yy}${mm}${dd}`
+  }
+  return d.format('YYYYMMDD')
 }
 
 function addShelfLife(base: dayjs.Dayjs, value: number, unit: string): dayjs.Dayjs {
@@ -183,4 +189,45 @@ export function reapplyBatchNoFormatToItems(
       row.batchNo = formatProductionDateToBatchNo(productionDate, format)
     }
   })
+}
+
+/** 从订单/库存带入批号时识别 8/6 位格式或标记手输，避免被生产日期变更误覆盖 */
+export function syncImportedRowBatchNoState(
+  row: Record<string, any>,
+  format: BatchNoFormat = loadBatchNoFormat()
+) {
+  const batchNo = String(row.batchNo || '').trim()
+  const productionDate = getRowProductionDate(row)
+  row._batchFormatPickerOpen = false
+
+  if (!batchNo) {
+    row._batchNoManual = false
+    if (
+      !hasConfirmedBatchNoFormat(row) &&
+      productionDate &&
+      format !== 'custom' &&
+      isBatchNoAutoGenerateEnabled()
+    ) {
+      row._batchNoFormat = format === 'YYMMDD' ? 'YYMMDD' : 'YYYYMMDD'
+    }
+    return
+  }
+
+  if (productionDate) {
+    const ymd = formatProductionDateToBatchNo(productionDate, 'YYYYMMDD')
+    const yymd = formatProductionDateToBatchNo(productionDate, 'YYMMDD')
+    if (batchNo === ymd) {
+      row._batchNoFormat = 'YYYYMMDD'
+      row._batchNoManual = false
+      return
+    }
+    if (batchNo === yymd) {
+      row._batchNoFormat = 'YYMMDD'
+      row._batchNoManual = false
+      return
+    }
+  }
+
+  row._batchNoManual = true
+  clearRowBatchNoFormat(row)
 }

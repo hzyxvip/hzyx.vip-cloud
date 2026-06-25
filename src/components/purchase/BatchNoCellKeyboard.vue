@@ -26,12 +26,20 @@ const inputRef = ref<InputInstance>()
 const formatBtnRefs = ref<(HTMLButtonElement | null)[]>([null, null])
 
 /** 选择格式时只显示两行；确认后只显示批号输入框 */
-const showFormatPicker = computed(() => props.row._batchFormatPickerOpen !== false)
+const hasProductionDate = computed(() => Boolean(getRowProductionDate(props.row)))
 
-/** 按当前生产日期预览 8 位 / 6 位批号 */
+const showFormatPicker = computed(
+  () => hasProductionDate.value && props.row._batchFormatPickerOpen === true
+)
+
+const showBatchInput = computed(
+  () => hasProductionDate.value && props.row._batchFormatPickerOpen === false
+)
+
+/** 按当前生产日期预览 8 位 / 6 位批号（无生产日期时不展示） */
 const formatPreviewLabels = computed(() => {
   const pd = getRowProductionDate(props.row)
-  if (!pd) return ['20260624', '260624']
+  if (!pd) return []
   return [
     formatProductionDateToBatchNo(pd, 'YYYYMMDD') || '—',
     formatProductionDateToBatchNo(pd, 'YYMMDD') || '—'
@@ -43,6 +51,7 @@ const setFormatRef = (index: number, el: unknown) => {
 }
 
 const openFormatPicker = () => {
+  if (!getRowProductionDate(props.row)) return
   props.row._batchFormatPickerOpen = true
 }
 
@@ -152,11 +161,10 @@ const onBatchInput = () => {
       </button>
     </template>
     <el-input
-      v-else
+      v-else-if="showBatchInput"
       ref="inputRef"
       v-model="row.batchNo"
       size="small"
-      placeholder="批号"
       :disabled="disabled"
       @keydown="onInputKeydown"
       @input="onBatchInput"

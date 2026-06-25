@@ -93,6 +93,21 @@ export const seedData = async () => {
 
   await upsertUser(userRepository, PLATFORM_ADMIN_ACCOUNT, adminCompany.id)
 
+  const testPlatformUsername = String(process.env.SEED_PLATFORM_TEST_USERNAME || '').trim()
+  const testPlatformPassword = String(process.env.SEED_PLATFORM_TEST_PASSWORD || '').trim()
+  if (testPlatformUsername && testPlatformPassword) {
+    await upsertUser(
+      userRepository,
+      {
+        username: testPlatformUsername,
+        password: testPlatformPassword,
+        realName: String(process.env.SEED_PLATFORM_TEST_REAL_NAME || '平台测试账号').trim(),
+        role: 'platform_admin'
+      },
+      adminCompany.id
+    )
+  }
+
   let demoCompany = await companyRepository.findOne({ where: { code: DEMO_COMPANY_SEED.code } })
   if (!demoCompany) {
     demoCompany = companyRepository.create({ ...DEMO_COMPANY_SEED })

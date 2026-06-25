@@ -3,13 +3,16 @@ import '@/styles/product-list-table.scss'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown, MoreFilled } from '@element-plus/icons-vue'
+import * as XLSX from 'xlsx'
 import { useTableStyle } from '@/composables/useTableStyle'
-import { usePurchaseOrderListColumnSettings } from '@/composables/usePurchaseOrderListColumnSettings'
+import { usePurchaseOrderListColumnSettings, PURCHASE_ORDER_LIST_COLUMN_DEFINITIONS } from '@/composables/usePurchaseOrderListColumnSettings'
 import {
   canDeletePurchaseOrder,
   canUnAuditPurchaseOrder,
+  getCollabLinks,
   onPurchaseOrderAudited,
-  onPurchaseOrderManualCompleted
+  type PurchaseOrderAuditedCollabResult
 } from '@/utils/platformCollaborationService'
 import { calcDealAmountFromOrder } from '@/utils/purchaseOrderAmount'
 import { resolveSupplierPlatformCode } from '@/utils/orderListPartnerCodes'
@@ -17,14 +20,39 @@ import {
   checkPurchaseOrderProductsAudited,
   formatUnapprovedProductsMessage
 } from '@/utils/productStore'
+import { requiresConfirmBeforeAudit } from '@/utils/auditSystemSettings'
+import {
+  mergePurchaseOrderListRows,
+  loadRawPurchaseOrdersFromStorage
+} from '@/utils/purchaseOrderListData'
+import { applyPurchaseOrderSettlementToStorage } from '@/utils/fundOrderAllocation'
+import {
+  PURCHASE_BUSINESS_PROCESS_OPTIONS,
+  buildCollabIndexForCompany,
+  getCurrentCompanyId,
+  matchesBusinessProcessFilter,
+  normalizeBusinessProcessFilter,
+  resolvePurchaseOrderBusinessProcess,
+  stampOrderCompanyId
+} from '@/utils/orderBusinessProcess'
+import { parseDocumentMoneySortValue } from '@/utils/documentTableSort'
+import { useDocumentColumnSort } from '@/composables/useDocumentColumnSort'
+import DocumentSortHeader from '@/components/common/DocumentSortHeader.vue'
+
 import {
   CONFIRM_STATUS_CONFIRMED,
-  CONFIRM_STATUS_UNCONFIRMED,
   normalizeConfirmStatus
 } from '@/utils/documentFunctionSettings'
+import { requireTenantCompanyId } from '@/utils/tenantGuard'
+import { syncPurchaseOrdersToServer } from '@/utils/orderSyncService'
+import { hasPermission } from '@/utils/userPermission'
 
 const router = useRouter()
 const showAdvancedFilter = ref(true)
+const importInputRef = ref<HTMLInputElement | null>(null)
+
+const PAGE_TITLE = '采购订单记录'
+const PAGE_BREADCRUMB = '首页 / 采购管理 / 采购单据 / 采购订单记录'
 
 const operationLogs = ref<any[]>(JSON.parse(localStorage.getItem('purchase-operation-logs') || '[]'))
 
@@ -52,21 +80,11 @@ const timePresets = [
   { label: '近一年', value: 'lastYear' }
 ]
 
-const businessProcessOptions = [
-  { label: '全部流程', value: '' },
-  { label: '标准采购', value: 'standard' },
-  { label: '跨公司采购', value: 'crossCompany' },
-  { label: '平台采购', value: 'platform' }
-]
+const businessProcessOptions = PURCHASE_BUSINESS_PROCESS_OPTIONS
 
 const auditStatusOptions = [
   { label: '未审核', value: 'notAudited' },
   { label: '已审核', value: 'audited' }
-]
-
-const confirmStatusOptions = [
-  { label: '未确认', value: CONFIRM_STATUS_UNCONFIRMED },
-  { label: '已确认', value: CONFIRM_STATUS_CONFIRMED }
 ]
 
 const executeStatusOptions = [
@@ -152,7 +170,6 @@ const ALL_FILTER_VALUE = '__all__'
 
 type StatusFilterField =
   | 'auditStatus'
-  | 'confirmStatus'
   | 'executeStatus'
   | 'warehouseStatus'
   | 'closeStatus'
@@ -165,7 +182,6 @@ const searchForm = ref({
   selectedPreset: 'thisMonth',
   dateRange: [] as Date[],
   auditStatus: ALL_FILTER_VALUE,
-  confirmStatus: ALL_FILTER_VALUE,
   executeStatus: ALL_FILTER_VALUE,
   warehouseStatus: ALL_FILTER_VALUE,
   closeStatus: ALL_FILTER_VALUE,
@@ -175,7 +191,6 @@ const searchForm = ref({
 
 const filterGroupsRow1 = [
   { field: 'auditStatus' as StatusFilterField, label: '审核状态', options: auditStatusOptions },
-  { field: 'confirmStatus' as StatusFilterField, label: '确定状态', options: confirmStatusOptions },
   { field: 'executeStatus' as StatusFilterField, label: '执行状态', options: executeStatusOptions },
   { field: 'warehouseStatus' as StatusFilterField, label: '入库状态', options: warehouseStatusOptions }
 ]
@@ -196,25 +211,9 @@ const pageSize = ref(10)
 
 const tableData = ref<any[]>([])
 
-const defaultData = [
-  { id: 'PO20260620001', orderNo: 'PO-20260620-0001', supplier: '北京医疗器械有限公司', date: '2026-06-20', amount: '¥12,500.00', itemCount: 5, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notInWarehoused', closeStatus: 'notClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'pending', creator: '系统管理员' },
-  { id: 'PO20260619002', orderNo: 'PO-20260619-0002', supplier: '上海医疗设备有限公司', date: '2026-06-19', amount: '¥8,800.00', itemCount: 3, auditStatus: 'audited', executeStatus: 'partiallyExecuted', warehouseStatus: 'partiallyInWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidAudited', receiveStatus: 'notReceived', status: 'processing', creator: '系统管理员' },
-  { id: 'PO20260618003', orderNo: 'PO-20260618-0003', supplier: '广州医疗科技有限公司', date: '2026-06-18', amount: '¥25,600.00', itemCount: 8, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allInWarehoused', closeStatus: 'closed', prepaymentStatus: '', receiveStatus: 'received', status: 'completed', creator: '系统管理员' },
-  { id: 'PO20260617004', orderNo: 'PO-20260617-0004', supplier: '北京医疗器械有限公司', date: '2026-06-17', amount: '¥15,200.00', itemCount: 4, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notInWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidNotAudited', receiveStatus: 'notReceived', status: 'pending', creator: '系统管理员' },
-  { id: 'PO20260616005', orderNo: 'PO-20260616-0005', supplier: '上海医疗设备有限公司', date: '2026-06-16', amount: '¥6,800.00', itemCount: 2, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allInWarehoused', closeStatus: 'closed', prepaymentStatus: '', receiveStatus: 'received', status: 'completed', creator: '系统管理员' },
-  { id: 'PO20260615006', orderNo: 'PO-20260615-0006', supplier: '广州医疗科技有限公司', date: '2026-06-15', amount: '¥32,000.00', itemCount: 10, auditStatus: 'audited', executeStatus: 'partiallyExecuted', warehouseStatus: 'partiallyInWarehoused', closeStatus: 'notClosed', prepaymentStatus: 'prepaidPartiallyAudited', receiveStatus: 'notReceived', status: 'processing', creator: '系统管理员' },
-  { id: 'PO20260614007', orderNo: 'PO-20260614-0007', supplier: '北京医疗器械有限公司', date: '2026-06-14', amount: '¥9,500.00', itemCount: 3, auditStatus: 'notAudited', executeStatus: 'notExecuted', warehouseStatus: 'notInWarehoused', closeStatus: 'manualClosed', prepaymentStatus: '', receiveStatus: 'notReceived', status: 'cancelled', creator: '系统管理员' },
-  { id: 'PO20260613008', orderNo: 'PO-20260613-0008', supplier: '上海医疗设备有限公司', date: '2026-06-13', amount: '¥18,900.00', itemCount: 6, auditStatus: 'audited', executeStatus: 'allExecuted', warehouseStatus: 'allInWarehoused', closeStatus: 'closed', prepaymentStatus: '', receiveStatus: 'received', status: 'completed', creator: '系统管理员' }
-]
-
 const auditStatusLabels: Record<string, string> = {
   notAudited: '未审核',
   audited: '已审核'
-}
-
-const confirmStatusLabels: Record<string, string> = {
-  [CONFIRM_STATUS_UNCONFIRMED]: '未确认',
-  [CONFIRM_STATUS_CONFIRMED]: '已确认'
 }
 
 const executeStatusLabels: Record<string, string> = {
@@ -255,14 +254,12 @@ const statusLabels: Record<string, { text: string; color: string }> = {
 
 const { columnWidths, handleHeaderDragend } = useTableStyle('purchase-order-list', [
   { key: 'orderNo', label: '订单号', defaultWidth: 150 },
-  { key: 'projectName', label: '项目名称', defaultWidth: 140 },
   { key: 'supplier', label: '供应商', defaultWidth: 180 },
   { key: 'supplierPlatformCode', label: '医享平台供应商编号', defaultWidth: 150 },
   { key: 'date', label: '下单日期', defaultWidth: 110 },
   { key: 'itemCount', label: '商品种类', defaultWidth: 90 },
   { key: 'amount', label: '成交金额', defaultWidth: 120 },
   { key: 'auditStatus', label: '审核状态', defaultWidth: 90 },
-  { key: 'confirmStatus', label: '确定状态', defaultWidth: 90 },
   { key: 'executeStatus', label: '执行状态', defaultWidth: 100 },
   { key: 'warehouseStatus', label: '入库状态', defaultWidth: 100 },
   { key: 'closeStatus', label: '关闭状态', defaultWidth: 100 },
@@ -285,6 +282,7 @@ const {
 } = usePurchaseOrderListColumnSettings('purchase-order-list')
 
 const loadData = () => {
+  applyPurchaseOrderSettlementToStorage()
   const normalizeSavedOrder = (o: Record<string, unknown>) => ({
     ...o,
     orderNo: o.orderNo || o.id,
@@ -298,15 +296,8 @@ const loadData = () => {
     amount: calcDealAmountFromOrder(o)
   })
 
-  const savedOrders = JSON.parse(localStorage.getItem('purchase-orders') || '[]')
-  const existingIds = new Set(defaultData.map(item => item.id))
-  const newOrders = savedOrders
-    .filter((o: Record<string, unknown>) => !existingIds.has(String(o.id)))
-    .map(normalizeSavedOrder)
-  tableData.value = [...newOrders, ...defaultData.map(row => {
-    const saved = savedOrders.find((o: Record<string, unknown>) => o.id === row.id)
-    return saved ? normalizeSavedOrder({ ...row, ...saved }) : row
-  })]
+  const savedOrders = loadRawPurchaseOrdersFromStorage()
+  tableData.value = mergePurchaseOrderListRows(savedOrders).map(normalizeSavedOrder)
 }
 
 const formatLocalDateTime = (d = new Date()) => {
@@ -320,17 +311,20 @@ const formatLocalDateTime = (d = new Date()) => {
 }
 
 const persistOrderChanges = (orderId: string, changes: Record<string, any>) => {
+  const companyId = requireTenantCompanyId()
+  if (!companyId) return
   const orders = JSON.parse(localStorage.getItem('purchase-orders') || '[]')
   const row = tableData.value.find(r => r.id === orderId)
   if (row) Object.assign(row, changes)
 
   const index = orders.findIndex((o: any) => o.id === orderId || o.orderNo === orderId)
   if (index > -1) {
-    orders[index] = { ...orders[index], ...changes }
+    orders[index] = stampOrderCompanyId({ ...orders[index], ...changes }, companyId)
   } else if (row) {
-    orders.unshift({ ...row, ...changes })
+    orders.unshift(stampOrderCompanyId({ ...row, ...changes }, companyId))
   }
   localStorage.setItem('purchase-orders', JSON.stringify(orders))
+  void syncPurchaseOrdersToServer()
 }
 
 const canUnAuditOrder = (row: any) => canUnAuditPurchaseOrder(row)
@@ -339,6 +333,13 @@ const canUnAuditOrder = (row: any) => canUnAuditPurchaseOrder(row)
 const canDeleteOrder = (row: any) => canDeletePurchaseOrder(row)
 
 const selectedRows = ref<any[]>([])
+
+const matchStatusFilter = (rowValue: string, filterValue: string) => {
+  if (!filterValue || filterValue === ALL_FILTER_VALUE) return true
+  return rowValue === filterValue
+}
+
+const collabIndex = computed(() => buildCollabIndexForCompany())
 
 const filteredData = computed(() => {
   return tableData.value.filter(row => {
@@ -355,8 +356,18 @@ const filteredData = computed(() => {
       if (!itemKey || itemKey < startKey || itemKey > endKey) return false
     }
 
+    if (
+      !matchesBusinessProcessFilter(
+        row,
+        searchForm.value.businessProcess,
+        resolvePurchaseOrderBusinessProcess,
+        collabIndex.value
+      )
+    ) {
+      return false
+    }
+
     if (!matchStatusFilter(row.auditStatus, searchForm.value.auditStatus)) return false
-    if (!matchStatusFilter(row.confirmStatus, searchForm.value.confirmStatus)) return false
     if (!matchStatusFilter(row.executeStatus, searchForm.value.executeStatus)) return false
     if (!matchStatusFilter(row.warehouseStatus, searchForm.value.warehouseStatus)) return false
     if (!matchStatusFilter(row.closeStatus, searchForm.value.closeStatus)) return false
@@ -367,14 +378,60 @@ const filteredData = computed(() => {
   })
 })
 
+const {
+  sortOrders,
+  getSortIcon,
+  handleSort,
+  sortRows: sortListRows
+} = useDocumentColumnSort(
+  computed(() => PURCHASE_ORDER_LIST_COLUMN_DEFINITIONS.map(col => col.key))
+)
+
+const getOrderSortValue = (row: Record<string, unknown>, colKey: string): string | number => {
+  switch (colKey) {
+    case 'amount':
+      return parseDocumentMoneySortValue(row.amount)
+    case 'itemCount':
+      return Number(row.itemCount) || 0
+    case 'auditStatus':
+      return auditStatusLabels[String(row.auditStatus)] || String(row.auditStatus ?? '')
+    case 'executeStatus':
+      return executeStatusLabels[String(row.executeStatus)] || String(row.executeStatus ?? '')
+    case 'warehouseStatus':
+      return warehouseStatusLabels[String(row.warehouseStatus)] || String(row.warehouseStatus ?? '')
+    case 'closeStatus':
+      return closeStatusLabels[String(row.closeStatus)] || String(row.closeStatus ?? '')
+    case 'prepaymentStatus':
+      return prepaymentLabels[String(row.prepaymentStatus)] || String(row.prepaymentStatus ?? '-')
+    case 'receiveStatus':
+      return receiveStatusLabels[String(row.receiveStatus)] || '未接单'
+    case 'status':
+      return statusLabels[String(row.status)]?.text || String(row.status ?? '')
+    default: {
+      const col = PURCHASE_ORDER_LIST_COLUMN_DEFINITIONS.find(c => c.key === colKey)
+      const prop = col?.prop || colKey
+      return String(row[prop] ?? '')
+    }
+  }
+}
+
+const sortedFilteredData = computed(() =>
+  sortListRows(filteredData.value, getOrderSortValue)
+)
+
+const onListColumnSort = (colKey: string) => {
+  handleSort(colKey, () => {
+    currentPage.value = 1
+  })
+}
+
 const pagedData = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
-  return filteredData.value.slice(start, start + pageSize.value)
+  return sortedFilteredData.value.slice(start, start + pageSize.value)
 })
 
-const matchStatusFilter = (rowValue: string, filterValue: string) => {
-  if (!filterValue || filterValue === ALL_FILTER_VALUE) return true
-  return rowValue === filterValue
+const handleSelectionChange = (val: any[]) => {
+  selectedRows.value = val
 }
 
 const selectFilter = (field: StatusFilterField, value: string) => {
@@ -404,25 +461,302 @@ const getSelectedRow = () => {
   return selectedRows.value[0]
 }
 
-const handleSelectionChange = (val: any[]) => {
-  selectedRows.value = val
+const requireSelection = (multiple = true) => {
+  if (selectedRows.value.length === 0) {
+    ElMessage.warning(multiple ? '请至少选择一条采购订单' : '请先选择一条采购订单')
+    return false
+  }
+  if (!multiple && selectedRows.value.length > 1) {
+    ElMessage.warning('请只选择一条采购订单')
+    return false
+  }
+  return true
 }
 
 const handleCreate = () => router.push('/purchase/order-list/create')
 
-const handleEdit = () => {
-  const row = getSelectedRow()
-  if (row) router.push(`/purchase/order-list/create/${row.id}`)
+const IMPORT_LABEL_TO_KEY = Object.fromEntries(
+  PURCHASE_ORDER_LIST_COLUMN_DEFINITIONS.map(col => [col.label, col.prop || col.key])
+)
+
+const IMPORT_STATUS_REVERSE: Record<string, Record<string, string>> = {
+  auditStatus: { 未审核: 'notAudited', 已审核: 'audited' },
+  executeStatus: { 未执行: 'notExecuted', 部分执行: 'partiallyExecuted', 全部执行: 'allExecuted' },
+  warehouseStatus: { 未入库: 'notInWarehoused', 部分入库: 'partiallyInWarehoused', 全部入库: 'allInWarehoused' },
+  closeStatus: { 未关闭: 'notClosed', 已关闭: 'closed', 手动关闭: 'manualClosed' },
+  prepaymentStatus: {
+    已预付未审核: 'prepaidNotAudited',
+    已审核部分核销: 'prepaidPartiallyAudited',
+    已审核已核销: 'prepaidAudited'
+  },
+  receiveStatus: { 已接单: 'received', 未接单: 'notReceived' },
+  status: { 待处理: 'pending', 进行中: 'processing', 已完成: 'completed', 已取消: 'cancelled' }
 }
 
-const handleView = () => {
+const parseImportedOrderRow = (row: Record<string, unknown>): Record<string, unknown> | null => {
+  const order: Record<string, unknown> = {}
+  Object.entries(IMPORT_LABEL_TO_KEY).forEach(([label, key]) => {
+    const raw = row[label]
+    if (raw === undefined || raw === '') return
+    const text = String(raw).trim()
+    const reversed = IMPORT_STATUS_REVERSE[key]?.[text]
+    order[key] = reversed ?? raw
+  })
+  const id = String(order.orderNo || order.id || '').trim()
+  if (!id) return null
+  order.id = id
+  order.orderNo = order.orderNo || id
+  order.creator = order.creator || '系统管理员'
+  order.auditStatus = order.auditStatus || 'notAudited'
+  order.receiveStatus = order.receiveStatus || 'notReceived'
+  order.status = order.status || 'pending'
+  return order
+}
+
+const persistImportedOrders = (orders: Record<string, unknown>[]) => {
+  const stored = loadRawPurchaseOrdersFromStorage()
+  let added = 0
+  let updated = 0
+  orders.forEach(order => {
+    const id = String(order.id)
+    const stamped = stampOrderCompanyId(order, getCurrentCompanyId())
+    const index = stored.findIndex(
+      o => String(o.id) === id || String(o.orderNo) === id
+    )
+    if (index >= 0) {
+      stored[index] = { ...stored[index], ...stamped }
+      updated++
+    } else {
+      stored.unshift(stamped)
+      added++
+    }
+  })
+  localStorage.setItem('purchase-orders', JSON.stringify(stored))
+  loadData()
+  currentPage.value = 1
+  ElMessage.success(`引入完成：新增 ${added} 条，更新 ${updated} 条`)
+}
+
+const handleImportClick = () => {
+  importInputRef.value?.click()
+}
+
+const handleImportFile = (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    try {
+      const buffer = e.target?.result
+      if (!buffer) throw new Error('empty')
+      const workbook = XLSX.read(new Uint8Array(buffer as ArrayBuffer), { type: 'array' })
+      const sheet = workbook.Sheets[workbook.SheetNames[0]]
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet)
+      const parsed = rows.map(parseImportedOrderRow).filter(Boolean) as Record<string, unknown>[]
+      if (parsed.length === 0) {
+        ElMessage.warning('未识别到有效订单，请确认含「订单号」列')
+        return
+      }
+      persistImportedOrders(parsed)
+    } catch {
+      ElMessage.error('引入失败，请检查 Excel 文件格式')
+    }
+  }
+  reader.onerror = () => ElMessage.error('读取文件失败')
+  reader.readAsArrayBuffer(file)
+}
+
+/** 引出：导出当前筛选/选中列表为 Excel */
+const handleExportOut = () => {
+  handleExport()
+}
+
+const INBOUND_STORAGE_KEY = 'purchaseInboundList'
+
+const resolveLinkedSalesOrderNo = (row: Record<string, unknown>): string => {
+  const direct = String(row.sellerOrderNo || '').trim()
+  if (direct) return direct
+  const poId = String(row.id || row.orderNo || '').trim()
+  if (!poId) return ''
+  const link = getCollabLinks().find(l =>
+    l.buyerOrderId === poId || l.buyerOrderNo === poId
+  )
+  const fromLink = String(link?.sellerOrderNo || link?.sellerOrderId || '').trim()
+  if (!fromLink) return ''
+  const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]') as Record<string, unknown>[]
+  const matched = orders.find(item =>
+    String(item.orderNo) === fromLink || String(item.id) === fromLink
+  )
+  return String(matched?.orderNo || fromLink)
+}
+
+const resolveLinkedSalesOrderId = (row: Record<string, unknown>): string => {
+  const direct = String(row.sellerOrderId || row.sellerOrderNo || '').trim()
+  if (direct) return direct
+  const poId = String(row.id || row.orderNo || '').trim()
+  if (!poId) return ''
+  const link = getCollabLinks().find(l =>
+    l.buyerOrderId === poId || l.buyerOrderNo === poId
+  )
+  return String(link?.sellerOrderId || link?.sellerOrderNo || '').trim()
+}
+
+const resolveLinkedInboundNo = (row: Record<string, unknown>): string => {
+  const poId = String(row.id || row.orderNo || '').trim()
+  if (!poId) return ''
+  const list = JSON.parse(localStorage.getItem(INBOUND_STORAGE_KEY) || '[]') as Record<string, unknown>[]
+  const matched = list.find(item =>
+    String(item.purchaseOrderId || item.orderNo || '') === poId
+    || String(item.orderNo || '') === poId
+  )
+  if (!matched) return ''
+  return String(matched.inboundNo || matched.id || '')
+}
+
+const resolveLinkedInboundId = (row: Record<string, unknown>): string => {
+  const poId = String(row.id || row.orderNo || '').trim()
+  if (!poId) return ''
+  const list = JSON.parse(localStorage.getItem(INBOUND_STORAGE_KEY) || '[]') as Record<string, unknown>[]
+  const matched = list.find(item =>
+    String(item.purchaseOrderId || item.orderNo || '') === poId
+    || String(item.orderNo || '') === poId
+  )
+  return matched ? String(matched.id || matched.inboundNo || '') : ''
+}
+
+const formatRowCellValue = (row: Record<string, unknown>, colKey: string): string => {
+  const val = row[colKey]
+  if (colKey === 'auditStatus') return auditStatusLabels[String(val)] || String(val || '')
+  if (colKey === 'executeStatus') return executeStatusLabels[String(val)] || String(val || '')
+  if (colKey === 'warehouseStatus') return warehouseStatusLabels[String(val)] || String(val || '')
+  if (colKey === 'closeStatus') return closeStatusLabels[String(val)] || String(val || '')
+  if (colKey === 'prepaymentStatus') return prepaymentLabels[String(val)] || '-'
+  if (colKey === 'receiveStatus') return receiveStatusLabels[String(val)] || '未接单'
+  if (colKey === 'status') return statusLabels[String(val)]?.text || String(val || '')
+  if (colKey === 'supplierPlatformCode') return String(val || '—')
+  return String(val ?? '')
+}
+
+const getPrintTargetRows = (multiple: boolean) => {
+  if (multiple) {
+    if (!requireSelection()) return []
+    return selectedRows.value
+  }
   const row = getSelectedRow()
-  if (row) router.push(`/purchase/order-list/create/${row.id}`)
+  return row ? [row] : []
+}
+
+const exportRowsToExcel = (rows: Record<string, unknown>[], fileName: string) => {
+  const cols = sortedVisibleColumns.value
+  if (cols.length === 0) {
+    ElMessage.warning('请先通过「列表设置」选择要导出的列')
+    return
+  }
+  const exportData = rows.map(row => {
+    const record: Record<string, string> = {}
+    cols.forEach(col => {
+      record[col.label] = formatRowCellValue(row, col.prop || col.key)
+    })
+    return record
+  })
+  const worksheet = XLSX.utils.json_to_sheet(exportData)
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, worksheet, '采购订单')
+  XLSX.writeFile(workbook, fileName)
+}
+
+const printListRows = (rows: Record<string, unknown>[], title: string, preview = false) => {
+  const cols = sortedVisibleColumns.value
+  if (cols.length === 0) {
+    ElMessage.warning('请先通过「列表设置」选择要打印的列')
+    return
+  }
+  const head = cols.map(col => `<th>${col.label}</th>`).join('')
+  const body = rows.map(row => {
+    const cells = cols.map(col => `<td>${formatRowCellValue(row, col.prop || col.key)}</td>`).join('')
+    return `<tr>${cells}</tr>`
+  }).join('')
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+<style>
+body { font-family: "SimSun", serif; font-size: 12px; margin: 16px; }
+h2 { text-align: center; margin-bottom: 12px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { border: 1px solid #000; padding: 4px 6px; text-align: center; }
+</style></head><body>
+<h2>${title}</h2>
+<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+</body></html>`
+  const win = window.open('', '_blank')
+  if (!win) {
+    ElMessage.error('无法打开打印窗口，请检查浏览器弹窗设置')
+    return
+  }
+  win.document.write(html)
+  win.document.close()
+  win.focus()
+  if (preview) return
+  win.print()
 }
 
 const handlePrint = () => {
-  const row = getSelectedRow()
-  if (row) ElMessage.success(`正在打印订单 ${row.orderNo}`)
+  const rows = getPrintTargetRows(false)
+  if (rows.length === 0) return
+  printListRows(rows, '采购订单', false)
+  addOperationLog(String(rows[0].id), 'print', '系统管理员', '打印采购订单')
+  ElMessage.success(`正在打印订单 ${rows[0].orderNo}`)
+}
+
+const handlePrintCommand = (command: string) => {
+  if (command === 'printSettings') {
+    router.push('/system/print')
+    return
+  }
+  if (command === 'listPrint') {
+    const rows = selectedRows.value.length > 0 ? selectedRows.value : filteredData.value
+    if (rows.length === 0) {
+      ElMessage.warning('当前没有可打印的数据')
+      return
+    }
+    printListRows(rows, '采购订单列表', false)
+    ElMessage.success(`正在打印 ${rows.length} 条采购订单列表`)
+    return
+  }
+  if (command === 'exportExcel') {
+    const rows = getPrintTargetRows(false) as Record<string, unknown>[]
+    if (rows.length === 0) return
+    const orderNo = String(rows[0].orderNo || rows[0].id)
+    exportRowsToExcel(rows, `采购订单_${orderNo}.xlsx`)
+    ElMessage.success(`已导出订单 ${orderNo}`)
+    return
+  }
+  if (command === 'mergeExportExcel') {
+    if (!requireSelection()) return
+    const ids = selectedRows.value.map(row => String(row.orderNo || row.id)).join('_')
+    exportRowsToExcel(selectedRows.value, `采购订单合并_${ids.slice(0, 40)}.xlsx`)
+    ElMessage.success(`已合并导出 ${selectedRows.value.length} 条采购订单`)
+    return
+  }
+  if (command === 'printPreview') {
+    const rows = getPrintTargetRows(false)
+    if (rows.length === 0) return
+    printListRows(rows, '采购订单', true)
+    ElMessage.info(`打印预览：订单 ${rows[0].orderNo}`)
+    return
+  }
+  if (command === 'mergePrintPreview') {
+    if (!requireSelection()) return
+    printListRows(selectedRows.value, '采购订单（合并）', true)
+    ElMessage.info(`合并打印预览：${selectedRows.value.length} 条订单`)
+    return
+  }
+  if (command === 'mergePrint') {
+    if (!requireSelection()) return
+    printListRows(selectedRows.value, '采购订单（合并）', false)
+    ElMessage.success(`正在合并打印 ${selectedRows.value.length} 条采购订单`)
+  }
 }
 
 const handleAudit = () => {
@@ -462,6 +796,8 @@ const handleAudit = () => {
     type: 'warning'
   }).then(() => {
     const auditTime = formatLocalDateTime()
+    let collabSuccess = 0
+    let collabWarnings = 0
     targets.forEach(row => {
       persistOrderChanges(row.id, {
         auditStatus: 'audited',
@@ -471,18 +807,29 @@ const handleAudit = () => {
       })
       const stored = JSON.parse(localStorage.getItem('purchase-orders') || '[]')
       const fullOrder = stored.find((o: any) => o.id === row.id) || row
-      const link = onPurchaseOrderAudited(fullOrder)
-      if (link) {
+      const collab: PurchaseOrderAuditedCollabResult = onPurchaseOrderAudited(fullOrder)
+      if (collab.link) {
+        const refreshed = JSON.parse(localStorage.getItem('purchase-orders') || '[]')
+        const updated = refreshed.find((o: any) => o.id === row.id)
         persistOrderChanges(row.id, {
-          sendStatus: '已发单',
-          platformOrderNo: link.platformOrderNo,
-          sellerOrderId: link.sellerOrderId,
-          sellerOrderNo: link.sellerOrderNo
+          sendStatus: updated?.sendStatus,
+          receiveStatus: updated?.receiveStatus,
+          platformOrderNo: updated?.platformOrderNo ?? collab.link.platformOrderNo,
+          sellerOrderId: updated?.sellerOrderId ?? collab.link.sellerOrderId,
+          sellerOrderNo: updated?.sellerOrderNo ?? collab.link.sellerOrderNo
         })
       }
+      if (collab.mode === 'so_first' && !collab.link) collabWarnings += 1
+      else if (collab.link && collab.mode !== 'already_linked') collabSuccess += 1
       addOperationLog(row.id, 'audit', '系统管理员', '审核采购订单')
     })
-    ElMessage.success(`已成功审核 ${targets.length} 条订单`)
+    if (collabWarnings > 0) {
+      ElMessage.warning(`已审核 ${targets.length} 条，其中 ${collabWarnings} 条未找到对方销售订单`)
+    } else if (collabSuccess > 0) {
+      ElMessage.success(`已成功审核 ${targets.length} 条订单，${collabSuccess} 条已触发协同`)
+    } else {
+      ElMessage.success(`已成功审核 ${targets.length} 条订单`)
+    }
   }).catch(() => {})
 }
 
@@ -533,16 +880,36 @@ const handleAuditToggle = () => {
   }
 }
 
-const requireSelection = (multiple = true) => {
-  if (selectedRows.value.length === 0) {
-    ElMessage.warning(multiple ? '请至少选择一条采购订单' : '请先选择一条采购订单')
-    return false
+const purchaseOrderConfirmEnabled = computed(() => requiresConfirmBeforeAudit())
+
+const handleBatchConfirm = () => {
+  if (!requireSelection()) return
+  if (!hasPermission('purchase_confirm')) {
+    ElMessage.warning('无确定权限')
+    return
   }
-  if (!multiple && selectedRows.value.length > 1) {
-    ElMessage.warning('请只选择一条采购订单')
-    return false
+  const targets = selectedRows.value.filter(
+    row => normalizeConfirmStatus(row.confirmStatus) !== CONFIRM_STATUS_CONFIRMED
+  )
+  if (targets.length === 0) {
+    ElMessage.info('所选订单均已确定')
+    return
   }
-  return true
+  targets.forEach(row => {
+    persistOrderChanges(row.id, { confirmStatus: CONFIRM_STATUS_CONFIRMED })
+  })
+  ElMessage.success(`已确定 ${targets.length} 条采购订单`)
+}
+
+const handleModifyRequest = () => {
+  const row = getSelectedRow()
+  if (!row) return
+  if (row.auditStatus !== 'audited') {
+    ElMessage.warning('请先审核采购订单')
+    return
+  }
+  router.push(`/purchase/order-list/create/${row.id}`)
+  ElMessage.info('请在单据页提交「申请修改」')
 }
 
 const handleDelete = () => {
@@ -601,6 +968,70 @@ const handleClose = () => {
   }).catch(() => {})
 }
 
+const parseOrderAmount = (row: Record<string, unknown>) => {
+  const raw = String(row.amount || '0').replace(/[¥,]/g, '')
+  const n = Number.parseFloat(raw)
+  return Number.isFinite(n) ? n : 0
+}
+
+const resolvePrepayAmount = (row: Record<string, unknown>) => {
+  const orders = JSON.parse(localStorage.getItem('purchase-orders') || '[]') as Record<string, unknown>[]
+  const full = orders.find(o => String(o.id) === String(row.id)) || row
+  const prepaid = Number(full.prepaidDeposit) || 0
+  if (prepaid > 0) return prepaid
+  const depositRatio = Number(full.depositRatio) || 0
+  if (depositRatio > 0) {
+    const receivable = Number(full.receivableAmount) || parseOrderAmount(row)
+    return Number((receivable * depositRatio / 100).toFixed(2))
+  }
+  return parseOrderAmount(row)
+}
+
+const handlePrepay = () => {
+  if (!requireSelection(false)) return
+  const row = selectedRows.value[0]
+  if (row.auditStatus !== 'audited') {
+    ElMessage.warning('请先审核采购订单后再预付')
+    return
+  }
+  if (row.closeStatus === 'closed' || row.closeStatus === 'manualClosed') {
+    ElMessage.warning('已关闭的采购订单不能预付')
+    return
+  }
+  const orderNo = String(row.orderNo || row.id)
+  const amount = resolvePrepayAmount(row)
+  if (amount <= 0) {
+    ElMessage.warning('预付金额须大于 0')
+    return
+  }
+  persistOrderChanges(row.id, { prepaymentStatus: 'prepaidNotAudited' })
+  addOperationLog(row.id, 'prepay', '系统管理员', `发起预付款，金额 ${amount}`)
+  router.push({
+    path: '/fund/pre-payment',
+    query: {
+      partner: String(row.supplier || ''),
+      sourceOrderNo: orderNo,
+      amount: String(amount),
+      remark: `采购订单 ${orderNo} 预付款`
+    }
+  })
+}
+
+const handleMergeInbound = () => {
+  if (!requireSelection()) return
+  const unaudited = selectedRows.value.filter(row => row.auditStatus !== 'audited')
+  if (unaudited.length > 0) {
+    ElMessage.warning('请先审核所选采购订单后再合并入库')
+    return
+  }
+  const orderIds = selectedRows.value.map(row => String(row.id)).join(',')
+  router.push({
+    path: '/purchase/inbound',
+    query: { merge: '1', orderIds }
+  })
+  ElMessage.success(`正在合并 ${selectedRows.value.length} 条采购订单入库`)
+}
+
 const handleInbound = () => {
   if (!requireSelection(false)) return
   const row = selectedRows.value[0]
@@ -608,22 +1039,128 @@ const handleInbound = () => {
     ElMessage.warning('请先审核采购订单后再入库')
     return
   }
-  router.push({ path: '/purchase/inbound', query: { orderId: row.id } })
-}
-
-const handleBatchModify = () => {
-  if (!requireSelection()) return
-  ElMessage.info(`批量修改：已选择 ${selectedRows.value.length} 条采购订单`)
-}
-
-const handleToPurchaseInbound = () => {
-  if (!requireSelection(false)) return
-  const row = selectedRows.value[0]
-  if (row.auditStatus !== 'audited') {
-    ElMessage.warning('请先审核采购订单')
+  if (row.closeStatus === 'closed' || row.closeStatus === 'manualClosed') {
+    ElMessage.warning('已关闭的采购订单不能入库')
     return
   }
+  addOperationLog(row.id, 'inbound', '系统管理员', '生成采购入库单')
   router.push({ path: '/purchase/inbound', query: { orderId: row.id, from: 'purchaseOrder' } })
+}
+
+const handleAttachmentDownload = () => {
+  const row = getSelectedRow()
+  if (!row) return
+  const orders = JSON.parse(localStorage.getItem('purchase-orders') || '[]') as Record<string, unknown>[]
+  const full = orders.find(o => String(o.id) === String(row.id)) || row
+  const attachments = Array.isArray(full.attachments) ? full.attachments : []
+  const count = attachments.length || Number(full.attachmentCount) || 0
+  if (count <= 0) {
+    ElMessage.warning('该采购订单暂无附件')
+    return
+  }
+  attachments.forEach((item, index) => {
+    const file = item as Record<string, unknown>
+    const url = String(file.url || file.path || '')
+    const name = String(file.name || file.fileName || `附件${index + 1}`)
+    if (!url) return
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name
+    link.click()
+  })
+  addOperationLog(row.id, 'downloadAttachment', '系统管理员', `下载采购订单附件（${count} 个）`)
+  ElMessage.success(`已开始下载 ${count} 个附件`)
+}
+
+const handleBatchModifyCommand = (command: string) => {
+  if (!requireSelection()) return
+  const count = selectedRows.value.length
+  const labels: Record<string, string> = {
+    batchModify: '批量修改',
+    deliveryInfo: '修改交货信息',
+    docTag: '修改单据标签',
+    clearDocTag: '清空单据标签',
+    batchFee: '批录费用'
+  }
+  ElMessage.info(`${labels[command] || command}：已选择 ${count} 条采购订单`)
+}
+
+const handleUpdateCommand = (command: string) => {
+  if (!requireSelection()) return
+  const count = selectedRows.value.length
+  const labels: Record<string, string> = {
+    reprice: '重新取价',
+    extractStock: '提取库存',
+    updateBarcode: '更新条形码',
+    updateSupplierCode: '更新供应商商品编码'
+  }
+  ElMessage.info(`${labels[command] || command}：已选择 ${count} 条采购订单`)
+}
+
+const openLinkedSalesOrder = (row: Record<string, unknown>) => {
+  const salesOrderId = resolveLinkedSalesOrderId(row)
+  if (!salesOrderId) return false
+  const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]') as Record<string, unknown>[]
+  const so = orders.find(item =>
+    String(item.orderNo) === salesOrderId || String(item.id) === salesOrderId
+  )
+  if (so?.id) {
+    router.push(`/sales/order-list/create/${so.id}`)
+    return true
+  }
+  router.push(`/sales/order-list/create/${salesOrderId}`)
+  return true
+}
+
+const openLinkedPurchaseInbound = (row: Record<string, unknown>) => {
+  const inboundId = resolveLinkedInboundId(row)
+  if (!inboundId) return false
+  router.push({ path: '/purchase/inbound', query: { id: inboundId } })
+  return true
+}
+
+const handleViewLinkedSalesOrderNo = () => {
+  if (!requireSelection(false)) return
+  const row = selectedRows.value[0]
+  const orderNo = resolveLinkedSalesOrderNo(row)
+  if (!orderNo) {
+    ElMessage.warning('该采购订单未关联对方销售订单号')
+    return
+  }
+  ElMessageBox.confirm(
+    `对方销售订单号：${orderNo}`,
+    '查看对方销售订单号',
+    { confirmButtonText: '打开单据', cancelButtonText: '关闭', type: 'info' }
+  ).then(() => {
+    openLinkedSalesOrder(row)
+  }).catch(() => {})
+}
+
+const handleViewLinkedInboundNo = () => {
+  if (!requireSelection(false)) return
+  const row = selectedRows.value[0]
+  const inboundNo = resolveLinkedInboundNo(row)
+  if (!inboundNo) {
+    ElMessage.warning('该采购订单暂无关联的采购入库单号')
+    return
+  }
+  ElMessageBox.confirm(
+    `采购入库单号：${inboundNo}`,
+    '查看采购入库单号',
+    { confirmButtonText: '打开单据', cancelButtonText: '关闭', type: 'info' }
+  ).then(() => {
+    openLinkedPurchaseInbound(row)
+  }).catch(() => {})
+}
+
+const handleRelatedDocCommand = (command: string) => {
+  if (command === 'salesOrder') {
+    handleViewLinkedSalesOrderNo()
+    return
+  }
+  if (command === 'purchaseInbound') {
+    handleViewLinkedInboundNo()
+  }
 }
 
 const handleToSalesOrder = () => {
@@ -633,11 +1170,29 @@ const handleToSalesOrder = () => {
 }
 
 const handleExport = () => {
-  ElMessage.success(`已导出 ${filteredData.value.length} 条采购订单`)
+  const rows = selectedRows.value.length > 0 ? selectedRows.value : filteredData.value
+  if (rows.length === 0) {
+    ElMessage.warning('没有可导出的数据')
+    return
+  }
+  exportRowsToExcel(rows as Record<string, unknown>[], `采购订单_${Date.now()}.xlsx`)
+  ElMessage.success(`已导出 ${rows.length} 条采购订单`)
 }
 
-const handleFromRequest = () => {
-  ElMessage.info('从采购申请：可选择采购申请单生成采购订单')
+const handleMoreCommand = (command: string) => {
+  if (command === 'copy') {
+    handleCopy()
+    return
+  }
+  if (command === 'export') {
+    handleExport()
+    return
+  }
+  const map: Record<string, string> = {
+    template: '保存为模板',
+    import: '导入'
+  }
+  ElMessage.info(map[command] || '操作成功')
 }
 
 const handleCopy = () => {
@@ -654,20 +1209,10 @@ const handleOrderNoClick = (row: any) => {
   router.push(`/purchase/order-list/create/${row.id}`)
 }
 
-const handleSearch = () => {
-  currentPage.value = 1
-  saveSearchForm()
-  ElMessage.success(`共找到 ${filteredData.value.length} 条记录`)
-}
-
 const handleRefresh = () => {
   loadData()
   currentPage.value = 1
   ElMessage.success('数据已刷新')
-}
-
-const handleReset = () => {
-  resetSearchForm()
 }
 
 const handlePresetChange = (val: string) => {
@@ -689,12 +1234,12 @@ const loadSearchForm = () => {
       const parsed = JSON.parse(saved)
       Object.assign(searchForm.value, parsed)
       searchForm.value.auditStatus = migrateSavedFilter(parsed.auditStatus)
-      searchForm.value.confirmStatus = migrateSavedFilter(parsed.confirmStatus)
       searchForm.value.executeStatus = migrateSavedFilter(parsed.executeStatus)
       searchForm.value.warehouseStatus = migrateSavedFilter(parsed.warehouseStatus)
       searchForm.value.closeStatus = migrateSavedFilter(parsed.closeStatus)
       searchForm.value.prepaymentStatus = migrateSavedFilter(parsed.prepaymentStatus)
       searchForm.value.receiveStatus = migrateSavedFilter(parsed.receiveStatus ?? parsed.settleStatus)
+      searchForm.value.businessProcess = normalizeBusinessProcessFilter(parsed.businessProcess)
       if (parsed.dateRange?.length) {
         searchForm.value.dateRange = parsed.dateRange.map((d: string) => new Date(d))
       }
@@ -705,7 +1250,6 @@ const loadSearchForm = () => {
 
 watch(() => [
   searchForm.value.auditStatus,
-  searchForm.value.confirmStatus,
   searchForm.value.executeStatus,
   searchForm.value.warehouseStatus,
   searchForm.value.closeStatus,
@@ -721,7 +1265,6 @@ const resetSearchForm = () => {
     selectedPreset: 'thisMonth',
     dateRange: range,
     auditStatus: ALL_FILTER_VALUE,
-    confirmStatus: ALL_FILTER_VALUE,
     executeStatus: ALL_FILTER_VALUE,
     warehouseStatus: ALL_FILTER_VALUE,
     closeStatus: ALL_FILTER_VALUE,
@@ -732,8 +1275,13 @@ const resetSearchForm = () => {
   localStorage.removeItem('purchase-search-form')
 }
 
+const handleReset = () => {
+  resetSearchForm()
+  ElMessage.success('已重置筛选条件')
+}
+
 onMounted(() => {
-  document.title = '采购订单'
+  document.title = PAGE_TITLE
   const range = getDateRange('thisMonth')
   if (range) {
     searchForm.value.dateRange = range
@@ -749,6 +1297,12 @@ onMounted(() => {
 
 <template>
   <div class="page-container">
+    <div class="page-header">
+      <div class="page-info">
+        <h1>{{ PAGE_TITLE }}</h1>
+        <div class="breadcrumb">{{ PAGE_BREADCRUMB }}</div>
+      </div>
+    </div>
     <div class="search-card">
       <div class="search-row">
         <el-form :model="searchForm" inline class="search-form">
@@ -780,11 +1334,11 @@ onMounted(() => {
           </el-form-item>
         </el-form>
         <div class="button-group">
-          <el-button type="primary" class="btn-teal" @click="handleSearch">查询</el-button>
-          <el-button @click="handleRefresh">刷新</el-button>
-          <el-button type="primary" class="btn-teal" @click="handleReset">重置</el-button>
-          <el-button type="primary" class="btn-teal" @click="showAdvancedFilter = !showAdvancedFilter">
-            {{ showAdvancedFilter ? '隐藏筛选' : '显示筛选' }}
+          <el-button type="primary" class="btn-teal" @click="handleCreate">新增</el-button>
+          <el-button class="btn-refresh-light" @click="handleRefresh">刷新</el-button>
+          <el-button class="btn-refresh-light" @click="handleReset">重置</el-button>
+          <el-button class="btn-refresh-light" @click="showAdvancedFilter = !showAdvancedFilter">
+            {{ showAdvancedFilter ? '隐匿筛选' : '显示筛选' }}
           </el-button>
         </div>
       </div>
@@ -830,16 +1384,90 @@ onMounted(() => {
           {{ auditActionLabel }}
         </el-button>
         <el-button type="danger" link size="small" class="btn-delete-link" @click="handleDelete">删除</el-button>
+        <el-button
+          v-if="purchaseOrderConfirmEnabled"
+          type="primary"
+          link
+          size="small"
+          @click="handleBatchConfirm"
+        >确定</el-button>
+        <el-button type="primary" link size="small" class="btn-modify-link" @click="handleModifyRequest">申请修改</el-button>
         <el-button type="primary" link size="small" @click="handleEnable">启用</el-button>
         <el-button type="primary" link size="small" @click="handleClose">关闭</el-button>
+        <el-button type="primary" link size="small" @click="handlePrepay">预付</el-button>
         <el-button type="primary" link size="small" @click="handleInbound">入库</el-button>
-        <el-button type="primary" link size="small" @click="handleBatchModify">批量修改</el-button>
-        <el-button type="primary" link size="small" @click="handleToPurchaseInbound">转采购入库单</el-button>
-        <el-button type="primary" link size="small" @click="handleToSalesOrder">转销售订单</el-button>
+        <el-button type="primary" link size="small" @click="handleMergeInbound">合并入库</el-button>
+        <el-dropdown trigger="click" @command="handlePrintCommand">
+          <el-button type="primary" link size="small">
+            打印(含附件/列表)<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="printPreview">打印预览</el-dropdown-item>
+              <el-dropdown-item command="exportExcel">导出为Excel</el-dropdown-item>
+              <el-dropdown-item command="mergePrint">合并打印</el-dropdown-item>
+              <el-dropdown-item command="mergePrintPreview">合并打印预览</el-dropdown-item>
+              <el-dropdown-item command="mergeExportExcel">合并导出为Excel</el-dropdown-item>
+              <el-dropdown-item command="printSettings">打印设置</el-dropdown-item>
+              <el-dropdown-item command="listPrint">列表打印</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-dropdown trigger="click" @command="handleRelatedDocCommand">
+          <el-button type="primary" link size="small">
+            关联单据<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="salesOrder">查看对方销售订单号</el-dropdown-item>
+              <el-dropdown-item command="purchaseInbound">查看采购入库单号</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-dropdown trigger="click" @command="handleUpdateCommand">
+          <el-button type="primary" link size="small">
+            更新<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="reprice">重新取价</el-dropdown-item>
+              <el-dropdown-item command="extractStock">提取库存</el-dropdown-item>
+              <el-dropdown-item command="updateBarcode">更新条形码</el-dropdown-item>
+              <el-dropdown-item command="updateSupplierCode">更新供应商商品编码</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-dropdown trigger="click" @command="handleBatchModifyCommand">
+          <el-button type="primary" link size="small">
+            批量修改<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="batchModify">批量修改</el-dropdown-item>
+              <el-dropdown-item command="deliveryInfo">修改交货信息</el-dropdown-item>
+              <el-dropdown-item command="docTag">修改单据标签</el-dropdown-item>
+              <el-dropdown-item command="clearDocTag">清空单据标签</el-dropdown-item>
+              <el-dropdown-item command="batchFee">批录费用</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button type="primary" link size="small" @click="handleCopy">复制</el-button>
+        <el-button type="primary" link size="small" @click="handleExport">导出</el-button>
+        <el-dropdown trigger="click" @command="handleMoreCommand">
+          <el-button type="primary" link size="small">
+            更多<el-icon class="el-icon--right"><MoreFilled /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="copy">复制单据</el-dropdown-item>
+              <el-dropdown-item command="template">保存为模板</el-dropdown-item>
+              <el-dropdown-item command="export">导出</el-dropdown-item>
+              <el-dropdown-item command="import">导入</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button type="primary" link size="small" @click="handleAttachmentDownload">下载附件</el-button>
         <el-button type="primary" link size="small" @click="openColumnSettings">列表设置</el-button>
-      </div>
-      <div class="action-bar-extra">
-        <el-button type="primary" class="btn-teal" size="small" @click="handleCreate">新增采购订单</el-button>
       </div>
     </div>
 
@@ -867,13 +1495,21 @@ onMounted(() => {
           :align="col.align"
           :header-align="col.headerAlign || col.align || 'center'"
         >
+          <template v-if="col.sortable !== false" #header>
+            <DocumentSortHeader
+              :label="col.label"
+              :sort-icon="getSortIcon(col.key)"
+              :active="!!sortOrders[col.key]"
+              :align="col.headerAlign || col.align || 'center'"
+              @sort="onListColumnSort(col.key)"
+            />
+          </template>
           <template #default="{ row }">
             <span
               v-if="col.key === 'orderNo'"
               class="code-link"
               @click="handleOrderNoClick(row)"
             >{{ row.orderNo }}</span>
-            <span v-else-if="col.key === 'projectName'">{{ row.projectName || '—' }}</span>
             <span v-else-if="col.key === 'supplierPlatformCode'">{{ row.supplierPlatformCode || '—' }}</span>
             <el-tag
               v-else-if="col.key === 'auditStatus'"
@@ -881,13 +1517,6 @@ onMounted(() => {
               :type="row.auditStatus === 'audited' ? 'success' : 'info'"
             >
               {{ auditStatusLabels[row.auditStatus] }}
-            </el-tag>
-            <el-tag
-              v-else-if="col.key === 'confirmStatus'"
-              size="small"
-              :type="row.confirmStatus === CONFIRM_STATUS_CONFIRMED ? 'success' : 'warning'"
-            >
-              {{ confirmStatusLabels[row.confirmStatus] || CONFIRM_STATUS_UNCONFIRMED }}
             </el-tag>
             <el-tag
               v-else-if="col.key === 'executeStatus'"
@@ -979,6 +1608,28 @@ onMounted(() => {
   min-height: calc(100vh - 60px);
 }
 
+.page-header {
+  margin-bottom: 12px;
+
+  .page-info {
+    min-width: 0;
+
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #333;
+      margin: 0 0 6px;
+      line-height: 24px;
+    }
+
+    .breadcrumb {
+      font-size: 13px;
+      color: #667085;
+      line-height: 20px;
+    }
+  }
+}
+
 .btn-teal {
   --el-button-bg-color: #00bfa5;
   --el-button-border-color: #00bfa5;
@@ -986,6 +1637,18 @@ onMounted(() => {
   --el-button-hover-border-color: #00a896;
   --el-button-active-bg-color: #008f7a;
   --el-button-active-border-color: #008f7a;
+}
+
+.btn-refresh-light {
+  --el-button-bg-color: #fff;
+  --el-button-border-color: #e4e7ed;
+  --el-button-text-color: #909399;
+  --el-button-hover-bg-color: #fff;
+  --el-button-hover-border-color: #79bbff;
+  --el-button-hover-text-color: #79bbff;
+  --el-button-active-bg-color: #fff;
+  --el-button-active-border-color: #66b1ff;
+  --el-button-active-text-color: #66b1ff;
 }
 
 .search-card {
@@ -1142,6 +1805,15 @@ onMounted(() => {
       color: #f89898 !important;
     }
   }
+
+  .btn-modify-link {
+    color: #e6a23c !important;
+
+    &:hover,
+    &:focus {
+      color: #ebb563 !important;
+    }
+  }
 }
 
 .action-bar-extra {
@@ -1155,12 +1827,15 @@ onMounted(() => {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
+@import '@/styles/document-table-sort.scss';
+
 .header-empty-tip {
   padding: 40px 0;
   text-align: center;
   color: #909399;
   font-size: 14px;
 }
+
 
 .field-selector {
   max-height: 400px;

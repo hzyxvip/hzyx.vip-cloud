@@ -3,9 +3,9 @@ import { ElMessage } from 'element-plus'
 import {
   CONFIRM_STATUS_CONFIRMED,
   CONFIRM_STATUS_UNCONFIRMED,
-  type DocumentFunctionKey,
-  isDocumentConfirmEnabled
+  type DocumentFunctionKey
 } from '@/utils/documentFunctionSettings'
+import { requiresConfirmBeforeAudit } from '@/utils/auditSystemSettings'
 import { hasPermission } from '@/utils/userPermission'
 
 export function useDocumentConfirm(
@@ -18,7 +18,7 @@ export function useDocumentConfirm(
     permissionCode?: string
   }
 ) {
-  const confirmEnabled = computed(() => isDocumentConfirmEnabled(documentKey))
+  const confirmEnabled = computed(() => requiresConfirmBeforeAudit())
 
   const canConfirm = computed(() => {
     if (!confirmEnabled.value) return false

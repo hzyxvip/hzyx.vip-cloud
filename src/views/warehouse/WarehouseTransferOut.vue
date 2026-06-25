@@ -2,7 +2,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
+import { activeWarehouseOptions, hydrateWarehouseOptionsFromServer } from '@/utils/warehouseSettings'
 
 const router = useRouter()
 
@@ -196,7 +196,7 @@ const handleCancel = () => {
 }
 
 onMounted(() => {
-  refreshWarehouseOptions()
+  void hydrateWarehouseOptionsFromServer()
   form.documentNo = `TROUT${Date.now()}`
 })
 </script>

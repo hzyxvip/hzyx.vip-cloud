@@ -239,7 +239,10 @@ const handleSave = () => {
   }
 
   const record = buildSupplierRecord()
-  upsertSupplier(record)
+  if (!upsertSupplier(record)) {
+    ElMessage.warning('不能将本企业录入为供应商')
+    return
+  }
   try {
     syncSupplierToPlatformCustomer(record)
   } catch (error) {

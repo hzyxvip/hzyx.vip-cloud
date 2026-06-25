@@ -200,8 +200,6 @@ export const userApi = {
 
 export type ApiProduct = Record<string, unknown>
 
-export type ApiCustomer = Record<string, unknown>
-
 export const customerApi = {
   getAll: async (options?: { background?: boolean }) => {
     const res = await request<{ success: boolean; data: ApiCustomer[] }>('/customers', {
@@ -220,6 +218,62 @@ export const customerApi = {
   delete: (id: number) =>
     request<{ success: boolean; message: string }>(`/customers/${id}`, {
       method: 'DELETE'
+    })
+}
+
+export type ApiSupplier = Record<string, unknown>
+
+export const supplierApi = {
+  getAll: async (options?: { background?: boolean }) => {
+    const res = await request<{ success: boolean; data: ApiSupplier[] }>('/suppliers', {
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 8000 : 30000
+    })
+    return Array.isArray(res?.data) ? res.data : []
+  },
+  sync: (items: ApiSupplier[], options?: { replace?: boolean; background?: boolean }) =>
+    request<{ success: boolean; data: ApiSupplier[]; message?: string }>('/suppliers/sync', {
+      method: 'POST',
+      body: JSON.stringify({ items, replace: options?.replace === true }),
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 60000 : 120000
+    }),
+  delete: (id: number) =>
+    request<{ success: boolean; message: string }>(`/suppliers/${id}`, {
+      method: 'DELETE'
+    })
+}
+
+export type ApiOrder = Record<string, unknown>
+
+export const orderApi = {
+  getPurchase: async (options?: { background?: boolean }) => {
+    const res = await request<{ success: boolean; data: ApiOrder[] }>('/orders/purchase', {
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 8000 : 30000
+    })
+    return Array.isArray(res?.data) ? res.data : []
+  },
+  getSales: async (options?: { background?: boolean }) => {
+    const res = await request<{ success: boolean; data: ApiOrder[] }>('/orders/sales', {
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 8000 : 30000
+    })
+    return Array.isArray(res?.data) ? res.data : []
+  },
+  syncPurchase: (items: ApiOrder[], options?: { replace?: boolean; background?: boolean }) =>
+    request<{ success: boolean; data: ApiOrder[]; message?: string }>('/orders/purchase/sync', {
+      method: 'POST',
+      body: JSON.stringify({ items, replace: options?.replace === true }),
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 60000 : 120000
+    }),
+  syncSales: (items: ApiOrder[], options?: { replace?: boolean; background?: boolean }) =>
+    request<{ success: boolean; data: ApiOrder[]; message?: string }>('/orders/sales/sync', {
+      method: 'POST',
+      body: JSON.stringify({ items, replace: options?.replace === true }),
+      skipAuthRedirect: options?.background === true,
+      timeoutMs: options?.background ? 60000 : 120000
     })
 }
 

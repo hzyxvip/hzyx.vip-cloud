@@ -3,7 +3,17 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search, Refresh, Wallet, DataAnalysis, Money } from '@element-plus/icons-vue'
 import { useTableStyle } from '@/composables/useTableStyle'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  ensureFundSeedData,
+  auditFundDocument,
+  deleteFundDocument,
+  listFundDocuments,
+  toFundListRow,
+  fundAuditStatusLabels,
+  fundVerifyStatusLabels,
+  fundSettlementTypeLabels
+} from '@/utils/fundStore'
 
 const router = useRouter()
 
@@ -104,22 +114,21 @@ const searchForm = ref({
 
 // 初始化默认时间段（当月）
 onMounted(() => {
-  // 设置文档名称
   document.title = '资金管理'
+  ensureFundSeedData()
+  reloadTableData()
 
   const range = getDateRange('thisMonth')
   if (range) {
     searchForm.value.dateRange = range
   }
   
-  // 尝试从 localStorage 加载保存的搜索条件
   const savedForm = localStorage.getItem('fund-list-search-form')
   if (savedForm) {
     try {
       const parsed = JSON.parse(savedForm)
       Object.assign(searchForm.value, parsed)
       
-      // 将字符串日期转换为 Date 对象
       if (parsed.dateRange && Array.isArray(parsed.dateRange)) {
         searchForm.value.dateRange = parsed.dateRange.map((d: string) => new Date(d))
       } else {
@@ -156,147 +165,23 @@ watch(() => [searchForm.value.fundType, searchForm.value.auditStatus, searchForm
   saveSearchForm()
 }, { deep: true })
 
-const tableData = ref([
-  { 
-    id: 'RC202606001', 
-    type: 'receipt',
-    typeName: '收款',
-    customer: '北京协和医院', 
-    account: '工行北京分行',
-    date: '2026-06-15', 
-    amount: '¥28,800',
-    verifiedAmount: '¥20,000',
-    unverifiedAmount: '¥8,800',
-    auditStatus: 'audited',
-    verifyStatus: 'partiallyVerified',
-    settlementType: 'bank',
-    creator: '张三',
-    auditor: '李四',
-    remark: '医疗器械采购款'
-  },
-  { 
-    id: 'RC202606002', 
-    type: 'receipt',
-    typeName: '收款',
-    customer: '上海华山医院', 
-    account: '建行上海支行',
-    date: '2026-06-14', 
-    amount: '¥45,600',
-    verifiedAmount: '¥45,600',
-    unverifiedAmount: '¥0',
-    auditStatus: 'audited',
-    verifyStatus: 'verified',
-    settlementType: 'bank',
-    creator: '张三',
-    auditor: '李四',
-    remark: '设备维护费'
-  },
-  { 
-    id: 'PD202606001', 
-    type: 'payment',
-    typeName: '付款',
-    customer: '深圳医疗器械有限公司', 
-    account: '招行深圳分行',
-    date: '2026-06-13', 
-    amount: '¥35,000',
-    verifiedAmount: '¥35,000',
-    unverifiedAmount: '¥0',
-    auditStatus: 'audited',
-    verifyStatus: 'verified',
-    settlementType: 'bank',
-    creator: '王五',
-    auditor: '赵六',
-    remark: '采购货款'
-  },
-  { 
-    id: 'PR202606001', 
-    type: 'preReceipt',
-    typeName: '预收款',
-    customer: '广州中山医院', 
-    account: '工行广州分行',
-    date: '2026-06-12', 
-    amount: '¥50,000',
-    verifiedAmount: '¥0',
-    unverifiedAmount: '¥50,000',
-    auditStatus: 'notAudited',
-    verifyStatus: 'notVerified',
-    settlementType: 'bank',
-    creator: '张三',
-    auditor: '',
-    remark: '预收货款'
-  },
-  { 
-    id: 'PP202606001', 
-    type: 'prePayment',
-    typeName: '预付款',
-    customer: '杭州医疗设备厂', 
-    account: '农行杭州分行',
-    date: '2026-06-11', 
-    amount: '¥20,000',
-    verifiedAmount: '¥0',
-    unverifiedAmount: '¥20,000',
-    auditStatus: 'audited',
-    verifyStatus: 'notVerified',
-    settlementType: 'bank',
-    creator: '王五',
-    auditor: '赵六',
-    remark: '预付设备款'
-  },
-  { 
-    id: 'OI202606001', 
-    type: 'otherIncome',
-    typeName: '其他收入',
-    customer: '其他', 
-    account: '现金',
-    date: '2026-06-10', 
-    amount: '¥1,500',
-    verifiedAmount: '¥1,500',
-    unverifiedAmount: '¥0',
-    auditStatus: 'audited',
-    verifyStatus: 'verified',
-    settlementType: 'cash',
-    creator: '张三',
-    auditor: '李四',
-    remark: '利息收入'
-  },
-  { 
-    id: 'OE202606001', 
-    type: 'otherExpense',
-    typeName: '其他支出',
-    customer: '其他', 
-    account: '现金',
-    date: '2026-06-09', 
-    amount: '¥800',
-    verifiedAmount: '¥800',
-    unverifiedAmount: '¥0',
-    auditStatus: 'audited',
-    verifyStatus: 'verified',
-    settlementType: 'cash',
-    creator: '王五',
-    auditor: '赵六',
-    remark: '办公费用'
-  }
-])
+const tableData = ref<any[]>([])
 
-// 状态显示标签映射
-const auditStatusLabels: Record<string, string> = {
-  notAudited: '未审核',
-  audited: '已审核'
+const reloadTableData = () => {
+  tableData.value = listFundDocuments().map(toFundListRow)
 }
 
-const verifyStatusLabels: Record<string, string> = {
-  notVerified: '未核销',
-  partiallyVerified: '部分核销',
-  verified: '已核销'
-}
+const pageSize = ref(20)
+const currentPage = ref(1)
 
-const settlementTypeLabels: Record<string, string> = {
-  cash: '现金',
-  bank: '银行转账',
-  check: '支票',
-  draft: '汇票',
-  thirdParty: '第三方支付'
-}
+const pagedData = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredData.value.slice(start, start + pageSize.value)
+})
+
+const auditStatusLabels = fundAuditStatusLabels
+const verifyStatusLabels = fundVerifyStatusLabels
+const settlementTypeLabels = fundSettlementTypeLabels
 
 const fundTypeLabels: Record<string, string> = {
   receipt: '收款',
@@ -321,7 +206,7 @@ const { columnWidths, handleHeaderDragend } = useTableStyle('fund-list', [
   { key: 'settlementType', label: '结算方式', defaultWidth: 100 },
   { key: 'creator', label: '制单人', defaultWidth: 100 },
   { key: 'auditor', label: '审核人', defaultWidth: 100 },
-  { key: 'action', label: '操作', defaultWidth: 180 }
+  { key: 'action', label: '操作', defaultWidth: 260 }
 ])
 
 // 全选处理
@@ -455,6 +340,49 @@ const handleEdit = (row: any) => {
 }
 
 const handleDelete = (id: string) => {
+  ElMessageBox.confirm('确定删除该资金单据吗？', '删除确认', {
+    type: 'warning',
+    confirmButtonText: '确定',
+    cancelButtonText: '取消'
+  }).then(() => {
+    if (deleteFundDocument(id)) {
+      reloadTableData()
+      ElMessage.success('已删除')
+    } else {
+      ElMessage.warning('已审核单据不可删除')
+    }
+  }).catch(() => {})
+}
+
+const handleAudit = (row: { id: string; auditStatus: string }) => {
+  if (row.auditStatus === 'audited') {
+    ElMessage.info('该单据已审核')
+    return
+  }
+  ElMessageBox.confirm(`确定审核单据 ${row.id} 吗？审核后将回写订单收付款状态。`, '审核确认', {
+    type: 'warning',
+    confirmButtonText: '审核',
+    cancelButtonText: '取消'
+  }).then(() => {
+    const doc = auditFundDocument(row.id)
+    if (doc) {
+      reloadTableData()
+      ElMessage.success('审核成功')
+    } else {
+      ElMessage.error('审核失败')
+    }
+  }).catch(() => {})
+}
+
+const handleVerify = (row: { id: string; type: string; unverifiedAmount: number }) => {
+  if (row.unverifiedAmount <= 0) {
+    ElMessage.info('该单据已全部核销')
+    return
+  }
+  const path = row.type === 'payment' || row.type === 'prePayment'
+    ? '/fund/payment-collection'
+    : '/fund/receipt-collection'
+  router.push({ path, query: { docId: row.id } })
 }
 
 const handleRowDoubleClick = (row: any) => {
@@ -488,12 +416,18 @@ const handleReset = () => {
 }
 
 const handleRefresh = () => {
-  handleReset()
+  reloadTableData()
   ElMessage.success('数据已刷新')
 }
 
-const handleSizeChange = () => {}
-const handleCurrentChange = () => {}
+const handleSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+}
+
+const handleCurrentChange = (page: number) => {
+  currentPage.value = page
+}
 </script>
 
 <template>
@@ -630,7 +564,7 @@ const handleCurrentChange = () => {}
     </div>
 
     <div class="table-card">
-      <el-table :data="filteredData" class="common-table" border :fit="true" @row-dblclick="handleRowDoubleClick" @header-dragend="handleHeaderDragend">
+      <el-table :data="pagedData" class="common-table" border :fit="true" @row-dblclick="handleRowDoubleClick" @header-dragend="handleHeaderDragend">
         <el-table-column prop="id" label="单据号" :width="columnWidths.id">
           <template #default="{ row }">
             <span class="code-link" @click="handleOrderNoClick(row)">
@@ -687,6 +621,18 @@ const handleCurrentChange = () => {}
           <template #default="{ row }">
             <el-button type="text" size="small" @click="handleView(row)">查看</el-button>
             <el-button type="text" size="small" @click="handleEdit(row)">编辑</el-button>
+            <el-button
+              type="text"
+              size="small"
+              @click="handleAudit(row)"
+              :disabled="row.auditStatus === 'audited'"
+            >审核</el-button>
+            <el-button
+              type="text"
+              size="small"
+              @click="handleVerify(row)"
+              :disabled="row.verifyStatus === 'verified' || row.auditStatus !== 'audited'"
+            >核销</el-button>
             <el-button type="text" size="small" @click="handleDelete(row.id)" :disabled="row.auditStatus === 'audited'">删除</el-button>
           </template>
         </el-table-column>
@@ -697,9 +643,9 @@ const handleCurrentChange = () => {}
         <el-pagination
           @size-change="handleSizeChange"
           @current-change="handleCurrentChange"
-          :current-page="1"
+          :current-page="currentPage"
           :page-sizes="[10, 20, 50, 100]"
-          :page-size="10"
+          :page-size="pageSize"
           layout="total, sizes, prev, pager, next, jumper"
           :total="filteredData.length"
         />

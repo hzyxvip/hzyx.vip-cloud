@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import ReportBarChart from '@/components/ReportBarChart.vue'
 
 const router = useRouter()
 
@@ -18,6 +19,11 @@ const summaryData = ref({
 const supplierSummary = ref<any[]>([])
 const monthlySummary = ref<any[]>([])
 
+const chartLabels = computed(() => supplierSummary.value.slice(0, 8).map(r => r.supplier))
+const chartValues = computed(() =>
+  supplierSummary.value.slice(0, 8).map(r => parseFloat(String(r.amount).replace(/[¥,]/g, '')) || 0)
+)
+
 onMounted(() => {
   // 设置默认月份为当前月
   const now = new Date()
@@ -27,8 +33,11 @@ onMounted(() => {
 })
 
 const loadSummaryData = () => {
-  // 从localStorage读取采购订单数据
-  const orders = JSON.parse(localStorage.getItem('purchase-orders') || '[]')
+  const allOrders = JSON.parse(localStorage.getItem('purchase-orders') || '[]')
+  const month = selectedMonth.value
+  const orders = month
+    ? allOrders.filter((o: { date?: string }) => String(o.date || '').slice(0, 7) === month)
+    : allOrders
   
   // 计算汇总数据
   const totalAmount = orders.reduce((sum: number, order: any) => {
@@ -152,6 +161,20 @@ const handleViewRecord = () => {
       </div>
     </div>
     
+    <div class="table-card chart-card">
+      <div class="card-header">
+        <h3>供应商采购分布</h3>
+        <span class="card-desc">Top 供应商采购金额</span>
+      </div>
+      <ReportBarChart
+        v-if="chartLabels.length"
+        :labels="chartLabels"
+        :values="chartValues"
+        color="#00bfa5"
+      />
+      <el-empty v-else description="暂无采购数据" />
+    </div>
+
     <!-- 按供应商汇总 -->
     <div class="table-card">
       <div class="card-header">
@@ -216,7 +239,7 @@ const handleViewRecord = () => {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 16px;
   margin-bottom: 20px;
 }
@@ -288,16 +311,24 @@ const handleViewRecord = () => {
       text-align: center !important;
     }
   }
-  :deep(.el-table__row:nth-child(odd)) {
-    background-color: #F0F9F7;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+@media (max-width: 768px) {
+  .page-container {
+    padding: 12px;
   }
-  
-  :deep(.el-table__row:nth-child(even)) {
-    background-color: #FFFFFF;
+
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
   }
-  
-  :deep(.el-table__body tr:hover > td) {
-    background-color: #D4EDE6 !important;
+
+  .header-actions {
+    flex-wrap: wrap;
   }
 }
 

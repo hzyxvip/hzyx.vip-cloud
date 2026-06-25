@@ -47,6 +47,7 @@ let sortable: Sortable | null = null
 const previewList = ref<string[]>([])
 const previewVisible = ref(false)
 const previewLoading = ref(false)
+const uploadingDocKey = ref('')
 
 const quotaDocuments = computed(() => props.allDocuments || props.documents)
 
@@ -87,9 +88,14 @@ function loadImageElement(src: string): Promise<void> {
 const handleImageChange = async (uploadFile: UploadFile, doc: PartnerDocument) => {
   const raw = uploadFile.raw
   if (!raw) return
+  if (uploadingDocKey.value) {
+    ElMessage.warning('正在处理上一张图片，请稍候')
+    return
+  }
   if (!(await validateLicenseImageFile(raw))) return
   if (!(await validateCompanyLicenseImageQuota(quotaDocuments.value, raw, doc.docKey))) return
 
+  uploadingDocKey.value = doc.docKey || doc.id || 'upload'
   try {
     const result = await processLicenseImageUpload(raw)
     applyLicenseImageUpload(doc, result)
@@ -99,8 +105,11 @@ const handleImageChange = async (uploadFile: UploadFile, doc: PartnerDocument) =
     }
     img.src = result.originalUrl
     ElMessage.success(`上传成功（列表缩略图 ${Math.round(result.thumbnailSize / 1024)}KB）`)
-  } catch {
-    ElMessage.error('图片处理失败，请重试')
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '图片处理失败，请重试'
+    ElMessage.error(message)
+  } finally {
+    uploadingDocKey.value = ''
   }
 }
 
@@ -282,9 +291,18 @@ onBeforeUnmount(() => destroySortable())
               :show-file-list="false"
               accept="image/*"
               :auto-upload="false"
+              :disabled="Boolean(uploadingDocKey)"
               :on-change="file => handleImageChange(file, doc)"
             >
-              <el-button class="license-action-btn license-action-btn--sky" type="primary" plain size="small">{{ hasLicenseUploadedImage(doc) ? '更换' : '上传' }}</el-button>
+              <el-button
+                class="license-action-btn license-action-btn--sky"
+                type="primary"
+                plain
+                size="small"
+                :loading="uploadingDocKey === (doc.docKey || doc.id)"
+              >
+                {{ uploadingDocKey === (doc.docKey || doc.id) ? '处理中' : (hasLicenseUploadedImage(doc) ? '更换' : '上传') }}
+              </el-button>
             </el-upload>
             <el-button
               v-if="hasLicenseUploadedImage(doc)"

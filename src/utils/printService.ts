@@ -3,6 +3,7 @@ import 'vue-plugin-hiprint/dist/print-lock.css'
 import { digitUppercase } from './currency'
 import { getCompanyInfo } from './companyConfig'
 import { loadPrintSettings } from './printSettings'
+import { loadCustomTemplateBody } from './printTemplateSettings'
 import { printSalesOutboundList } from './salesOutboundListPrint'
 
 export interface PrintTemplate {
@@ -139,7 +140,19 @@ export const registerTemplate = (template: PrintTemplate) => {
 }
 
 export const getTemplate = (templateId: string): PrintTemplate | undefined => {
-  return templates.find(t => t.templateId === templateId)
+  const builtin = templates.find(t => t.templateId === templateId)
+  const customBody = loadCustomTemplateBody(templateId)
+  if (customBody && builtin) {
+    return { ...builtin, template: customBody }
+  }
+  if (customBody) {
+    return {
+      templateId,
+      templateName: builtin?.templateName || templateId,
+      template: customBody
+    }
+  }
+  return builtin
 }
 
 export const createSalesOutboundTemplate = (): PrintTemplate => {
@@ -1515,6 +1528,43 @@ export const createSalesOrderTemplate = (): PrintTemplate => {
   }
 }
 
+export const BUILTIN_PRINT_TEMPLATES = [
+  { id: 'salesOutbound', name: '销售出库单', factory: createSalesOutboundTemplate },
+  { id: 'salesReturn', name: '销售退货单', factory: createSalesReturnTemplate },
+  { id: 'purchaseInbound', name: '采购入库单', factory: createPurchaseInboundTemplate },
+  { id: 'purchaseReturn', name: '采购退货单', factory: createPurchaseReturnTemplate },
+  { id: 'salesOrder', name: '销售订单', factory: createSalesOrderTemplate }
+] as const
+
+export type BuiltinPrintTemplateId = (typeof BUILTIN_PRINT_TEMPLATES)[number]['id']
+
+export function getDefaultPrintTemplate(templateId: string): PrintTemplate | undefined {
+  return BUILTIN_PRINT_TEMPLATES.find(item => item.id === templateId)?.factory()
+}
+
+export function getEffectivePrintTemplate(templateId: string): PrintTemplate | undefined {
+  return getTemplate(templateId)
+}
+
+export function getDefaultTemplateJson(templateId: string, pretty = true): string {
+  const body = getDefaultPrintTemplate(templateId)?.template
+  return JSON.stringify(body ?? null, null, pretty ? 2 : 0)
+}
+
+export function applyCustomPrintTemplate(templateId: string, templateBody: unknown) {
+  const def = getDefaultPrintTemplate(templateId)
+  registerTemplate({
+    templateId,
+    templateName: def?.templateName || templateId,
+    template: templateBody
+  })
+}
+
+export function resetPrintTemplateToDefault(templateId: string) {
+  const def = getDefaultPrintTemplate(templateId)
+  if (def) registerTemplate(def)
+}
+
 export const printSalesOutbound = (data: SalesOutboundData, previewMode = false) => {
   prepareSalesOutboundPrintData(data)
   const settings = loadPrintSettings()
@@ -1585,7 +1635,15 @@ export const print = (templateId: string, data: any) => {
     data: data
   })
 
-  hiprintTemplate.print()
+  const copies = Math.max(1, printSettings.defaultCopies || 1)
+  const printOptions: Record<string, unknown> = {}
+  if (printSettings.printerName) {
+    printOptions.printer = printSettings.printerName
+  }
+
+  for (let i = 0; i < copies; i++) {
+    hiprintTemplate.print(printOptions)
+  }
 }
 
 export const preview = (templateId: string, data: any) => {

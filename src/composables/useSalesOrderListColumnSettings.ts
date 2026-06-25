@@ -8,13 +8,15 @@ export type SalesOrderListColumnDef = {
   align?: 'left' | 'center' | 'right'
   headerAlign?: 'left' | 'center' | 'right'
   required?: boolean
+  /** 表头点击排序，默认 true */
+  sortable?: boolean
 }
 
 export const SALES_ORDER_LIST_COLUMN_DEFINITIONS: SalesOrderListColumnDef[] = [
   { key: 'orderNo', label: '订单号', required: true },
   { key: 'externalNo', label: '外部单号', prop: 'externalNo' },
   { key: 'customer', label: '客户', prop: 'customer' },
-  { key: 'customerPlatformCode', label: '客户医享平台编号', prop: 'customerPlatformCode' },
+  { key: 'customerPlatformCode', label: '医享平台编号', prop: 'customerPlatformCode' },
   { key: 'warehouse', label: '仓库', prop: 'warehouse' },
   { key: 'date', label: '下单日期', prop: 'date' },
   { key: 'itemCount', label: '商品种类', prop: 'itemCount', align: 'center', headerAlign: 'center' },
@@ -22,10 +24,12 @@ export const SALES_ORDER_LIST_COLUMN_DEFINITIONS: SalesOrderListColumnDef[] = [
   { key: 'auditStatus', label: '审核状态', align: 'center', headerAlign: 'center' },
   { key: 'confirmStatus', label: '确定状态', align: 'center', headerAlign: 'center' },
   { key: 'executeStatus', label: '执行状态', align: 'center', headerAlign: 'center' },
-  { key: 'warehouseStatus', label: '出库状态', align: 'center', headerAlign: 'center' },
   { key: 'closeStatus', label: '关闭状态', align: 'center', headerAlign: 'center' },
   { key: 'prepaymentStatus', label: '预收单据', align: 'center', headerAlign: 'center' },
   { key: 'receiveStatus', label: '接单状态', align: 'center', headerAlign: 'center' },
+  { key: 'creator', label: '制单人', prop: 'creator' },
+  { key: 'salesman', label: '业务员', prop: 'salesman' },
+  { key: 'auditor', label: '审核人', prop: 'auditor' },
   { key: 'status', label: '状态', align: 'center', headerAlign: 'center' }
 ]
 
@@ -35,7 +39,10 @@ export const DEFAULT_SALES_ORDER_LIST_COLUMN_KEYS =
 const NEW_LIST_COLUMNS: { key: string; after?: string }[] = [
   { key: 'externalNo', after: 'orderNo' },
   { key: 'customerPlatformCode', after: 'customer' },
-  { key: 'confirmStatus', after: 'auditStatus' }
+  { key: 'confirmStatus', after: 'auditStatus' },
+  { key: 'creator', after: 'receiveStatus' },
+  { key: 'salesman', after: 'creator' },
+  { key: 'auditor', after: 'salesman' }
 ]
 
 function insertColumnKey(keys: string[], key: string, after?: string) {

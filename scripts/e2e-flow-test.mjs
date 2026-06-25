@@ -143,7 +143,6 @@ const so = {
   itemCount: 1,
   auditStatus: 'notAudited',
   executeStatus: 'notExecuted',
-  warehouseStatus: 'notOutWarehoused',
   closeStatus: 'notClosed',
   status: 'pending',
   detailItems: [
@@ -185,7 +184,7 @@ const outbound = {
   status: 'normal'
 }
 store['sales-outbound-records'].unshift(outbound)
-so.warehouseStatus = 'allOutWarehoused'
+so.executeStatus = 'allExecuted'
 outbound.auditStatus = 'audited'
 outbound.signStatus = 'signed'
 outbound.logisticsStatus = 'delivered'

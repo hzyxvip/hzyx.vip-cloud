@@ -11,6 +11,7 @@ import {
   syncPartnerDocumentStatus
 } from '@/utils/partnerLicenseDocuments'
 import { buildPlatformCustomerFromForm, platformCustomerToForm } from '@/utils/platformCustomerFormService'
+import { getAuthUser } from '@/utils/authSession'
 import {
   getPlatformCustomerFormPath,
   loadPlatformCustomerDraft,
@@ -40,8 +41,8 @@ const companyType = ref('')
 const documents = ref<PlatformCustomerDocument[]>(createDefaultPartnerDocuments())
 
 const getOperator = () => {
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
-  return user.realName || user.username || '平台管理员'
+  const user = getAuthUser<Record<string, unknown>>()
+  return user ? String(user.realName || user.username || '平台管理员') : '平台管理员'
 }
 
 const loadData = () => {

@@ -9,7 +9,7 @@ import {
   warehouseInStatusOptions,
   formatStatus
 } from '@/utils/statusManager'
-import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
+import { activeWarehouseOptions, hydrateWarehouseOptionsFromServer } from '@/utils/warehouseSettings'
 import { print, preview, type SalesReturnData, type ProductItem } from '@/utils/printService'
 import { getCompanyInfo } from '@/utils/companyConfig'
 
@@ -18,7 +18,7 @@ const router = useRouter()
 const warehouseOptions = activeWarehouseOptions
 
 onMounted(() => {
-  refreshWarehouseOptions()
+  void hydrateWarehouseOptionsFromServer()
 })
 
 interface OrderItem {

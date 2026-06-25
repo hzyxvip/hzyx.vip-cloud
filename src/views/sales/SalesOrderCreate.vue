@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, type Ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { print, preview } from '@/utils/printService'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -7,13 +7,13 @@ import type { TableInstance } from 'element-plus'
 import { useTableStyle } from '@/composables/useTableStyle'
 import {
   ArrowLeft, ArrowRight, DArrowLeft, DArrowRight,
-  MoreFilled, Plus, Minus, CopyDocument, Setting
+  MoreFilled, Plus, Minus, CopyDocument, Setting, QuestionFilled, Coin
 } from '@element-plus/icons-vue'
-import { loadProductList, findProductsByCompositeQuery, type ProductMaster } from '@/utils/productStore'
+import { loadProductList, findProductByCode, findProductsByCompositeQuery, findProductByCompositeQuery, getProductLastPrice, toBatchProductRow, type ProductMaster } from '@/utils/productStore'
 import {
-  searchPlatformProducts,
   applyPlatformProductToSalesItem,
   findPlatformProductByCode,
+  getPlatformProductsForSales,
   type PlatformProduct
 } from '@/utils/platformProductStore'
 import {
@@ -23,17 +23,25 @@ import {
 import {
   hydrateCustomerListFromServer,
   loadActiveCustomerList,
+  resolveCustomerMaster,
+  getCurrentUserName,
   type CustomerMaster
 } from '@/utils/customerStore'
 import { onSalesOrderAudited, backfillSalesOrderExternalNos, resolveSalesOrderExternalNo } from '@/utils/platformCollaborationService'
 import { useDocumentConfirm } from '@/composables/useDocumentConfirm'
+import { useOrderDocumentNav } from '@/composables/useOrderDocumentNav'
 import { CONFIRM_STATUS_CONFIRMED, CONFIRM_STATUS_UNCONFIRMED, normalizeConfirmStatus } from '@/utils/documentFunctionSettings'
 import { generateDocumentNo } from '@/utils/documentNumberSettings'
+import {
+  loadSalesOrderNavIds,
+  mergeSalesOrderListRows
+} from '@/utils/salesOrderListData'
 import {
   arrowKeyToDirection,
   findFieldKeyFromElement,
   focusCellControl,
   focusFieldByKey,
+  focusItemDateCell,
   handleFormGridSelectKeyboard,
   handleItemSelectKeyboard,
   isDatePickerPanelOpen,
@@ -48,23 +56,32 @@ import {
 import {
   loadBatchNoFormat,
   applyProductionDateToItemRow,
-  calcProductExpiryDate,
   resolveProductForRow,
-  clearRowBatchNoFormat,
-  hasConfirmedBatchNoFormat,
-  markBatchNoManual,
-  markExpiryManual,
-  getDefaultBatchFormatFocusKey
 } from '@/utils/productBatchExpiry'
+import {
+  useDocumentItemBatchNo,
+  isBatchNoFormatTarget,
+  isBatchNoInputTarget,
+} from '@/composables/useDocumentItemBatchNo'
 import BatchNoCellKeyboard from '@/components/purchase/BatchNoCellKeyboard.vue'
+import { useDocumentItemTableSort } from '@/composables/useDocumentItemTableSort'
+import DocumentSortHeader from '@/components/common/DocumentSortHeader.vue'
+import ProductBatchSelectDialog from '@/components/common/ProductBatchSelectDialog.vue'
 import {
   activeWarehouseOptions,
   getDefaultWarehouseValue,
-  refreshWarehouseOptions,
   resolveWarehouseLabel,
-  shouldSkipWarehouseField
+  shouldSkipWarehouseField,
+  hydrateWarehouseOptionsFromServer,
 } from '@/utils/warehouseSettings'
-import { loadWarehousesFromApi } from '@/utils/dataStore'
+import { getCurrentCompanyId } from '@/utils/orderBusinessProcess'
+import { requireTenantCompanyId } from '@/utils/tenantGuard'
+import { syncSalesOrdersToServer } from '@/utils/orderSyncService'
+import {
+  calcSalesOrderAmounts,
+  formatDealAmountStr
+} from '@/utils/salesOrderAmount'
+import { saveFundDocument, type FundSettlementType } from '@/utils/fundStore'
 
 const router = useRouter()
 const route = useRoute()
@@ -87,6 +104,7 @@ interface OrderItem {
   storageCondition?: string
   itemRemark?: string
   productLocked?: boolean
+  orderDiscountShare?: number
   _skipProductBlurSearch?: boolean
   _fromPlatform?: boolean
   _platformProductCode?: string
@@ -104,9 +122,11 @@ type ItemColumnDef = {
 const DEFAULT_ITEM_COLUMN_KEYS = [
   'productCode', 'productName', 'spec', 'manufacturer',
   'registrationNo', 'productionLicenseNo',
-  'unit', 'quantity', 'price', 'amount',
+  'unit', 'quantity', 'price', 'lastPrice', 'amount',
   'batchNo', 'productionDate', 'expiryDate', 'storageCondition', 'bidType', 'remark'
 ]
+
+const DEFAULT_ITEM_ROW_COUNT = 6
 
 const ITEM_COLUMN_DEFINITIONS: ItemColumnDef[] = [
   { key: 'productCode', label: '商品编码', prop: 'productCode', align: 'center', required: true },
@@ -118,6 +138,7 @@ const ITEM_COLUMN_DEFINITIONS: ItemColumnDef[] = [
   { key: 'unit', label: '单位', prop: 'unit', align: 'center', required: true },
   { key: 'quantity', label: '数量', prop: 'quantity', align: 'right', required: true },
   { key: 'price', label: '单价', prop: 'price', align: 'right' },
+  { key: 'lastPrice', label: '上次价格', prop: 'lastPrice', align: 'right' },
   { key: 'amount', label: '金额', prop: 'amount', align: 'right' },
   { key: 'batchNo', label: '生产批号', prop: 'batchNo', align: 'center' },
   { key: 'productionDate', label: '生产日期', prop: 'productionDate', align: 'center' },
@@ -155,9 +176,7 @@ interface HeaderFieldOption {
 }
 
 const DEFAULT_HEADER_FIELDS = [
-  'orderNo', 'date', 'confirmStatus', 'customer', 'customerCode',
-  'warehouse', 'deliveryDate', 'contact', 'phone', 'remark',
-  'auditor', 'auditTime'
+  'orderNo', 'date', 'customer', 'warehouse', 'receiveAddress', 'remark'
 ]
 
 const HEADER_FIELD_DEFINITIONS: HeaderFieldOption[] = [
@@ -170,7 +189,7 @@ const HEADER_FIELD_DEFINITIONS: HeaderFieldOption[] = [
   { key: 'deliveryDate', label: '预计发货', type: 'date' },
   { key: 'contact', label: '联系人', type: 'input' },
   { key: 'phone', label: '联系电话', type: 'input' },
-  { key: 'remark', label: '备注', type: 'textarea', fullWidth: true, maxLength: 200 },
+  { key: 'remark', label: '备注', type: 'input', maxLength: 30 },
   { key: 'salesman', label: '业务员', type: 'input' },
   { key: 'department', label: '部门', type: 'input' },
   { key: 'receiveAddress', label: '收货地址', type: 'input', span2: true },
@@ -199,8 +218,7 @@ const ensureDefaultWarehouse = () => {
 }
 
 const initWarehouseDefaults = async () => {
-  await loadWarehousesFromApi()
-  refreshWarehouseOptions()
+  await hydrateWarehouseOptionsFromServer()
   if (shouldSkipWarehouseField.value) {
     applySingleWarehouseDefault()
   } else {
@@ -246,8 +264,9 @@ const initHeaderFieldConfig = () => {
         HEADER_FIELD_DEFINITIONS.some(f => f.key === key)
       )
       if (keys.length) {
-        visibleFields.value = new Set(keys)
-        selectedFields.value = keys
+        const filtered = keys.filter(key => key !== 'confirmStatus')
+        visibleFields.value = new Set(filtered)
+        selectedFields.value = filtered
         return
       }
     } catch {
@@ -321,6 +340,39 @@ const isEdit = ref(false)
 const orderId = ref('')
 const basicInfoCollapsed = ref(false)
 const itemsCollapsed = ref(false)
+const amountInfoCollapsed = ref(false)
+
+const receiptAccountOptions = [
+  { label: '基本户-工商银行', value: 'icbc' },
+  { label: '一般户-建设银行', value: 'ccb' },
+  { label: '现金账户', value: 'cash' }
+]
+
+const receiptMethodOptions = [
+  { label: '银行转账', value: 'transfer' },
+  { label: '现金', value: 'cash' },
+  { label: '承兑汇票', value: 'acceptance' },
+  { label: '月结', value: 'monthly' }
+]
+
+const mapReceiptMethodToSettlement = (method: string): FundSettlementType => {
+  const map: Record<string, FundSettlementType> = {
+    transfer: 'bank',
+    cash: 'cash',
+    acceptance: 'draft',
+    monthly: 'bank'
+  }
+  return map[method] || 'bank'
+}
+
+const resolveReceiptAccountLabel = (value: string) =>
+  receiptAccountOptions.find(o => o.value === value)?.label || value
+
+const salesExpenses = ref<{ name: string; amount: number }[]>([])
+const customerExpenses = ref<{ name: string; amount: number }[]>([])
+const receiptAccounts = ref<{ account: string; amount: number }[]>([])
+const showMultiReceiptDialog = ref(false)
+const multiReceiptDraft = ref<{ account: string; amount: number }[]>([])
 
 const itemsTableRef = ref<TableInstance>()
 const itemsTableWrapRef = ref<HTMLElement>()
@@ -476,6 +528,7 @@ const insertItemColumnKey = (keys: string[], columnKey: string, afterKey: string
 const NEW_ITEM_COLUMNS: { key: string; after: string }[] = [
   { key: 'registrationNo', after: 'manufacturer' },
   { key: 'productionLicenseNo', after: 'registrationNo' },
+  { key: 'lastPrice', after: 'price' },
   { key: 'batchNo', after: 'amount' },
   { key: 'productionDate', after: 'batchNo' },
   { key: 'expiryDate', after: 'productionDate' },
@@ -609,6 +662,7 @@ const { columnWidths: itemColumnWidths, handleHeaderDragend: handleItemsHeaderDr
   { key: 'unit', label: '单位', defaultWidth: 64 },
   { key: 'quantity', label: '数量', defaultWidth: 88 },
   { key: 'price', label: '单价', defaultWidth: 96 },
+  { key: 'lastPrice', label: '上次价格', defaultWidth: 90 },
   { key: 'amount', label: '金额', defaultWidth: 100 },
   { key: 'batchNo', label: '生产批号', defaultWidth: 118 },
   { key: 'productionDate', label: '生产日期', defaultWidth: 100 },
@@ -658,6 +712,7 @@ const createEmptyItemRow = (): OrderItem => ({
   unit: '',
   quantity: 1,
   price: 0,
+  lastPrice: 0,
   amount: 0,
   productLocked: false
 })
@@ -671,6 +726,18 @@ const formatMoney = (val: number | string) =>
 const calcRowAmount = (row: OrderItem) => {
   row.amount = Number((Number(row.quantity) * Number(row.price)).toFixed(2))
 }
+
+const orderAmounts = computed(() =>
+  calcSalesOrderAmounts({
+    lines: form.value.items,
+    discountRate: form.value.discountRate,
+    discountAmount: form.value.discountAmount,
+    salesExpenses: salesExpenses.value,
+    customerExpenses: customerExpenses.value
+  })
+)
+
+const formatDealAmount = (val: number) => formatDealAmountStr(val)
 
 const form = ref({
   orderNo: '',
@@ -694,6 +761,14 @@ const form = ref({
   confirmStatus: CONFIRM_STATUS_UNCONFIRMED,
   auditor: '',
   auditTime: '',
+  discountRate: 0,
+  discountAmount: 0,
+  receiptAccount: '',
+  receiptMethod: '',
+  depositRatio: 0,
+  prepaidDeposit: 0,
+  currentReceiptAmount: 0,
+  enablePreDeduction: false,
   items: [] as OrderItem[]
 })
 
@@ -717,12 +792,38 @@ const {
 
 const showPlatformHint = computed(() => isNormalCustomerCompany())
 
-const totalQuantity = computed(() =>
-  form.value.items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)
+const totalQuantity = computed(() => orderAmounts.value.totalQuantity)
+
+const totalAmount = computed(() => orderAmounts.value.lineAmountTotal)
+
+const salesExpenseTotal = computed(() =>
+  salesExpenses.value.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
 )
 
-const totalAmount = computed(() =>
-  form.value.items.reduce((sum, item) => sum + Number(item.amount || 0), 0)
+const customerExpenseTotal = computed(() =>
+  customerExpenses.value.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
+)
+
+const multiReceiptSummary = computed(() => {
+  if (!receiptAccounts.value.length) return ''
+  const total = receiptAccounts.value.reduce((s, r) => s + (Number(r.amount) || 0), 0)
+  return `${receiptAccounts.value.length}个账户 · ${formatMoney(total)}`
+})
+
+const receivableAmount = computed(() => orderAmounts.value.receivableAmount)
+
+const isOrderAudited = computed(() => form.value.auditStatus === 'audited')
+
+const prepayAmount = computed(() =>
+  Number((receivableAmount.value * (Number(form.value.depositRatio) || 0) / 100).toFixed(2))
+)
+
+watch(
+  () => form.value.depositRatio,
+  () => {
+    if (isOrderAudited.value) return
+    form.value.prepaidDeposit = prepayAmount.value
+  }
 )
 
 const applyLocalProductToItem = (target: OrderItem, product: ProductMaster) => {
@@ -730,11 +831,13 @@ const applyLocalProductToItem = (target: OrderItem, product: ProductMaster) => {
   target.productName = product.name
   target.spec = product.spec || ''
   target.unit = product.measureUnit || product.purchaseUnit || '盒'
+  target.lastPrice = getProductLastPrice(product)
   target.price = Number(product.lastPrice ?? product.unitPrice ?? 0)
   target.manufacturer = product.manufacturer || ''
   target.registrationNo = product.registerNo || ''
   target.productionLicenseNo = product.licenseNo || ''
   target.storageCondition = product.storageCondition || ''
+  target.bidType = String(product.bidType || '')
   target._fromPlatform = Boolean(product.fromPlatform)
   target._platformProductCode = String(product.platformProductCode || '')
   if (target.productionDate) {
@@ -751,49 +854,94 @@ const applyBatchExpiryFromProductionDate = (
   }
 }
 
-const syncExpiryFromProductionDate = (row: OrderItem, product?: ProductMaster) => {
-  const rowData = row as Record<string, any>
-  if (rowData._expiryManual || !row.productionDate) return
-  const master = product ?? resolveProductForRow(rowData)
-  const expiry = calcProductExpiryDate(String(row.productionDate), master)
-  if (expiry) row.expiryDate = expiry
+const {
+  handleProductionDateChange,
+  handleBatchFormatChange,
+  handleBatchNoInput,
+  handleExpiryDateChange,
+  focusBatchNoCell,
+} = useDocumentItemBatchNo()
+
+const clearProductBoundFields = (row: OrderItem) => {
+  row.productName = ''
+  row.spec = ''
+  row.manufacturer = ''
+  row.registrationNo = ''
+  row.productionLicenseNo = ''
+  row.unit = ''
+  row.storageCondition = ''
+  row.bidType = ''
+  row.lastPrice = 0
+  row.price = 0
+  row.amount = 0
+  row._fromPlatform = false
+  row._platformProductCode = ''
 }
 
-const handleProductionDateChange = (row: OrderItem) => {
-  syncExpiryFromProductionDate(row)
-  if (hasConfirmedBatchNoFormat(row as Record<string, any>)) {
-    applyProductionDateToItemRow(
-      row as Record<string, any>,
-      resolveProductForRow(row as Record<string, unknown>),
-      loadBatchNoFormat()
-    )
+const syncItemFromProductMaster = (item: OrderItem, code: string): boolean => {
+  const trimmed = String(code || '').trim()
+  if (!trimmed) return false
+
+  const local = findProductByCode(trimmed)
+  if (local) {
+    applyLocalProductToItem(item, local)
+    item.productLocked = true
+    calcRowAmount(item)
+    return true
   }
+
+  const platform = findPlatformProductByCode(trimmed)
+  if (platform) {
+    applyPlatformProductToSalesItem(item as Record<string, unknown>, platform)
+    applyBatchExpiryFromProductionDate(item)
+    item.productLocked = true
+    calcRowAmount(item)
+    return true
+  }
+
+  return false
 }
 
-const handleBatchFormatChange = (row: OrderItem) => {
-  applyProductionDateToItemRow(
-    row as Record<string, any>,
-    resolveProductForRow(row as Record<string, unknown>),
-    loadBatchNoFormat()
-  )
-  syncExpiryFromProductionDate(row, resolveProductForRow(row as Record<string, unknown>))
+const buildItemProductSearchQuery = (item: OrderItem): string =>
+  String(item.productCode || '').trim()
+
+const resolveProductFromCompositeQuery = (
+  query: string
+): { source: 'local' | 'platform'; product: ProductMaster } | 'ambiguous' | null => {
+  const trimmed = query.trim()
+  if (!trimmed) return null
+
+  const localList = loadProductList()
+  const localMatches = findProductsByCompositeQuery(trimmed, localList)
+  if (localMatches.length === 1) return { source: 'local', product: localMatches[0] }
+  if (localMatches.length > 1) {
+    const single = findProductByCompositeQuery(trimmed, localList)
+    if (single) return { source: 'local', product: single }
+    return 'ambiguous'
+  }
+
+  const platformList = getPlatformProductsForSales()
+  const platformMatches = findProductsByCompositeQuery(trimmed, platformList)
+  if (platformMatches.length === 1) return { source: 'platform', product: platformMatches[0] }
+  if (platformMatches.length > 1) {
+    const single = findProductByCompositeQuery(trimmed, platformList)
+    if (single) return { source: 'platform', product: single }
+    return 'ambiguous'
+  }
+
+  return null
 }
 
-const handleBatchNoInput = (row: OrderItem) => {
-  markBatchNoManual(row as Record<string, any>, loadBatchNoFormat())
-}
-
-const handleExpiryDateChange = (row: OrderItem) => {
-  markExpiryManual(row as Record<string, any>)
-}
-
-const buildItemProductSearchQuery = (item: Record<string, unknown>): string => {
-  const code = String(item.productCode || '').trim()
-  if (code.includes(' ')) return code
-  return [code, item.productName, item.spec, item.manufacturer]
-    .map(v => String(v || '').trim())
-    .filter(Boolean)
-    .join(' ')
+const applyResolvedProductToItem = (
+  item: OrderItem,
+  resolved: { source: 'local' | 'platform'; product: ProductMaster }
+) => {
+  if (resolved.source === 'platform') {
+    applyPlatformProductToSalesItem(item as Record<string, unknown>, resolved.product as PlatformProduct)
+    applyBatchExpiryFromProductionDate(item)
+    return
+  }
+  applyLocalProductToItem(item, resolved.product)
 }
 
 const PRODUCT_SUGGEST_LIMIT = 15
@@ -837,45 +985,216 @@ const toPlatformItemSuggestion = (product: PlatformProduct): ItemProductSuggesti
 })
 
 const fetchItemProductSuggestions = (
-  row: Record<string, unknown>,
+  row: OrderItem,
   cb: (results: ItemProductSuggestion[]) => void
 ) => {
-  const searchText = buildItemProductSearchQuery(row)
-  if (!searchText.trim()) {
+  const query = buildItemProductSearchQuery(row)
+  if (!query) {
+    resetSuggestMultiContext(row)
     cb([])
     return
   }
-  const localMatches = findProductsByCompositeQuery(searchText, loadProductList())
+  const localMatches = findProductsByCompositeQuery(query, loadProductList())
     .slice(0, PRODUCT_SUGGEST_LIMIT)
     .map(toLocalItemSuggestion)
-  const platformMatches = searchPlatformProducts(searchText, 8).map(toPlatformItemSuggestion)
+  const platformMatches = findProductsByCompositeQuery(query, getPlatformProductsForSales())
+    .slice(0, 8)
+    .map(toPlatformItemSuggestion)
   const merged = [...localMatches]
   platformMatches.forEach(item => {
     if (!merged.some(m => m.code === item.code)) merged.push(item)
   })
-  cb(merged.slice(0, PRODUCT_SUGGEST_LIMIT))
+  const results = merged.slice(0, PRODUCT_SUGGEST_LIMIT)
+  initSuggestMultiContext(row, results)
+  cb(results)
+}
+
+type SuggestMultiContext = {
+  row: OrderItem
+  rowIndex: number
+  results: ItemProductSuggestion[]
+  selected: Set<string>
+}
+
+const suggestMultiContext = ref<SuggestMultiContext | null>(null)
+
+const initSuggestMultiContext = (row: OrderItem, results: ItemProductSuggestion[]) => {
+  const rowIndex = findItemRowIndex(row)
+  const prev = suggestMultiContext.value
+  const resultCodes = new Set(results.map(item => item.code))
+
+  if (prev?.row === row) {
+    const selected = new Set([...prev.selected].filter(code => resultCodes.has(code)))
+    suggestMultiContext.value = { row, rowIndex, results, selected }
+    return
+  }
+
+  suggestMultiContext.value = {
+    row,
+    rowIndex,
+    results,
+    selected: new Set<string>()
+  }
+}
+
+const resetSuggestMultiContext = (row?: OrderItem) => {
+  if (!row || suggestMultiContext.value?.row === row) {
+    suggestMultiContext.value = null
+  }
+}
+
+const isActiveSuggestMultiRow = (row: OrderItem) => suggestMultiContext.value?.row === row
+
+const showSuggestMultiBar = (row: OrderItem) =>
+  isActiveSuggestMultiRow(row) && (suggestMultiContext.value?.results.length ?? 0) > 1
+
+const suggestSelectedCount = (row: OrderItem) =>
+  isActiveSuggestMultiRow(row) ? suggestMultiContext.value!.selected.size : 0
+
+const isSuggestSelected = (row: OrderItem, code: string) =>
+  isActiveSuggestMultiRow(row) && suggestMultiContext.value!.selected.has(code)
+
+const isAllSuggestSelected = (row: OrderItem) => {
+  const ctx = suggestMultiContext.value
+  if (!isActiveSuggestMultiRow(row) || !ctx?.results.length) return false
+  return ctx.results.every(item => ctx.selected.has(item.code))
+}
+
+const isSuggestSelectionIndeterminate = (row: OrderItem) => {
+  const ctx = suggestMultiContext.value
+  if (!isActiveSuggestMultiRow(row) || !ctx?.results.length) return false
+  const count = ctx.results.filter(item => ctx.selected.has(item.code)).length
+  return count > 0 && count < ctx.results.length
+}
+
+const toggleSuggestSelection = (
+  row: OrderItem,
+  suggestion: ItemProductSuggestion,
+  selected?: boolean
+) => {
+  const ctx = suggestMultiContext.value
+  if (!ctx || ctx.row !== row) return
+  const next = new Set(ctx.selected)
+  const shouldSelect = selected ?? !next.has(suggestion.code)
+  if (shouldSelect) next.add(suggestion.code)
+  else next.delete(suggestion.code)
+  suggestMultiContext.value = { ...ctx, selected: next }
+}
+
+const toggleSelectAllSuggest = (row: OrderItem, checked: boolean) => {
+  const ctx = suggestMultiContext.value
+  if (!ctx || ctx.row !== row) return
+  suggestMultiContext.value = {
+    ...ctx,
+    selected: checked ? new Set(ctx.results.map(item => item.code)) : new Set<string>()
+  }
+}
+
+const closeSuggestForRow = (row: OrderItem) => {
+  const refs = getRowAutocompleteRefs(row as Record<string, unknown>)
+  const ac = refs.productCode as { close?: () => void } | undefined
+  ac?.close?.()
+  resetSuggestMultiContext(row)
+}
+
+const isEmptyItemRow = (row: OrderItem) =>
+  !String(row.productCode || '').trim() && !String(row.productName || '').trim()
+
+/** 排序或批量添加后，将无商品空行集中到表体末尾，避免中间断行 */
+const compactEmptyItemRowsToEnd = () => {
+  const items = form.value.items
+  const filled = items.filter(row => !isEmptyItemRow(row))
+  const empty = items.filter(row => isEmptyItemRow(row))
+  if (!empty.length) return
+  items.splice(0, items.length, ...filled, ...empty)
+}
+
+/** 搜索下拉多选：从当前行起连续写入，优先占用后续空行 */
+const insertFilledItemRowsAfterAnchor = (rows: OrderItem[], anchorIndex: number) => {
+  if (!rows.length || anchorIndex < 0 || anchorIndex >= form.value.items.length) return
+  const items = form.value.items
+  Object.assign(items[anchorIndex], rows[0])
+  let insertAt = anchorIndex + 1
+  for (let i = 1; i < rows.length; i++) {
+    if (insertAt < items.length && isEmptyItemRow(items[insertAt])) {
+      Object.assign(items[insertAt], rows[i])
+    } else {
+      items.splice(insertAt, 0, rows[i])
+    }
+    insertAt += 1
+  }
+  compactEmptyItemRowsToEnd()
+}
+
+/** 批量选择弹窗：优先填充现有空行，再追加到末尾 */
+const appendFilledItemRows = (rows: OrderItem[]) => {
+  if (!rows.length) return
+  let scanFrom = 0
+  for (const filled of rows) {
+    let placed = false
+    for (let j = scanFrom; j < form.value.items.length; j++) {
+      if (isEmptyItemRow(form.value.items[j])) {
+        Object.assign(form.value.items[j], filled)
+        scanFrom = j + 1
+        placed = true
+        break
+      }
+    }
+    if (!placed) {
+      form.value.items.push(filled)
+      scanFrom = form.value.items.length
+    }
+  }
+  compactEmptyItemRowsToEnd()
+}
+
+const confirmSuggestMultiAdd = (row: OrderItem) => {
+  const ctx = suggestMultiContext.value
+  if (!ctx || ctx.row !== row || ctx.selected.size === 0) return
+
+  const selected = ctx.results.filter(item => ctx.selected.has(item.code))
+  if (!selected.length) return
+
+  const filledRows = selected.map(suggestion => {
+    const newRow = createEmptyItemRow()
+    applySuggestionToItem(newRow, suggestion)
+    newRow.productLocked = true
+    calcRowAmount(newRow)
+    return newRow
+  })
+
+  insertFilledItemRowsAfterAnchor(filledRows, ctx.rowIndex)
+
+  closeSuggestForRow(row)
+  syncItemsTableLayout()
+  ElMessage.success(`已添加 ${selected.length} 个商品`)
+  nextTick(() => focusAfterProductLocked(ctx.rowIndex))
+}
+
+const handleSuggestVisibleChange = (row: OrderItem, visible: boolean) => {
+  if (!visible) resetSuggestMultiContext(row)
 }
 
 const isRowProductLocked = (row: OrderItem) => Boolean(row.productLocked)
 
 const clearProductLock = (row: OrderItem) => {
   if (row._skipProductBlurSearch) return
+  if (row.productLocked) clearProductBoundFields(row)
   row.productLocked = false
 }
 
-const PRODUCT_LOOKUP_COLS = ['productCode', 'productName', 'spec', 'manufacturer']
-const PRODUCT_BASIC_INFO_COLS = [
-  'productName', 'spec', 'manufacturer', 'registrationNo', 'productionLicenseNo'
-]
-const LOCKED_SKIP_FOCUS_COLS = new Set([
-  'productName', 'spec', 'manufacturer', 'registrationNo', 'productionLicenseNo'
-])
+/** 仅商品编码可选；其余商品资料字段由编码绑定带出，不可编辑 */
+const PRODUCT_BOUND_COLS = [
+  'productName', 'spec', 'manufacturer',
+  'registrationNo', 'productionLicenseNo', 'storageCondition', 'bidType'
+] as const
 
-const isItemColumnReadonly = (row: OrderItem, colKey: string) =>
-  isRowProductLocked(row) && LOCKED_SKIP_FOCUS_COLS.has(colKey)
+const PRODUCT_BOUND_SKIP_FOCUS = new Set<string>([...PRODUCT_BOUND_COLS, 'unit'])
 
-const getEffectiveFocusCols = (row: OrderItem, cols: string[]) =>
-  isRowProductLocked(row) ? cols.filter(k => !LOCKED_SKIP_FOCUS_COLS.has(k)) : cols
+const isProductBoundField = (colKey: string) => PRODUCT_BOUND_SKIP_FOCUS.has(colKey)
+
+const getEffectiveFocusCols = (_row: OrderItem, cols: string[]) =>
+  cols.filter(k => !PRODUCT_BOUND_SKIP_FOCUS.has(k))
 
 const getPrevItemFocusColKey = (
   currentColKey: string,
@@ -897,12 +1216,9 @@ const getNextItemFocusColKey = (
   const effIdx = effectiveCols.indexOf(currentColKey)
   if (effIdx < 0) return effectiveCols[0] ?? null
 
-  if (isRowProductLocked(row)) {
-    const skipAfterProduct = [...PRODUCT_LOOKUP_COLS, ...PRODUCT_BASIC_INFO_COLS]
-    if (skipAfterProduct.includes(currentColKey)) {
-      if (effectiveCols.includes('quantity')) return 'quantity'
-      return effectiveCols[effIdx + 1] ?? null
-    }
+  if (currentColKey === 'productCode' || isProductBoundField(currentColKey)) {
+    if (effectiveCols.includes('quantity')) return 'quantity'
+    return effectiveCols[effIdx + 1] ?? null
   }
 
   if (effIdx < effectiveCols.length - 1) return effectiveCols[effIdx + 1]
@@ -985,9 +1301,38 @@ const handleProductSuggestKeyboard = (e: KeyboardEvent): boolean => {
   }
 
   if (e.key === 'Enter') {
-    if (!isProductSuggestOpen()) return false
     e.preventDefault()
-    ac.handleKeyEnter()
+    e.stopPropagation()
+
+    if (isProductSuggestOpen()) {
+      ac.handleKeyEnter()
+      return true
+    }
+
+    const item = row as OrderItem
+    const rowIndex = findItemRowIndex(item)
+    const lockedResult = handleItemProductSearch(item)
+    if (lockedResult === 'locked') {
+      closeProductSuggestForRow(item)
+      focusAfterProductLocked(rowIndex)
+      return true
+    }
+
+    const query = buildItemProductSearchQuery(row as Record<string, unknown>).trim()
+    if (!query) return true
+
+    fetchItemProductSuggestions(row as Record<string, unknown>, suggestions => {
+      if (suggestions.length === 1) {
+        handleItemProductSuggestionSelect(item, suggestions[0])
+        return
+      }
+      if (suggestions.length > 1) {
+        ac.getData(query)
+        nextTick(() => ac.highlight(0))
+        return
+      }
+      handleItemProductSearch(item)
+    })
     return true
   }
 
@@ -997,6 +1342,7 @@ const handleProductSuggestKeyboard = (e: KeyboardEvent): boolean => {
 const applySuggestionToItem = (target: OrderItem, suggestion: ItemProductSuggestion) => {
   if (suggestion.source === 'platform') {
     applyPlatformProductToSalesItem(target as Record<string, unknown>, suggestion.raw as PlatformProduct)
+    target.lastPrice = suggestion.lastPrice
     applyBatchExpiryFromProductionDate(target)
     return
   }
@@ -1021,43 +1367,37 @@ const handleItemProductSearch = (
   item: OrderItem,
   options: { silent?: boolean } = {}
 ): ProductSearchResult => {
-  const searchText = buildItemProductSearchQuery(item)
-  if (!searchText) return 'noop'
+  const query = buildItemProductSearchQuery(item)
+  if (!query) return 'noop'
 
-  const localMatches = findProductsByCompositeQuery(searchText, loadProductList())
-  if (localMatches.length === 1) {
-    applyLocalProductToItem(item, localMatches[0])
+  if (!query.includes(' ') && syncItemFromProductMaster(item, query)) {
+    item._skipProductBlurSearch = true
+    return 'locked'
+  }
+
+  const resolved = resolveProductFromCompositeQuery(query)
+  if (resolved === 'ambiguous') {
+    if (!options.silent) {
+      ElMessage.warning('匹配到多个商品，请补充编码/名称/规格/厂家条件')
+    }
+    return 'ambiguous'
+  }
+  if (resolved) {
+    applyResolvedProductToItem(item, resolved)
     item.productLocked = true
     item._skipProductBlurSearch = true
     calcRowAmount(item)
     return 'locked'
   }
 
-  const code = String(item.productCode || '').trim()
-  if (code) {
-    const platform = findPlatformProductByCode(code)
-    if (platform) {
-      applyPlatformProductToSalesItem(item as Record<string, unknown>, platform)
-      applyBatchExpiryFromProductionDate(item)
-      item.productLocked = true
-      item._skipProductBlurSearch = true
-      calcRowAmount(item)
-      return 'locked'
-    }
-  }
-
-  if (localMatches.length > 1 && !options.silent) {
-    ElMessage.warning('匹配到多个商品，请补充编码/名称/规格/厂家条件')
-    return 'ambiguous'
-  }
-  if (code && !item.productName && !options.silent) {
+  if (!options.silent) {
     ElMessage.warning('未找到匹配商品，请检查编码/名称/规格/厂家')
   }
-  return code && !item.productName ? 'not_found' : 'noop'
+  return 'not_found'
 }
 
-const handleLockedItemColumnFocus = (row: OrderItem, colKey: string) => {
-  if (!isItemColumnReadonly(row, colKey)) return
+const handleBoundProductColumnFocus = (row: OrderItem, colKey: string) => {
+  if (!isProductBoundField(colKey)) return
   const rowIndex = findItemRowIndex(row)
   if (rowIndex < 0) return
   nextTick(() => focusNextItemCell(rowIndex, colKey))
@@ -1073,49 +1413,32 @@ const handleItemProductBlur = (item: OrderItem) => {
 }
 
 const showBatchAdd = ref(false)
-const batchSearchQuery = ref('')
-const batchSelectedProducts = ref<ProductMaster[]>([])
 
-const batchProductList = computed(() => loadProductList())
-
-const filteredBatchProducts = computed(() => {
-  if (!batchSearchQuery.value) return batchProductList.value
-  const query = batchSearchQuery.value.toLowerCase()
-  return batchProductList.value.filter(p =>
-    (p.code || '').toLowerCase().includes(query) ||
-    (p.name || '').toLowerCase().includes(query) ||
-    (p.spec || '').toLowerCase().includes(query)
-  )
-})
+const batchProductList = computed(() => loadProductList().map(toBatchProductRow))
 
 const openBatchAdd = () => {
-  batchSearchQuery.value = ''
-  batchSelectedProducts.value = []
   showBatchAdd.value = true
 }
 
-const confirmBatchAdd = () => {
-  if (batchSelectedProducts.value.length === 0) {
-    ElMessage.warning('请选择至少一个商品')
-    return
-  }
-  batchSelectedProducts.value.forEach(product => {
+const confirmBatchAdd = (selected: ProductMaster[]) => {
+  const filledRows = selected.map(product => {
     const row = createEmptyItemRow()
     applyLocalProductToItem(row, product)
     row.productLocked = true
     applyBatchExpiryFromProductionDate(row, product)
     calcRowAmount(row)
-    form.value.items.push(row)
+    return row
   })
-  ElMessage.success(`成功添加 ${batchSelectedProducts.value.length} 个商品`)
-  showBatchAdd.value = false
+  appendFilledItemRows(filledRows)
+  ElMessage.success(`成功添加 ${selected.length} 个商品`)
   syncItemsTableLayout()
 }
 
 
 const handleItemDateKeydown = (e: KeyboardEvent, row: OrderItem, colKey: string) => {
-  const rowIndex = form.value.items.indexOf(row)
+  const rowIndex = findItemRowIndex(row)
   if (rowIndex < 0) return
+  rememberItemTableFocus(rowIndex, colKey)
 
   if (e.key === 'Enter') {
     const advance = () => {
@@ -1140,6 +1463,19 @@ const handleItemDateKeydown = (e: KeyboardEvent, row: OrderItem, colKey: string)
   e.preventDefault()
   e.stopPropagation()
   navigateItemsTableFrom(rowIndex, colKey, direction)
+}
+
+const handleItemCellEnterKeydown = (e: KeyboardEvent, row: OrderItem, colKey: string) => {
+  if (e.key !== 'Enter') return
+  const rowIndex = findItemRowIndex(row)
+  if (rowIndex < 0) return
+  e.preventDefault()
+  e.stopPropagation()
+  if (colKey === 'quantity' || colKey === 'price') {
+    calcRowAmount(row)
+  }
+  rememberItemTableFocus(rowIndex, colKey)
+  nextTick(() => focusNextItemCell(rowIndex, colKey))
 }
 
 const shouldNavigateOnArrow = (e: KeyboardEvent) =>
@@ -1249,45 +1585,67 @@ const itemTableColumnKeys = computed(() => [
 ])
 
 const focusableItemColumnKeys = computed(() =>
-  itemTableColumnKeys.value.filter(key => key !== 'index' && key !== 'amount')
+  itemTableColumnKeys.value.filter(key => {
+    if (key === 'index' || key === 'amount' || key === 'lastPrice') return false
+    if (key === 'unit') return false
+    return true
+  })
 )
 
+const lastItemTableFocus = ref<{ row: number; colKey: string } | null>(null)
+
+const rememberItemTableFocus = (rowIndex: number, colKey: string) => {
+  lastItemTableFocus.value = { row: rowIndex, colKey }
+}
+
+const resolveItemTableCell = (rowEl: HTMLElement, colKey: string): HTMLElement | undefined => {
+  const inner = rowEl.querySelector(`[data-col-key="${colKey}"]`) as HTMLElement | null
+  return inner?.closest('td.el-table__cell') as HTMLElement | undefined
+}
+
 const focusItemCell = (rowIndex: number, colKey: string, fromColKey?: string) => {
+  rememberItemTableFocus(rowIndex, colKey)
   nextTick(() => {
     const tableEl = itemsTableRef.value?.$el as HTMLElement | undefined
     if (!tableEl) return
     const rows = tableEl.querySelectorAll('.el-table__body-wrapper tbody tr.el-table__row')
     const row = rows[rowIndex] as HTMLElement | undefined
     if (!row) return
-    const colIndex = itemTableColumnKeys.value.indexOf(colKey)
-    if (colIndex < 0) return
-    const cell = row.querySelectorAll('td.el-table__cell')[colIndex] as HTMLElement | undefined
+
+    let cell = resolveItemTableCell(row, colKey)
+    if (!cell) {
+      const colIndex = itemTableColumnKeys.value.indexOf(colKey)
+      if (colIndex < 0) return
+      cell = row.querySelectorAll('td.el-table__cell')[colIndex] as HTMLElement | undefined
+    }
+    if (!cell) return
+
+    if (colKey === 'productionDate') {
+      focusItemDateCell(cell, true)
+      return
+    }
+    if (colKey === 'expiryDate') {
+      focusItemDateCell(cell, false)
+      return
+    }
 
     if (colKey === 'batchNo') {
       const rowData = form.value.items[rowIndex] as Record<string, any>
       if (rowData) {
-        if (fromColKey === 'productionDate') {
-          rowData._batchFormatPickerOpen = true
-          rowData.batchNo = ''
-          clearRowBatchNoFormat(rowData)
-          rowData._batchNoManual = false
-        } else if (
-          rowData._batchFormatPickerOpen === false &&
-          String(rowData.batchNo || '').trim()
-        ) {
-          const input = cell?.querySelector('.batch-no-cell-kb .el-input__inner') as HTMLInputElement | null
-          input?.focus()
-          input?.select?.()
-          return
-        } else {
-          rowData._batchFormatPickerOpen = true
-        }
+        focusBatchNoCell({
+          rowData,
+          cell,
+          fromColKey,
+          onFocusFailed: () => {
+            const nextKey = getNextItemFocusColKey(
+              'batchNo',
+              form.value.items[rowIndex],
+              focusableItemColumnKeys.value
+            )
+            if (nextKey) focusItemCell(rowIndex, nextKey, 'batchNo')
+          },
+        })
       }
-      nextTick(() => {
-        const focusKey = getDefaultBatchFormatFocusKey()
-        const firstFormat = cell?.querySelector(`[data-batch-format="${focusKey}"]`) as HTMLButtonElement | null
-        firstFormat?.focus()
-      })
       return
     }
 
@@ -1369,25 +1727,31 @@ const focusAfterProductLocked = (rowIndex: number) => {
   })
 }
 
-const findItemsTableFocus = () => {
-  const active = document.activeElement as HTMLElement | null
-  const cell = active?.closest('.items-detail-table td.el-table__cell') as HTMLElement | null
-  const row = active?.closest('.items-detail-table tr.el-table__row') as HTMLElement | null
-  if (!cell || !row) return null
+const findItemsTableFocus = (target?: EventTarget | null) => {
+  const active = (target ?? document.activeElement) as HTMLElement | null
+  if (!active) return lastItemTableFocus.value
+
+  const row = active.closest('.items-detail-table tr.el-table__row') as HTMLElement | null
+  const colRoot = active.closest('[data-col-key]') as HTMLElement | null
+  if (colRoot && row) {
+    const colKey = colRoot.dataset.colKey
+    const tableEl = itemsTableRef.value?.$el as HTMLElement | undefined
+    const rows = tableEl?.querySelectorAll('.el-table__body-wrapper tbody tr.el-table__row')
+    const rowIndex = rows ? Array.from(rows).indexOf(row) : -1
+    if (rowIndex >= 0 && colKey) return { row: rowIndex, colKey }
+  }
+
+  const cell = active.closest('.items-detail-table td.el-table__cell') as HTMLElement | null
+  if (!cell || !row) return lastItemTableFocus.value
+
   const tableEl = itemsTableRef.value?.$el as HTMLElement | undefined
   const rows = tableEl?.querySelectorAll('.el-table__body-wrapper tbody tr.el-table__row')
   const rowIndex = rows ? Array.from(rows).indexOf(row) : -1
   const colIndex = Array.from(row.querySelectorAll('td.el-table__cell')).indexOf(cell)
   const colKey = itemTableColumnKeys.value[colIndex]
-  if (rowIndex < 0 || !colKey) return null
+  if (rowIndex < 0 || !colKey) return lastItemTableFocus.value
   return { row: rowIndex, colKey }
 }
-
-const isBatchNoFormatTarget = (target: EventTarget | null) =>
-  !!(target as HTMLElement)?.closest('.batch-no-cell-kb [data-batch-format]')
-
-const isBatchNoInputTarget = (target: EventTarget | null) =>
-  !!(target as HTMLElement)?.closest('.batch-no-cell-kb .el-input__inner')
 
 const handleItemsTableKeydown = (e: KeyboardEvent) => {
   if (isProductAutocompleteTarget(e.target) && handleProductSuggestKeyboard(e)) {
@@ -1423,12 +1787,12 @@ const handleItemsTableKeydown = (e: KeyboardEvent) => {
       if (row) {
         if (
           isRowProductLocked(row) &&
-          [...PRODUCT_LOOKUP_COLS, ...PRODUCT_BASIC_INFO_COLS].includes(pos.colKey)
+          (pos.colKey === 'productCode' || isProductBoundField(pos.colKey))
         ) {
           focusAfterProductLocked(pos.row)
           return
         }
-        if (PRODUCT_LOOKUP_COLS.includes(pos.colKey)) {
+        if (pos.colKey === 'productCode') {
           const result = handleItemProductSearch(row)
           if (result === 'locked') {
             closeProductSuggestForRow(row)
@@ -1490,10 +1854,23 @@ const applyOrderToForm = (order: Record<string, unknown>) => ({
   confirmStatus: normalizeConfirmStatus(order.confirmStatus),
   auditor: String(order.auditor || ''),
   auditTime: String(order.auditTime || ''),
-  items: ((order.detailItems as OrderItem[]) || []).map(item => ({
-    ...item,
-    productLocked: item.productLocked ?? Boolean(item.productCode && item.productName)
-  }))
+  discountRate: Number(order.discountRate) || 0,
+  discountAmount: Number(order.discountAmount) || 0,
+  receiptAccount: String(order.receiptAccount || order.paymentAccount || ''),
+  receiptMethod: String(order.receiptMethod || order.paymentMethod || ''),
+  depositRatio: Number(order.depositRatio) || 0,
+  prepaidDeposit: Number(order.prepaidDeposit) || 0,
+  currentReceiptAmount: Number(order.currentReceiptAmount || order.currentPaymentAmount) || 0,
+  enablePreDeduction: Boolean(order.enablePreDeduction),
+  items: ((order.detailItems as OrderItem[]) || []).map(item => {
+    const normalized: OrderItem = {
+      ...item,
+      productLocked: item.productLocked ?? Boolean(String(item.productCode || '').trim())
+    }
+    const code = String(normalized.productCode || '').trim()
+    if (code) syncItemFromProductMaster(normalized, code)
+    return normalized
+  })
 })
 
 onMounted(() => {
@@ -1513,18 +1890,29 @@ onMounted(() => {
     if (editId) {
       isEdit.value = true
       orderId.value = editId
-      const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
-      const order = orders.find((o: { id: string }) => o.id === editId)
+      const orders = mergeSalesOrderListRows()
+      const order = orders.find((o: Record<string, unknown>) => o.id === editId || o.orderNo === editId)
       if (order) {
         form.value = applyOrderToForm(order)
+        salesExpenses.value = Array.isArray(order.salesExpenses)
+          ? order.salesExpenses.map((e: { name: string; amount: number }) => ({ ...e }))
+          : []
+        customerExpenses.value = Array.isArray(order.customerExpenses)
+          ? order.customerExpenses.map((e: { name: string; amount: number }) => ({ ...e }))
+          : []
+        receiptAccounts.value = Array.isArray(order.receiptAccounts)
+          ? (order.receiptAccounts as { account: string; amount: number }[]).map(r => ({ ...r }))
+          : []
         ensureDefaultWarehouse()
       }
     } else {
       ensureDefaultWarehouse()
     }
 
-    if (form.value.items.length === 0) {
-      addItem()
+    if (!isEdit.value) {
+      ensureDefaultItemRows()
+    } else if (form.value.items.length === 0) {
+      ensureDefaultItemRows()
     }
 
     nextTick(() => {
@@ -1555,12 +1943,59 @@ watch(sortedVisibleItemColumns, syncItemsTableLayout, { deep: true })
 watch(itemColumnWidths, syncItemsTableLayout, { deep: true })
 watch(itemsTableTotalWidth, syncItemsTableLayout)
 
+const formItems = computed({
+  get: () => form.value.items as Record<string, unknown>[],
+  set: items => { form.value.items = items as typeof form.value.items }
+})
+
+const itemColumnSortKeys = computed(() => sortedVisibleItemColumns.value.map(c => c.key))
+
+const {
+  getItemSortIcon,
+  handleItemColumnSort,
+  isColumnSortable,
+  itemSortOrders
+} = useDocumentItemTableSort(formItems as Ref<Record<string, unknown>[]>, itemColumnSortKeys, {
+  documentKind: 'sales_order',
+  getColumnDef: key => ITEM_COLUMN_DEFINITIONS.find(c => c.key === key),
+  onSorted: () => {
+    compactEmptyItemRowsToEnd()
+    syncItemsTableLayout()
+  }
+})
+
+watch(
+  () => route.params.id as string | undefined,
+  (newId, oldId) => {
+    if (newId === oldId || !newId) return
+    isEdit.value = true
+    orderId.value = newId
+    const order = mergeSalesOrderListRows().find(
+      (o: Record<string, unknown>) => o.id === newId || o.orderNo === newId
+    )
+    if (order) {
+      form.value = applyOrderToForm(order)
+      salesExpenses.value = Array.isArray(order.salesExpenses)
+        ? (order.salesExpenses as { name: string; amount: number }[]).map(e => ({ ...e }))
+        : []
+      customerExpenses.value = Array.isArray(order.customerExpenses)
+        ? (order.customerExpenses as { name: string; amount: number }[]).map(e => ({ ...e }))
+        : []
+      receiptAccounts.value = Array.isArray(order.receiptAccounts)
+        ? (order.receiptAccounts as { account: string; amount: number }[]).map(r => ({ ...r }))
+        : []
+      ensureDefaultWarehouse()
+      nextTick(() => syncItemsTableLayout())
+    }
+  }
+)
+
 const handleCustomerChange = (customerName: string) => {
-  const customer = customerList.value.find(c => c.name === customerName)
+  const customer = resolveCustomerMaster(customerName)
   if (customer) {
-    form.value.customerCode = customer.code || ''
+    form.value.customerCode = customer.code || customer.id
     form.value.contact = customer.contact || ''
-    form.value.phone = customer.phone || ''
+    form.value.phone = customer.phone || customer.mobile || ''
   }
 }
 
@@ -1569,13 +2004,16 @@ const addItem = () => {
   syncItemsTableLayout()
 }
 
-const insertItemAfter = (index: number) => {
-  form.value.items.splice(index + 1, 0, createEmptyItemRow())
+const ensureDefaultItemRows = () => {
+  while (form.value.items.length < DEFAULT_ITEM_ROW_COUNT) {
+    form.value.items.push(createEmptyItemRow())
+  }
   syncItemsTableLayout()
 }
 
-const handleBatchSelectionChange = (rows: ProductMaster[]) => {
-  batchSelectedProducts.value = rows
+const insertItemAfter = (index: number) => {
+  form.value.items.splice(index + 1, 0, createEmptyItemRow())
+  syncItemsTableLayout()
 }
 
 const removeItem = (index: number) => {
@@ -1626,22 +2064,42 @@ const addOperationLog = (oid: string, operationType: string, operator: string, r
 const buildOrderData = () => {
   ensureDefaultWarehouse()
   const warehouseLabel = resolveWarehouseLabel(form.value.warehouse) || form.value.warehouse
+  const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]') as Record<string, unknown>[]
+  const existing = orders.find(o => o.id === form.value.orderNo)
+  const docSource = String(form.value.docSource || existing?.docSource || '')
   return {
   id: form.value.orderNo,
+  companyId: existing?.companyId || getCurrentCompanyId(),
+  businessProcess:
+    existing?.businessProcess ||
+    (docSource === '平台协同' ? 'collaborative' : 'standard'),
   customer: form.value.customer,
   customerCode: form.value.customerCode,
   date: form.value.date,
-  amount: `¥${totalAmount.value.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}`,
+  amount: formatDealAmount(receivableAmount.value),
+  receivableAmount: receivableAmount.value,
+  lineAmountTotal: totalAmount.value,
+  discountRate: form.value.discountRate,
+  discountAmount: form.value.discountAmount,
+  salesExpenses: salesExpenses.value.map(e => ({ ...e })),
+  customerExpenses: customerExpenses.value.map(e => ({ ...e })),
+  receiptAccount: form.value.receiptAccount,
+  receiptAccounts: receiptAccounts.value.map(r => ({ ...r })),
+  receiptMethod: form.value.receiptMethod,
+  depositRatio: form.value.depositRatio,
+  prepaidDeposit: form.value.prepaidDeposit,
+  prepayAmount: prepayAmount.value,
+  currentReceiptAmount: form.value.currentReceiptAmount,
+  enablePreDeduction: form.value.enablePreDeduction,
   status: form.value.auditStatus === 'audited' ? 'processing' : 'pending',
   auditStatus: form.value.auditStatus,
   confirmStatus: form.value.confirmStatus,
   auditor: form.value.auditor,
   auditTime: form.value.auditTime,
   executeStatus: 'notExecuted',
-  warehouseStatus: 'notOutWarehoused',
   closeStatus: 'notClosed',
   prepaymentAudit: 'prepaidNotAudited',
-  receiveStatus: form.value.auditStatus === 'audited' ? 'received' : 'notReceived',
+  receiveStatus: String(existing?.receiveStatus || '') === 'received' ? 'received' : 'notReceived',
   items: `${form.value.items.length}种`,
   operator: form.value.creator || '当前用户',
   creator: form.value.creator,
@@ -1662,8 +2120,11 @@ const buildOrderData = () => {
 }
 
 const persistOrder = () => {
+  const companyId = requireTenantCompanyId()
+  if (!companyId) return null
   const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
   const orderData = buildOrderData()
+  orderData.companyId = companyId
   const index = orders.findIndex((o: any) => o.id === form.value.orderNo)
   if (index > -1) {
     orders[index] = { ...orders[index], ...orderData }
@@ -1671,6 +2132,7 @@ const persistOrder = () => {
     orders.unshift(orderData)
   }
   localStorage.setItem('sales-orders', JSON.stringify(orders))
+  void syncSalesOrdersToServer()
   return orderData
 }
 
@@ -1688,6 +2150,15 @@ const validateForm = () => {
     ElMessage.warning('请至少添加一个商品')
     return false
   }
+  const invalidLine = form.value.items.find(item => {
+    const code = String(item.productCode || '').trim()
+    if (!code) return true
+    return !item.productLocked
+  })
+  if (invalidLine) {
+    ElMessage.warning('明细中存在未匹配商品资料的商品，请确认查询条件后再保存')
+    return false
+  }
   return true
 }
 
@@ -1697,7 +2168,8 @@ const syncProductsIfNeeded = () => {
     form.value.items as unknown as Record<string, unknown>[]
   )
   if (syncResult.added + syncResult.updated > 0) {
-    ElMessage.info(`已将 ${syncResult.added + syncResult.updated} 条商品写入本企业商品资料`)
+    const pendingNote = syncResult.added > 0 ? '（新增为待审核）' : ''
+    ElMessage.info(`已将 ${syncResult.added + syncResult.updated} 条商品写入本企业商品资料${pendingNote}`)
   }
 }
 
@@ -1742,8 +2214,20 @@ const handleSubmit = (options: { navigate?: boolean; resetAfter?: boolean } = {}
       confirmStatus: CONFIRM_STATUS_UNCONFIRMED,
       auditor: '',
       auditTime: '',
+      discountRate: 0,
+      discountAmount: 0,
+      receiptAccount: '',
+      receiptMethod: '',
+      depositRatio: 0,
+      prepaidDeposit: 0,
+      currentReceiptAmount: 0,
+      enablePreDeduction: false,
       items: []
     }
+    salesExpenses.value = []
+    customerExpenses.value = []
+    receiptAccounts.value = []
+    ensureDefaultItemRows()
     return
   }
 
@@ -1809,18 +2293,237 @@ const handleAuditToggle = () => {
     type: 'warning'
   }).then(() => {
     form.value.auditStatus = 'audited'
-    form.value.auditor = '当前用户'
+    form.value.auditor = getCurrentUserName()
     form.value.auditTime = formatLocalDateTime()
     const saved = persistOrder()
-    onSalesOrderAudited(saved)
-    addOperationLog(form.value.orderNo, 'audit', '当前用户', '审核销售订单')
-    ElMessage.success('审核成功')
+    if (!saved) return
+    const collabResult = onSalesOrderAudited(saved)
+    if (collabResult.poUpdated) {
+      const orders = JSON.parse(localStorage.getItem('sales-orders') || '[]')
+      const idx = orders.findIndex((o: any) => o.id === form.value.orderNo)
+      if (idx >= 0) {
+        orders[idx] = { ...orders[idx], receiveStatus: 'received' }
+        localStorage.setItem('sales-orders', JSON.stringify(orders))
+        void syncSalesOrdersToServer()
+      }
+    }
+    addOperationLog(form.value.orderNo, 'audit', form.value.auditor, '审核销售订单')
+    if (collabResult.poUpdated && collabResult.buyerOrderNo) {
+      ElMessage.success(`审核成功，已回写采购订单 ${collabResult.buyerOrderNo} 接单状态`)
+    } else if (collabResult.poPushed && collabResult.buyerOrderNo) {
+      ElMessage.success(`审核成功，已向对方推送采购订单 ${collabResult.buyerOrderNo}，待对方审核核对`)
+    } else if (collabResult.message) {
+      ElMessage.warning(`销售订单已审核，${collabResult.message}`)
+    } else {
+      ElMessage.success('审核成功')
+    }
   }).catch(() => {})
+}
+
+const handleFormGridSelectOnlyKeydown = (e: KeyboardEvent) => {
+  handleFormGridSelectKeyboard(e)
+}
+
+const handleAddExpense = () => {
+  if (isOrderAudited.value) {
+    ElMessage.warning('订单已审核，不能修改金额信息')
+    return
+  }
+  ElMessageBox.prompt('请输入费用名称', '添加销售费用', {
+    confirmButtonText: '下一步',
+    cancelButtonText: '取消',
+    inputPlaceholder: '如：运费、装卸费'
+  }).then(({ value }) => {
+    if (!value?.trim()) return
+    ElMessageBox.prompt('请输入费用金额', '添加销售费用', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputPlaceholder: '0.00',
+      inputPattern: /^\d+(\.\d{1,2})?$/,
+      inputErrorMessage: '请输入有效金额'
+    }).then(({ value: amountStr }) => {
+      salesExpenses.value.push({ name: value.trim(), amount: Number(amountStr) || 0 })
+      ElMessage.success('费用已添加')
+    }).catch(() => {})
+  }).catch(() => {})
+}
+
+const handleAddCustomerExpense = () => {
+  if (isOrderAudited.value) {
+    ElMessage.warning('订单已审核，不能修改金额信息')
+    return
+  }
+  ElMessageBox.prompt('请输入费用名称', '添加客户承担费用', {
+    confirmButtonText: '下一步',
+    cancelButtonText: '取消',
+    inputPlaceholder: '如：运费、安装费'
+  }).then(({ value }) => {
+    if (!value?.trim()) return
+    ElMessageBox.prompt('请输入费用金额', '添加客户承担费用', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputPlaceholder: '0.00',
+      inputPattern: /^\d+(\.\d{1,2})?$/,
+      inputErrorMessage: '请输入有效金额'
+    }).then(({ value: amountStr }) => {
+      customerExpenses.value.push({ name: value.trim(), amount: Number(amountStr) || 0 })
+      ElMessage.success('费用已添加')
+    }).catch(() => {})
+  }).catch(() => {})
+}
+
+const handleAllocateDiscount = () => {
+  if (isOrderAudited.value) {
+    ElMessage.warning('订单已审核，不能修改金额信息')
+    return
+  }
+  const discount = Number(form.value.discountAmount) || 0
+  if (discount <= 0) {
+    ElMessage.warning('请先填写整单折扣额')
+    return
+  }
+  const validItems = form.value.items.filter(item => {
+    const qty = Number(item.quantity) || 0
+    return qty > 0 && Boolean(String(item.productCode || '').trim() || String(item.productName || '').trim())
+  })
+  if (!validItems.length) {
+    ElMessage.warning('请先添加有效商品明细')
+    return
+  }
+  validItems.forEach(item => calcRowAmount(item))
+  const totalLineAmount = validItems.reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
+  if (totalLineAmount <= 0) {
+    ElMessage.warning('商品金额合计须大于 0')
+    return
+  }
+  let allocated = 0
+  validItems.forEach((row, idx) => {
+    if (idx === validItems.length - 1) {
+      row.orderDiscountShare = Number((discount - allocated).toFixed(2))
+    } else {
+      const share = Number((discount * Number(row.amount) / totalLineAmount).toFixed(2))
+      row.orderDiscountShare = share
+      allocated += share
+    }
+  })
+  form.value.items.forEach(row => {
+    if (!validItems.includes(row)) row.orderDiscountShare = 0
+  })
+  ElMessage.success('整单折扣已分摊至明细行')
+}
+
+const openMultiReceiptDialog = () => {
+  if (isOrderAudited.value) return
+  multiReceiptDraft.value = receiptAccounts.value.length
+    ? receiptAccounts.value.map(r => ({ ...r }))
+    : [{ account: form.value.receiptAccount || '', amount: Number(form.value.prepaidDeposit) || 0 }]
+  showMultiReceiptDialog.value = true
+}
+
+const addMultiReceiptRow = () => {
+  multiReceiptDraft.value.push({ account: '', amount: 0 })
+}
+
+const removeMultiReceiptRow = (index: number) => {
+  if (multiReceiptDraft.value.length <= 1) return
+  multiReceiptDraft.value.splice(index, 1)
+}
+
+const confirmMultiReceipt = () => {
+  const rows = multiReceiptDraft.value.filter(r => r.account && Number(r.amount) > 0)
+  if (!rows.length) {
+    ElMessage.warning('请至少填写一条有效收款账户')
+    return
+  }
+  receiptAccounts.value = rows.map(r => ({ account: r.account, amount: Number(r.amount) }))
+  if (rows.length === 1) {
+    form.value.receiptAccount = rows[0].account
+  }
+  showMultiReceiptDialog.value = false
+  ElMessage.success('多账户收款已设置')
+}
+
+const applyDepositRatio = () => {
+  if (isOrderAudited.value) {
+    ElMessage.warning('订单已审核，不能修改金额信息')
+    return
+  }
+  form.value.prepaidDeposit = prepayAmount.value
+  ElMessage.success('已按订金比率更新预收订金')
+}
+
+const handleGeneratePrepay = () => {
+  if (isOrderAudited.value) {
+    ElMessage.warning('订单已审核，不能修改金额信息')
+    return
+  }
+  if (!form.value.customer) {
+    ElMessage.warning('请先选择客户')
+    return
+  }
+  let amount = Number(form.value.prepaidDeposit) || 0
+  if (amount <= 0) {
+    form.value.prepaidDeposit = prepayAmount.value
+    amount = Number(form.value.prepaidDeposit) || 0
+  }
+  if (amount <= 0) {
+    ElMessage.warning('请填写预收订金或设置订金比率')
+    return
+  }
+
+  persistOrder()
+
+  const primaryAccount = receiptAccounts.value.length
+    ? resolveReceiptAccountLabel(receiptAccounts.value[0].account)
+    : resolveReceiptAccountLabel(form.value.receiptAccount)
+
+  const doc = saveFundDocument({
+    type: 'preReceipt',
+    partner: form.value.customer,
+    partnerCode: form.value.customerCode || undefined,
+    account: primaryAccount || '工商银行',
+    date: form.value.date || new Date().toISOString().slice(0, 10),
+    amount,
+    settlementType: mapReceiptMethodToSettlement(form.value.receiptMethod),
+    remark: receiptAccounts.value.length > 1
+      ? `销售订单 ${form.value.orderNo} 预收订金（${receiptAccounts.value.length}个账户）`
+      : `销售订单 ${form.value.orderNo} 预收订金`,
+    creator: getCurrentUserName(),
+    auditStatus: 'notAudited',
+    sourceOrderNo: form.value.enablePreDeduction ? form.value.orderNo : undefined
+  })
+  ElMessage.success(`预收款单 ${doc.id} 已生成，可在资金模块查看`)
 }
 
 const handleCancel = () => {
   router.push('/sales/order-list')
 }
+
+const hasDraftChanges = () => {
+  if (String(form.value.customer || '').trim()) return true
+  if (String(form.value.remark || '').trim()) return true
+  return form.value.items.some(item =>
+    String(item.productCode || '').trim() || String(item.productName || '').trim()
+  )
+}
+
+const navCurrentId = computed(() => String(orderId.value || route.params.id || ''))
+
+const {
+  canNavFirst,
+  canNavPrev,
+  canNavNext,
+  canNavLast,
+  handleNavFirst,
+  handleNavPrev,
+  handleNavNext,
+  handleNavLast
+} = useOrderDocumentNav({
+  loadOrderIds: loadSalesOrderNavIds,
+  currentId: navCurrentId,
+  editRoutePath: id => `/sales/order-list/create/${id}`,
+  hasUnsavedChanges: hasDraftChanges
+})
 
 const buildPrintData = () => ({
   orderDate: form.value.date,
@@ -1958,10 +2661,10 @@ const handleMore = (command: string) => {
           </template>
         </el-dropdown>
         <div class="nav-actions">
-          <el-button size="small" :icon="DArrowLeft" circle disabled title="首张" />
-          <el-button size="small" :icon="ArrowLeft" circle @click="handleCancel" title="返回列表" />
-          <el-button size="small" :icon="ArrowRight" circle disabled title="下一张" />
-          <el-button size="small" :icon="DArrowRight" circle disabled title="末张" />
+          <el-button size="small" :icon="DArrowLeft" circle :disabled="!canNavFirst" title="首张" @click="handleNavFirst" />
+          <el-button size="small" :icon="ArrowLeft" circle :disabled="!canNavPrev" title="上一张" @click="handleNavPrev" />
+          <el-button size="small" :icon="ArrowRight" circle :disabled="!canNavNext" title="下一张" @click="handleNavNext" />
+          <el-button size="small" :icon="DArrowRight" circle :disabled="!canNavLast" title="末张" @click="handleNavLast" />
         </div>
       </div>
     </div>
@@ -2005,7 +2708,12 @@ const handleMore = (command: string) => {
                 style="width: 100%;"
                 @change="handleCustomerChange"
               >
-                <el-option v-for="c in customerList" :key="c.id" :label="c.name" :value="c.name" />
+                <el-option
+                  v-for="c in customerOptions"
+                  :key="c.code || c.value"
+                  :label="c.label"
+                  :value="c.value"
+                />
               </el-select>
 
               <el-input
@@ -2092,9 +2800,9 @@ const handleMore = (command: string) => {
       <div class="section-body items-section" v-show="!itemsCollapsed">
         <div class="items-toolbar">
           <p v-if="showPlatformHint" class="product-query-hint">
-            商品查询：编码、名称、规格、厂家，空格隔开，不限顺序；保存后写入本企业商品资料（待审核）。
+            商品查询：编码、名称、规格、厂家，空格隔开，不限顺序；下拉可勾选多项一次添加；保存后写入本企业商品资料（待审核）。
           </p>
-          <p v-else class="product-query-hint">商品查询：编码、名称、规格、厂家，空格隔开，不限顺序。</p>
+          <p v-else class="product-query-hint">商品查询：编码、名称、规格、厂家，空格隔开，不限顺序；下拉可勾选多项一次添加。</p>
           <div class="toolbar-right">
             <el-button size="small" plain @click="openBatchAdd">批量选择</el-button>
             <el-button size="small" plain @click="addItem">添加行</el-button>
@@ -2148,38 +2856,77 @@ const handleMore = (command: string) => {
               :align="col.align"
               header-align="center"
             >
-              <template v-if="col.required" #header>
-                <span class="required-col">{{ col.label }}</span>
+              <template #header>
+                <DocumentSortHeader
+                  v-if="isColumnSortable(col)"
+                  :label="col.label"
+                  :required="col.required"
+                  :sort-icon="getItemSortIcon(col.key)"
+                  :active="!!itemSortOrders[col.key]"
+                  :align="col.align === 'right' ? 'right' : 'center'"
+                  @sort="handleItemColumnSort(col.key)"
+                />
+                <span v-else-if="col.required" class="required-col">{{ col.label }}</span>
+                <span v-else>{{ col.label }}</span>
               </template>
               <template #default="{ row }">
+                <div class="item-cell" :data-col-key="col.key">
                 <div v-if="col.key === 'productCode'" class="code-cell">
                   <el-autocomplete
                     v-model="row.productCode"
                     :ref="(el: any) => setProductAutocompleteRef(row, 'productCode', el)"
                     size="small"
                     class="product-code-autocomplete"
-                    placeholder="编码 名称 规格 厂家"
                     popper-class="product-suggest-popper"
                     :debounce="150"
                     :trigger-on-focus="false"
                     highlight-first-item
                     :fetch-suggestions="(_q, cb) => fetchItemProductSuggestions(row, cb)"
                     @select="(item: ItemProductSuggestion) => handleItemProductSuggestionSelect(row, item)"
+                    @visible-change="(visible: boolean) => handleSuggestVisibleChange(row, visible)"
                     @blur="handleItemProductBlur(row)"
                     @input="clearProductLock(row)"
                   >
                     <template #header>
                       <div class="product-suggest-item is-header">
+                        <span class="col-check">
+                          <el-checkbox
+                            v-if="showSuggestMultiBar(row)"
+                            :model-value="isAllSuggestSelected(row)"
+                            :indeterminate="isSuggestSelectionIndeterminate(row)"
+                            @change="(val: boolean) => toggleSelectAllSuggest(row, val)"
+                            @click.stop
+                          />
+                        </span>
                         <span class="col-code">商品编码</span>
                         <span class="col-name">商品名称</span>
                         <span class="col-spec">规格型号</span>
                         <span class="col-mfr">生产厂家</span>
-                        <span class="col-price is-num">单价</span>
+                        <span class="col-price is-num">上次价格</span>
                         <span class="col-source">来源</span>
+                      </div>
+                      <div v-if="showSuggestMultiBar(row)" class="suggest-multi-bar">
+                        <span class="suggest-multi-tip">勾选多项后一次添加；单击行仍为单选</span>
+                        <el-button
+                          size="small"
+                          type="primary"
+                          :disabled="suggestSelectedCount(row) === 0"
+                          @mousedown.prevent
+                          @click.stop="confirmSuggestMultiAdd(row)"
+                        >
+                          添加已选{{ suggestSelectedCount(row) > 0 ? `（${suggestSelectedCount(row)}）` : '' }}
+                        </el-button>
                       </div>
                     </template>
                     <template #default="{ item: suggestion }">
                       <div class="product-suggest-item">
+                        <span class="col-check" @mousedown.stop @click.stop>
+                          <el-checkbox
+                            v-if="showSuggestMultiBar(row)"
+                            :model-value="isSuggestSelected(row, suggestion.code)"
+                            @change="(val: boolean) => toggleSuggestSelection(row, suggestion, val)"
+                          />
+                        </span>
                         <span class="col-code s-code">{{ suggestion.code }}</span>
                         <span class="col-name s-name" :title="suggestion.name">{{ suggestion.name }}</span>
                         <span class="col-spec s-spec" :title="suggestion.spec">{{ suggestion.spec || '-' }}</span>
@@ -2189,135 +2936,51 @@ const handleMore = (command: string) => {
                       </div>
                     </template>
                   </el-autocomplete>
-                  <el-button link type="primary" size="small" class="select-btn" @click="openBatchAdd">选择</el-button>
                 </div>
-                <el-autocomplete
+                <el-input
                   v-else-if="col.key === 'productName'"
                   v-model="row.productName"
-                  :ref="(el: any) => setProductAutocompleteRef(row, 'productName', el)"
                   size="small"
-                  class="product-field-autocomplete"
-                  popper-class="product-suggest-popper"
-                  :debounce="150"
-                  :trigger-on-focus="false"
-                  :readonly="isItemColumnReadonly(row, 'productName')"
-                  highlight-first-item
-                  :fetch-suggestions="(_q, cb) => fetchItemProductSuggestions(row, cb)"
-                  @select="(item: ItemProductSuggestion) => handleItemProductSuggestionSelect(row, item)"
-                  @blur="handleItemProductBlur(row)"
-                  @input="clearProductLock(row)"
-                  @focus="handleLockedItemColumnFocus(row, 'productName')"
-                >
-                  <template #header>
-                    <div class="product-suggest-item is-header">
-                      <span class="col-code">商品编码</span>
-                      <span class="col-name">商品名称</span>
-                      <span class="col-spec">规格型号</span>
-                      <span class="col-mfr">生产厂家</span>
-                      <span class="col-price is-num">单价</span>
-                      <span class="col-source">来源</span>
-                    </div>
-                  </template>
-                  <template #default="{ item: suggestion }">
-                    <div class="product-suggest-item">
-                      <span class="col-code s-code">{{ suggestion.code }}</span>
-                      <span class="col-name s-name" :title="suggestion.name">{{ suggestion.name }}</span>
-                      <span class="col-spec s-spec" :title="suggestion.spec">{{ suggestion.spec || '-' }}</span>
-                      <span class="col-mfr s-mfr" :title="suggestion.manufacturer">{{ suggestion.manufacturer || '-' }}</span>
-                      <span class="col-price s-last-price is-num">{{ formatMoney(suggestion.lastPrice) }}</span>
-                      <span class="col-source">{{ suggestion.source === 'platform' ? '平台' : '本地' }}</span>
-                    </div>
-                  </template>
-                </el-autocomplete>
-                <el-autocomplete
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'productName')"
+                />
+                <el-input
                   v-else-if="col.key === 'spec'"
                   v-model="row.spec"
-                  :ref="(el: any) => setProductAutocompleteRef(row, 'spec', el)"
                   size="small"
-                  class="product-field-autocomplete"
-                  popper-class="product-suggest-popper"
-                  :debounce="150"
-                  :trigger-on-focus="false"
-                  :readonly="isItemColumnReadonly(row, 'spec')"
-                  highlight-first-item
-                  :fetch-suggestions="(_q, cb) => fetchItemProductSuggestions(row, cb)"
-                  @select="(item: ItemProductSuggestion) => handleItemProductSuggestionSelect(row, item)"
-                  @blur="handleItemProductBlur(row)"
-                  @input="clearProductLock(row)"
-                  @focus="handleLockedItemColumnFocus(row, 'spec')"
-                >
-                  <template #header>
-                    <div class="product-suggest-item is-header">
-                      <span class="col-code">商品编码</span>
-                      <span class="col-name">商品名称</span>
-                      <span class="col-spec">规格型号</span>
-                      <span class="col-mfr">生产厂家</span>
-                      <span class="col-price is-num">单价</span>
-                      <span class="col-source">来源</span>
-                    </div>
-                  </template>
-                  <template #default="{ item: suggestion }">
-                    <div class="product-suggest-item">
-                      <span class="col-code s-code">{{ suggestion.code }}</span>
-                      <span class="col-name s-name" :title="suggestion.name">{{ suggestion.name }}</span>
-                      <span class="col-spec s-spec" :title="suggestion.spec">{{ suggestion.spec || '-' }}</span>
-                      <span class="col-mfr s-mfr" :title="suggestion.manufacturer">{{ suggestion.manufacturer || '-' }}</span>
-                      <span class="col-price s-last-price is-num">{{ formatMoney(suggestion.lastPrice) }}</span>
-                      <span class="col-source">{{ suggestion.source === 'platform' ? '平台' : '本地' }}</span>
-                    </div>
-                  </template>
-                </el-autocomplete>
-                <el-autocomplete
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'spec')"
+                />
+                <el-input
                   v-else-if="col.key === 'manufacturer'"
                   v-model="row.manufacturer"
-                  :ref="(el: any) => setProductAutocompleteRef(row, 'manufacturer', el)"
                   size="small"
-                  class="product-field-autocomplete"
-                  popper-class="product-suggest-popper"
-                  :debounce="150"
-                  :trigger-on-focus="false"
-                  :readonly="isItemColumnReadonly(row, 'manufacturer')"
-                  highlight-first-item
-                  :fetch-suggestions="(_q, cb) => fetchItemProductSuggestions(row, cb)"
-                  @select="(item: ItemProductSuggestion) => handleItemProductSuggestionSelect(row, item)"
-                  @blur="handleItemProductBlur(row)"
-                  @input="clearProductLock(row)"
-                  @focus="handleLockedItemColumnFocus(row, 'manufacturer')"
-                >
-                  <template #header>
-                    <div class="product-suggest-item is-header">
-                      <span class="col-code">商品编码</span>
-                      <span class="col-name">商品名称</span>
-                      <span class="col-spec">规格型号</span>
-                      <span class="col-mfr">生产厂家</span>
-                      <span class="col-price is-num">单价</span>
-                      <span class="col-source">来源</span>
-                    </div>
-                  </template>
-                  <template #default="{ item: suggestion }">
-                    <div class="product-suggest-item">
-                      <span class="col-code s-code">{{ suggestion.code }}</span>
-                      <span class="col-name s-name" :title="suggestion.name">{{ suggestion.name }}</span>
-                      <span class="col-spec s-spec" :title="suggestion.spec">{{ suggestion.spec || '-' }}</span>
-                      <span class="col-mfr s-mfr" :title="suggestion.manufacturer">{{ suggestion.manufacturer || '-' }}</span>
-                      <span class="col-price s-last-price is-num">{{ formatMoney(suggestion.lastPrice) }}</span>
-                      <span class="col-source">{{ suggestion.source === 'platform' ? '平台' : '本地' }}</span>
-                    </div>
-                  </template>
-                </el-autocomplete>
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'manufacturer')"
+                />
                 <el-input
                   v-else-if="col.key === 'registrationNo'"
                   v-model="row.registrationNo"
                   size="small"
-                  :readonly="isItemColumnReadonly(row, 'registrationNo')"
-                  @focus="handleLockedItemColumnFocus(row, 'registrationNo')"
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'registrationNo')"
                 />
                 <el-input
                   v-else-if="col.key === 'productionLicenseNo'"
                   v-model="row.productionLicenseNo"
                   size="small"
-                  :readonly="isItemColumnReadonly(row, 'productionLicenseNo')"
-                  @focus="handleLockedItemColumnFocus(row, 'productionLicenseNo')"
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'productionLicenseNo')"
                 />
                 <el-input-number
                   v-else-if="col.key === 'quantity'"
@@ -2328,6 +2991,7 @@ const handleMore = (command: string) => {
                   size="small"
                   class="cell-number"
                   @change="calcRowAmount(row)"
+                  @keydown.capture="(e: KeyboardEvent) => handleItemCellEnterKeydown(e, row, 'quantity')"
                 />
                 <el-input v-else-if="col.key === 'unit'" v-model="row.unit" size="small" />
                 <el-input-number
@@ -2339,7 +3003,9 @@ const handleMore = (command: string) => {
                   size="small"
                   class="cell-number"
                   @change="calcRowAmount(row)"
+                  @keydown.capture="(e: KeyboardEvent) => handleItemCellEnterKeydown(e, row, 'price')"
                 />
+                <span v-else-if="col.key === 'lastPrice'" class="calc-text">{{ formatMoney(row.lastPrice) }}</span>
                 <span v-else-if="col.key === 'amount'" class="amount-text">{{ formatMoney(row.amount) }}</span>
                 <BatchNoCellKeyboard
                   v-else-if="col.key === 'batchNo'"
@@ -2377,53 +3043,233 @@ const handleMore = (command: string) => {
                     @change="handleExpiryDateChange(row)"
                   />
                 </div>
-                <el-input v-else-if="col.key === 'storageCondition'" v-model="row.storageCondition" size="small" />
-                <el-input v-else-if="col.key === 'bidType'" v-model="row.bidType" size="small" />
+                <el-input
+                  v-else-if="col.key === 'storageCondition'"
+                  v-model="row.storageCondition"
+                  size="small"
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'storageCondition')"
+                />
+                <el-input
+                  v-else-if="col.key === 'bidType'"
+                  v-model="row.bidType"
+                  size="small"
+                  class="product-bound-field"
+                  readonly
+                  tabindex="-1"
+                  @focus="handleBoundProductColumnFocus(row, 'bidType')"
+                />
                 <el-input
                   v-else-if="col.key === 'remark'"
                   v-model="row.itemRemark"
                   size="small"
                   maxlength="200"
                 />
+                </div>
               </template>
             </el-table-column>
           </el-table>
         </div>
-        <div class="summary-bar items-summary-bar">
+        <div class="summary-bar">
           <div class="summary-left">
             <span>数量合计：<strong>{{ formatQty(totalQuantity) }}</strong></span>
             <span>金额合计：<strong>{{ formatMoney(totalAmount) }}</strong></span>
           </div>
           <div class="summary-right">
-            订单金额：<strong class="highlight-amount">{{ formatMoney(totalAmount) }}</strong>
+            成交金额：<strong>{{ formatMoney(receivableAmount) }}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 金额信息 -->
+    <div class="section-card">
+      <div class="section-header" @click="amountInfoCollapsed = !amountInfoCollapsed">
+        <span class="section-icon" :class="{ collapsed: amountInfoCollapsed }">▼</span>
+        <h3>金额信息</h3>
+      </div>
+      <div class="section-body amount-section" v-show="!amountInfoCollapsed" @keydown.capture="handleFormGridSelectOnlyKeydown">
+        <div class="form-grid amount-grid">
+          <div class="form-field">
+            <label class="label-with-link">
+              整单折扣额
+              <button type="button" class="inline-link" :disabled="isOrderAudited" @click="handleAllocateDiscount">分摊</button>
+            </label>
+            <el-input-number
+              v-model="form.discountAmount"
+              :min="0"
+              :precision="2"
+              :controls="false"
+              size="small"
+              style="width: 100%;"
+              :disabled="isOrderAudited"
+            />
+          </div>
+          <div class="form-field">
+            <label>整单折扣率 %</label>
+            <el-input-number
+              v-model="form.discountRate"
+              :min="0"
+              :max="100"
+              :precision="2"
+              :controls="false"
+              size="small"
+              style="width: 100%;"
+              :disabled="isOrderAudited"
+            />
+          </div>
+          <div class="form-field">
+            <label>成交金额</label>
+            <span class="deal-amount-value">{{ formatMoney(receivableAmount) }}</span>
+          </div>
+        </div>
+        <div class="expense-dual-row">
+          <div class="expense-block">
+            <div class="expense-block-head">
+              <span class="expense-label">预计销售费用明细</span>
+              <button type="button" class="toolbar-link" :disabled="isOrderAudited" @click="handleAddExpense">+ 添加费用</button>
+              <span class="expense-total">合计: {{ formatMoney(salesExpenseTotal) }}</span>
+            </div>
+            <div v-if="salesExpenses.length" class="expense-tags">
+              <el-tag
+                v-for="(exp, idx) in salesExpenses"
+                :key="`s-${idx}`"
+                size="small"
+                closable
+                :disable-transitions="false"
+                @close="!isOrderAudited && salesExpenses.splice(idx, 1)"
+              >
+                {{ exp.name }} {{ formatMoney(exp.amount) }}
+              </el-tag>
+            </div>
+          </div>
+          <div class="expense-block">
+            <div class="expense-block-head">
+              <span class="expense-label">预计客户承担费用明细</span>
+              <button type="button" class="toolbar-link" :disabled="isOrderAudited" @click="handleAddCustomerExpense">+ 添加费用</button>
+              <span class="expense-total">合计: {{ formatMoney(customerExpenseTotal) }}</span>
+            </div>
+            <div v-if="customerExpenses.length" class="expense-tags">
+              <el-tag
+                v-for="(exp, idx) in customerExpenses"
+                :key="`c-${idx}`"
+                size="small"
+                closable
+                type="warning"
+                :disable-transitions="false"
+                @close="!isOrderAudited && customerExpenses.splice(idx, 1)"
+              >
+                {{ exp.name }} {{ formatMoney(exp.amount) }}
+              </el-tag>
+            </div>
+          </div>
+        </div>
+        <div class="amount-divider" />
+        <div class="form-grid amount-grid">
+          <div class="form-field">
+            <label class="label-with-link">
+              收款账户
+              <button type="button" class="inline-link" :disabled="isOrderAudited" @click="openMultiReceiptDialog">多账户收款</button>
+            </label>
+            <el-select
+              v-model="form.receiptAccount"
+              default-first-option
+              size="small"
+              :placeholder="multiReceiptSummary || '请选择'"
+              style="width: 100%;"
+              :disabled="isOrderAudited"
+            >
+              <el-option v-for="opt in receiptAccountOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+            </el-select>
+            <span v-if="multiReceiptSummary" class="field-hint">{{ multiReceiptSummary }}</span>
+          </div>
+          <div class="form-field">
+            <label>收款方式</label>
+            <el-select
+              v-model="form.receiptMethod"
+              default-first-option
+              size="small"
+              placeholder="请选择"
+              style="width: 100%;"
+              :disabled="isOrderAudited"
+            >
+              <el-option v-for="opt in receiptMethodOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+            </el-select>
+          </div>
+          <div class="form-field">
+            <label class="label-with-link">
+              本次订金比率 %
+              <button type="button" class="icon-link" :disabled="isOrderAudited" title="按比率计算预收订金" @click="applyDepositRatio">
+                <el-icon><Coin /></el-icon>
+              </button>
+            </label>
+            <el-input-number
+              v-model="form.depositRatio"
+              :min="0"
+              :max="100"
+              :precision="2"
+              :controls="false"
+              size="small"
+              style="width: 100%;"
+              :disabled="isOrderAudited"
+            />
+          </div>
+          <div class="form-field">
+            <label class="label-with-link">
+              预收订金
+              <button type="button" class="inline-link" :disabled="isOrderAudited" @click="handleGeneratePrepay">生成预收单</button>
+            </label>
+            <div class="prepay-row">
+              <el-input-number
+                v-model="form.prepaidDeposit"
+                :min="0"
+                :precision="2"
+                :controls="false"
+                size="small"
+                style="flex: 1;"
+                :disabled="isOrderAudited"
+              />
+              <el-checkbox v-model="form.enablePreDeduction" size="small" :disabled="isOrderAudited">定向抵扣</el-checkbox>
+              <el-tooltip content="开启后，预收订金将按本销售订单号定向抵扣应收" placement="top">
+                <el-icon class="help-icon"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </div>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- 批量添加商品 -->
-  <el-dialog v-model="showBatchAdd" title="批量添加商品" width="800px" draggable>
-    <div class="batch-add-dialog">
-      <div class="batch-search">
-        <el-input v-model="batchSearchQuery" placeholder="搜索商品编码、名称、规格" clearable />
+  <ProductBatchSelectDialog
+    v-model="showBatchAdd"
+    :products="batchProductList"
+    @confirm="confirmBatchAdd"
+  />
+
+  <el-dialog v-model="showMultiReceiptDialog" title="多账户收款" width="560px" draggable>
+    <div class="multi-receipt-dialog">
+      <div v-for="(row, idx) in multiReceiptDraft" :key="idx" class="multi-receipt-row">
+        <el-select v-model="row.account" size="small" placeholder="收款账户" style="flex: 1;">
+          <el-option v-for="opt in receiptAccountOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+        </el-select>
+        <el-input-number
+          v-model="row.amount"
+          :min="0"
+          :precision="2"
+          :controls="false"
+          size="small"
+          placeholder="金额"
+          style="width: 140px;"
+        />
+        <el-button size="small" :icon="Minus" :disabled="multiReceiptDraft.length <= 1" @click="removeMultiReceiptRow(idx)" />
       </div>
-      <el-table
-        :data="filteredBatchProducts"
-        border
-        max-height="360"
-        @selection-change="handleBatchSelectionChange"
-      >
-        <el-table-column type="selection" width="50" />
-        <el-table-column prop="code" label="商品编码" width="120" />
-        <el-table-column prop="name" label="商品名称" min-width="160" />
-        <el-table-column prop="spec" label="规格型号" width="120" />
-        <el-table-column prop="manufacturer" label="生产厂家" min-width="140" />
-      </el-table>
+      <el-button size="small" type="primary" link :icon="Plus" @click="addMultiReceiptRow">添加账户</el-button>
     </div>
     <template #footer>
-      <el-button @click="showBatchAdd = false">取消</el-button>
-      <el-button type="primary" @click="confirmBatchAdd">确定添加</el-button>
+      <el-button @click="showMultiReceiptDialog = false">取消</el-button>
+      <el-button type="primary" @click="confirmMultiReceipt">确定</el-button>
     </template>
   </el-dialog>
 
@@ -2483,6 +3329,9 @@ const handleMore = (command: string) => {
 </template>
 
 <style lang="scss" scoped>
+@import '@/styles/order-form-basic-info.scss';
+@import '@/styles/document-table-sort.scss';
+
 .erp-page {
   position: relative;
   padding: 0;
@@ -2588,7 +3437,10 @@ const handleMore = (command: string) => {
     display: flex;
     align-items: center;
     gap: 8px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+    max-width: 100%;
+    overflow-x: auto;
   }
 
   .nav-actions {
@@ -2597,6 +3449,7 @@ const handleMore = (command: string) => {
     margin-left: 8px;
     padding-left: 8px;
     border-left: 1px solid #e8e8e8;
+    flex-shrink: 0;
   }
 
   :deep(.btn-print) {
@@ -2668,64 +3521,216 @@ const handleMore = (command: string) => {
   }
 }
 
+.batch-cell-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.summary-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: #fafafa;
+  border-top: 1px solid #f0f0f0;
+
+  .summary-left {
+    display: flex;
+    gap: 24px;
+    font-size: 13px;
+    color: #666;
+    flex-wrap: wrap;
+
+    strong {
+      color: #333;
+      font-weight: 600;
+    }
+  }
+
+  .summary-right {
+    font-size: 13px;
+    color: #666;
+
+    strong {
+      color: #333;
+      font-weight: 600;
+    }
+  }
+}
+
+.deal-amount-value {
+  display: block;
+  min-height: 24px;
+  line-height: 24px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #333;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 12px 24px;
+
+  &.amount-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
 
   .form-field {
     display: flex;
     flex-direction: column;
     gap: 4px;
 
-    &.span-2 {
-      grid-column: span 2;
-    }
-
-    &.full-width {
-      grid-column: 1 / -1;
-    }
-
-    &.required label::after {
-      content: '*';
-      color: #f53f3f;
-      margin-left: 2px;
-    }
-
     label {
       font-size: 12px;
       color: #666;
+      line-height: 20px;
     }
 
-    :deep(.el-input),
-    :deep(.el-select),
-    :deep(.el-textarea) {
-      border: none !important;
+    .label-with-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
 
-    :deep(.el-input__wrapper),
-    :deep(.el-select__wrapper) {
-      box-shadow: 0 1px 0 0 #e4e7ed !important;
-      border: none !important;
-      background: transparent;
-      border-radius: 0;
-      padding: 1px 0 4px 0 !important;
-      height: 28px !important;
+    .inline-link {
+      border: none;
+      background: none;
+      color: #1677ff;
+      font-size: 12px;
+      cursor: pointer;
+      padding: 0;
+
+      &:disabled {
+        color: #c0c4cc;
+        cursor: not-allowed;
+      }
     }
 
-    :deep(.el-textarea__inner) {
-      box-shadow: 0 1px 0 0 #e4e7ed !important;
-      border: none !important;
-      border-radius: 0;
-      padding: 4px 0;
+    .prepay-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .field-hint {
+      font-size: 11px;
+      color: #1677ff;
+      line-height: 16px;
+    }
+
+    .icon-link {
+      border: none;
+      background: none;
+      color: #1677ff;
+      cursor: pointer;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+
+      &:disabled {
+        color: #c0c4cc;
+        cursor: not-allowed;
+      }
+    }
+
+    .help-icon {
+      color: #909399;
+      font-size: 14px;
+      cursor: help;
     }
   }
 }
 
-.batch-cell-wrap {
+.amount-section {
+  .expense-dual-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px 24px;
+    padding: 12px 0;
+    margin: 4px 0;
+    border-top: 1px dashed #e8e8e8;
+    border-bottom: 1px dashed #e8e8e8;
+
+    @media (max-width: 900px) {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .expense-block {
+    min-width: 0;
+
+    .expense-block-head {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin-bottom: 8px;
+    }
+  }
+
+  .amount-divider {
+    height: 1px;
+    background: #f0f0f0;
+    margin: 8px 0 12px;
+  }
+
+  .expense-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 12px 0;
+    margin: 4px 0 12px;
+    border-top: 1px dashed #e8e8e8;
+    border-bottom: 1px dashed #e8e8e8;
+
+    .expense-label {
+      font-size: 12px;
+      color: #666;
+    }
+
+    .expense-total {
+      margin-left: auto;
+      font-size: 13px;
+      color: #333;
+      font-weight: 500;
+    }
+
+    .expense-tags {
+      width: 100%;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+  }
+
+  .toolbar-link {
+    border: none;
+    background: none;
+    color: #1677ff;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
+
+    &:disabled {
+      color: #c0c4cc;
+      cursor: not-allowed;
+    }
+  }
+}
+
+.multi-receipt-dialog {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 12px;
+
+  .multi-receipt-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
 }
 
 .items-toolbar {
@@ -2757,43 +3762,6 @@ const handleMore = (command: string) => {
   display: none;
 }
 
-.summary-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 16px;
-  background: #fafafa;
-  border-top: 1px solid #f0f0f0;
-
-  &.items-summary-bar {
-    background: #fffbe6;
-    border-top: 1px solid #ffe58f;
-
-    .highlight-amount {
-      color: #d48806;
-      font-size: 15px;
-    }
-  }
-
-  .summary-left {
-    display: flex;
-    gap: 24px;
-    font-size: 13px;
-    color: #666;
-    flex-wrap: wrap;
-
-    strong {
-      color: #333;
-      font-weight: 600;
-    }
-  }
-
-  .summary-right {
-    font-size: 13px;
-    color: #666;
-  }
-}
-
 .items-table-wrap {
   overflow: hidden;
   padding: 0;
@@ -2806,15 +3774,7 @@ const handleMore = (command: string) => {
   }
 
   :deep(.items-detail-table.el-table) {
-    --table-line-color: #d9d9d9;
-    --table-row-odd-bg: #f0f7ff;
-    --table-row-even-bg: #f5f5f5;
-    --table-row-hover-bg: #fff3cd;
-    --table-header-bg: #f5f5f5;
-    --el-table-border-color: #d9d9d9;
-    --el-border-color-lighter: #d9d9d9;
-
-    border: 1px solid var(--table-line-color);
+    border: 1px solid var(--yx-table-line-color);
 
     .el-table__header-wrapper,
     .el-table__body-wrapper,
@@ -2858,10 +3818,10 @@ const handleMore = (command: string) => {
       display: flex;
       align-items: center;
       justify-content: center;
-      min-height: 28px;
+      min-height: var(--yx-table-detail-row-height);
 
       .row-index-num {
-        line-height: 22px;
+        line-height: calc(var(--yx-table-detail-row-height) - var(--yx-table-cell-padding-y) * 2);
         color: #333;
         font-size: 13px;
         font-weight: 600;
@@ -2930,15 +3890,15 @@ const handleMore = (command: string) => {
     .el-table__border-left-patch,
     .el-table__border-right-patch,
     .el-table__border-bottom-patch {
-      background-color: var(--table-line-color);
+      background-color: var(--yx-table-line-color);
     }
 
     th.el-table__cell,
     td.el-table__cell {
-      border-color: var(--table-line-color) !important;
-      border-right: 1px solid var(--table-line-color);
-      border-bottom: 1px solid var(--table-line-color);
-      padding: 6px 8px;
+      border-color: var(--yx-table-line-color) !important;
+      border-right: 1px solid var(--yx-table-line-color);
+      border-bottom: 1px solid var(--yx-table-line-color);
+      padding: var(--yx-table-cell-padding-y) 8px;
       vertical-align: middle;
     }
 
@@ -2949,7 +3909,6 @@ const handleMore = (command: string) => {
     }
 
     .el-table__header-wrapper th.el-table__cell {
-      background: var(--table-header-bg) !important;
       color: #333;
       font-weight: 600;
       font-size: 13px;
@@ -3008,18 +3967,6 @@ const handleMore = (command: string) => {
     .el-table__body-wrapper td.el-table__cell.is-left,
     .el-table__footer-wrapper td.el-table__cell.is-left {
       text-align: left;
-    }
-
-    .el-table__body-wrapper tr:nth-child(odd) > td.el-table__cell {
-      background-color: var(--table-row-odd-bg) !important;
-    }
-
-    .el-table__body-wrapper tr:nth-child(even) > td.el-table__cell {
-      background-color: var(--table-row-even-bg) !important;
-    }
-
-    .el-table__body-wrapper tr:hover > td.el-table__cell {
-      background-color: var(--table-row-hover-bg) !important;
     }
 
     .el-table__cell {
@@ -3125,11 +4072,15 @@ const handleMore = (command: string) => {
       .el-input {
         flex: 1;
       }
+    }
 
-      .select-btn {
-        flex-shrink: 0;
-        padding: 0 4px;
-        font-size: 12px;
+    .product-bound-field {
+      width: 100%;
+
+      :deep(.el-input__inner) {
+        cursor: default;
+        background-color: #f5f7fa;
+        color: #606266;
       }
     }
 
@@ -3145,6 +4096,13 @@ const handleMore = (command: string) => {
       }
     }
 
+    .calc-text {
+      color: #666;
+      font-size: 13px;
+      display: block;
+      text-align: right;
+    }
+
     .amount-text {
       color: #165dff;
       font-weight: 600;
@@ -3154,10 +4112,10 @@ const handleMore = (command: string) => {
     }
 
     .el-table__footer-wrapper td.el-table__cell {
-      background: var(--table-row-even-bg) !important;
+      background: var(--yx-table-row-even-bg) !important;
       color: #333;
       font-weight: 600;
-      border-color: var(--table-line-color) !important;
+      border-color: var(--yx-table-line-color) !important;
     }
   }
 }
@@ -3218,15 +4176,36 @@ const handleMore = (command: string) => {
 
 <style lang="scss">
 .product-suggest-popper {
-  --product-suggest-cols: 80px 180px 100px 140px 72px 56px;
+  --product-suggest-cols: 28px 80px 180px 100px 140px 72px 56px;
 
-  min-width: 760px !important;
-  width: 760px !important;
+  min-width: 788px !important;
+  width: 788px !important;
 
   .el-autocomplete-suggestion__header {
     padding: 0;
     margin: 0;
     border-bottom: 1px solid #e4e7ed;
+  }
+
+  .suggest-multi-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 10px;
+    background: #f0f7ff;
+    border-top: 1px solid #d9ecff;
+  }
+
+  .suggest-multi-tip {
+    font-size: 12px;
+    color: #606266;
+  }
+
+  .col-check {
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .el-autocomplete-suggestion__wrap {

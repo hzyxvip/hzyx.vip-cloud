@@ -19,8 +19,15 @@ export const LICENSE_MAX_STORAGE_PER_COMPANY = 100 * 1024 * 1024
 
 export const LICENSE_MAX_STORAGE_PER_COMPANY_LABEL = '100MB'
 
+/** 原图写入本地存储的目标体积（避免 localStorage 超限） */
+export const LICENSE_STORED_ORIGINAL_MAX_SIZE = 1.5 * 1024 * 1024
+
+export const LICENSE_STORED_ORIGINAL_MAX_SIZE_LABEL = '1.5MB'
+
 export const LICENSE_IMAGE_UPLOAD_HINT =
-  `单张≤${LICENSE_IMAGE_MAX_SIZE_LABEL} · 列表缩略图约${LICENSE_THUMBNAIL_MAX_SIZE_LABEL}内`
+  `单张≤${LICENSE_IMAGE_MAX_SIZE_LABEL} · 列表缩略图约${LICENSE_THUMBNAIL_MAX_SIZE_LABEL}内 · 存储压缩≤${LICENSE_STORED_ORIGINAL_MAX_SIZE_LABEL}`
+
+const IMAGE_FILE_EXT = /\.(jpe?g|png|gif|webp|bmp)$/i
 
 export const LICENSE_IMAGE_OVERSIZE_PAY_MESSAGE =
   `当前套餐单张证照图片不得超过 ${LICENSE_IMAGE_MAX_SIZE_LABEL}。如需上传更大文件，请联系平台管理员开通扩容服务或升级付费套餐。`
@@ -85,8 +92,10 @@ export function formatCompanyLicenseQuota(stats: CompanyLicenseImageStats): stri
 }
 
 export async function validateLicenseImageFile(file: File): Promise<boolean> {
-  if (!file.type.startsWith('image/')) {
-    ElMessage.warning('请上传图片文件')
+  const isImageMime = file.type.startsWith('image/')
+  const isImageExt = IMAGE_FILE_EXT.test(file.name)
+  if (!isImageMime && !isImageExt) {
+    ElMessage.warning('请上传 JPG、PNG、WEBP 等图片文件')
     return false
   }
 
@@ -150,6 +159,8 @@ async function loadImageFromFile(file: File): Promise<HTMLImageElement> {
   const objectUrl = URL.createObjectURL(file)
   try {
     return await loadImageElement(objectUrl)
+  } catch {
+    throw new Error('无法解析该图片，请改用 JPG 或 PNG 格式后重试')
   } finally {
     URL.revokeObjectURL(objectUrl)
   }
@@ -192,7 +203,7 @@ async function canvasToJpegUnderLimit(
     edgeLimit = Math.floor(edgeLimit * 0.82)
   }
 
-  throw new Error('缩略图生成失败')
+  throw new Error('缩略图生成失败，请换一张较小的图片重试')
 }
 
 export function readLicenseImageAsDataUrl(file: File): Promise<string> {
@@ -205,16 +216,15 @@ export function readLicenseImageAsDataUrl(file: File): Promise<string> {
 }
 
 export async function processLicenseImageUpload(file: File): Promise<LicenseImageUploadResult> {
-  const [originalUrl, image] = await Promise.all([
-    readLicenseImageAsDataUrl(file),
-    loadImageFromFile(file)
-  ])
-
+  const image = await loadImageFromFile(file)
+  await yieldToMain()
   const thumbnail = await canvasToJpegUnderLimit(image, LICENSE_THUMBNAIL_MAX_SIZE, 1280)
+  await yieldToMain()
+  const storedOriginal = await canvasToJpegUnderLimit(image, LICENSE_STORED_ORIGINAL_MAX_SIZE, 1920)
 
   return {
     thumbnailUrl: thumbnail.dataUrl,
-    originalUrl,
+    originalUrl: storedOriginal.dataUrl,
     originalSize: file.size,
     thumbnailSize: thumbnail.size
   }
@@ -230,4 +240,35 @@ export function clearLicenseImages(doc: PartnerDocument): void {
   doc.imageUrl = ''
   doc.imageOriginalUrl = ''
   doc.imageSizeBytes = 0
+}
+
+/** 单字段 data URL 超过此值视为异常，加载时清理以避免页面卡死 */
+const LEGACY_BLOATED_DATA_URL_BYTES = 800 * 1024
+
+export function sanitizeLicenseDocumentStorage(doc: PartnerDocument): PartnerDocument {
+  const thumbBytes = estimateDataUrlBytes(doc.imageUrl)
+  const origBytes = estimateDataUrlBytes(doc.imageOriginalUrl)
+  if (origBytes <= LEGACY_BLOATED_DATA_URL_BYTES && thumbBytes <= LEGACY_BLOATED_DATA_URL_BYTES) {
+    return doc
+  }
+
+  const next: PartnerDocument = { ...doc }
+  if (origBytes > LEGACY_BLOATED_DATA_URL_BYTES) {
+    next.imageOriginalUrl = thumbBytes <= LICENSE_THUMBNAIL_MAX_SIZE * 2 ? String(doc.imageUrl || '') : ''
+  }
+  if (thumbBytes > LEGACY_BLOATED_DATA_URL_BYTES) {
+    next.imageUrl = ''
+  }
+  if (!next.imageUrl && !next.imageOriginalUrl) {
+    next.imageSizeBytes = 0
+  }
+  return next
+}
+
+export function sanitizeLicenseDocumentsForLocalStorage(docs: PartnerDocument[]): PartnerDocument[] {
+  return docs.map(sanitizeLicenseDocumentStorage)
+}
+
+function yieldToMain(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0))
 }

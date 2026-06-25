@@ -29,9 +29,24 @@ function buildAuxiliaryQty(item: SalesOutboundData['items'][number]): string {
   return `${qty}${unit}`
 }
 
+function resolveSalesListPageSize(settings: ReturnType<typeof loadPrintSettings>): string {
+  if (settings.salesListPaperSize === 'invoiceWide') {
+    return '241mm 280mm'
+  }
+  return '241mm 140mm'
+}
+
+function resolveSalesListTypography(settings: ReturnType<typeof loadPrintSettings>) {
+  if (settings.salesListPaperSize === 'invoiceWide') {
+    return { baseFont: '10.5px', titleFont: '20px', cellPadding: '2px 2px', metaMargin: '8px' }
+  }
+  return { baseFont: '10px', titleFont: '18px', cellPadding: '2px 2px', metaMargin: '6px' }
+}
+
 function buildStyles(settings: ReturnType<typeof loadPrintSettings>): string {
-  const pageSize = settings.paperSize === 'A5' ? 'A5 landscape' : 'A4 landscape'
+  const pageSize = resolveSalesListPageSize(settings)
   const margin = `${settings.marginMm || 10}mm`
+  const { baseFont, titleFont, cellPadding, metaMargin } = resolveSalesListTypography(settings)
   return `
     @page { size: ${pageSize}; margin: ${margin}; }
     * { box-sizing: border-box; }
@@ -40,7 +55,7 @@ function buildStyles(settings: ReturnType<typeof loadPrintSettings>): string {
       padding: 0;
       color: #000;
       font-family: "SimSun", "宋体", serif;
-      font-size: 11px;
+      font-size: ${baseFont};
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
@@ -49,7 +64,7 @@ function buildStyles(settings: ReturnType<typeof loadPrintSettings>): string {
       display: flex;
       justify-content: space-between;
       align-items: flex-end;
-      margin-bottom: 6px;
+      margin-bottom: ${metaMargin};
       line-height: 1.5;
     }
     .meta-left, .meta-right { width: 32%; }
@@ -57,7 +72,7 @@ function buildStyles(settings: ReturnType<typeof loadPrintSettings>): string {
     .title {
       flex: 1;
       text-align: center;
-      font-size: 24px;
+      font-size: ${titleFont};
       font-weight: 700;
       letter-spacing: 4px;
       line-height: 1.2;
@@ -69,13 +84,13 @@ function buildStyles(settings: ReturnType<typeof loadPrintSettings>): string {
     }
     th, td {
       border: 1px solid #000;
-      padding: 3px 2px;
+      padding: ${cellPadding};
       text-align: center;
       vertical-align: middle;
       word-break: break-all;
       line-height: 1.35;
     }
-    th { font-weight: 700; font-size: 11px; }
+    th { font-weight: 700; font-size: ${baseFont}; }
     .dual div + div { margin-top: 2px; }
     .footer-table td { height: 28px; text-align: left; padding-left: 6px; }
     .footer-table .center { text-align: center; }
@@ -200,28 +215,131 @@ export function buildSalesOutboundListHtml(data: SalesOutboundData): string {
 </html>`
 }
 
-function openPrintWindow(html: string, preview: boolean) {
-  const printWindow = window.open('', '_blank', 'noopener,noreferrer,width=1200,height=900')
-  if (!printWindow) {
-    throw new Error('无法打开打印窗口，请允许浏览器弹出窗口')
-  }
-  printWindow.document.open()
-  printWindow.document.write(html)
-  printWindow.document.close()
-  printWindow.focus()
-  if (preview) return
-  printWindow.onload = () => {
-    printWindow.print()
-    printWindow.close()
-  }
+const PREVIEW_ROOT_ID = 'sales-outbound-list-print-preview'
+
+function writeHtmlToFrame(frame: HTMLIFrameElement, html: string) {
+  const doc = frame.contentDocument || frame.contentWindow?.document
+  if (!doc) throw new Error('无法创建打印预览')
+  doc.open()
+  doc.write(html)
+  doc.close()
+}
+
+function printHtmlDirect(html: string) {
+  const frame = document.createElement('iframe')
+  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;opacity:0;pointer-events:none'
+  document.body.appendChild(frame)
+  writeHtmlToFrame(frame, html)
   window.setTimeout(() => {
-    if (!printWindow.closed) {
-      printWindow.print()
-    }
+    frame.contentWindow?.focus()
+    frame.contentWindow?.print()
   }, 300)
+  window.setTimeout(() => frame.remove(), 60_000)
+}
+
+function showHtmlPrintPreview(html: string, title: string) {
+  closeHtmlPrintPreview()
+
+  const overlay = document.createElement('div')
+  overlay.id = PREVIEW_ROOT_ID
+  overlay.style.cssText = [
+    'position:fixed',
+    'inset:0',
+    'z-index:10000',
+    'display:flex',
+    'flex-direction:column',
+    'background:rgba(0,0,0,0.45)'
+  ].join(';')
+
+  const panel = document.createElement('div')
+  panel.style.cssText = [
+    'display:flex',
+    'flex-direction:column',
+    'width:min(1200px,96vw)',
+    'height:min(900px,92vh)',
+    'margin:auto',
+    'background:#fff',
+    'border-radius:8px',
+    'overflow:hidden',
+    'box-shadow:0 8px 32px rgba(0,0,0,0.2)'
+  ].join(';')
+
+  const toolbar = document.createElement('div')
+  toolbar.style.cssText = [
+    'display:flex',
+    'align-items:center',
+    'justify-content:space-between',
+    'gap:12px',
+    'padding:10px 16px',
+    'border-bottom:1px solid #ebeef5',
+    'background:#f5f7fa'
+  ].join(';')
+
+  const titleEl = document.createElement('div')
+  titleEl.textContent = title
+  titleEl.style.cssText = 'font-size:14px;font-weight:600;color:#303133'
+
+  const actions = document.createElement('div')
+  actions.style.cssText = 'display:flex;gap:8px'
+
+  const printBtn = document.createElement('button')
+  printBtn.type = 'button'
+  printBtn.textContent = '打印'
+  printBtn.style.cssText = [
+    'border:none',
+    'border-radius:4px',
+    'padding:7px 16px',
+    'background:#409eff',
+    'color:#fff',
+    'cursor:pointer',
+    'font-size:13px'
+  ].join(';')
+
+  const closeBtn = document.createElement('button')
+  closeBtn.type = 'button'
+  closeBtn.textContent = '关闭'
+  closeBtn.style.cssText = [
+    'border:1px solid #dcdfe6',
+    'border-radius:4px',
+    'padding:7px 16px',
+    'background:#fff',
+    'color:#606266',
+    'cursor:pointer',
+    'font-size:13px'
+  ].join(';')
+
+  const frame = document.createElement('iframe')
+  frame.title = title
+  frame.style.cssText = 'flex:1;width:100%;border:0;background:#fff'
+
+  actions.append(printBtn, closeBtn)
+  toolbar.append(titleEl, actions)
+  panel.append(toolbar, frame)
+  overlay.append(panel)
+  document.body.append(overlay)
+
+  writeHtmlToFrame(frame, html)
+
+  printBtn.addEventListener('click', () => {
+    frame.contentWindow?.focus()
+    frame.contentWindow?.print()
+  })
+  closeBtn.addEventListener('click', closeHtmlPrintPreview)
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) closeHtmlPrintPreview()
+  })
+}
+
+function closeHtmlPrintPreview() {
+  document.getElementById(PREVIEW_ROOT_ID)?.remove()
 }
 
 export function printSalesOutboundList(data: SalesOutboundData, preview = false) {
   const html = buildSalesOutboundListHtml(data)
-  openPrintWindow(html, preview)
+  const title = `销售清单 ${data.documentNo}`
+  if (preview) {
+    showHtmlPrintPreview(html, title)
+    return
+  }
+  printHtmlDirect(html)
 }

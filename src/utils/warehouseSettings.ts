@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { getAuthToken } from '@/utils/authSession'
 import { getCurrentCompany, warehouseStore, warehouses } from '@/utils/dataStore'
 import {
   SYSTEM_DEFAULT_WAREHOUSE_CODE,
@@ -86,6 +87,12 @@ export function refreshWarehouseOptions() {
     return
   }
 
+  // 已登录时以服务器为准，不再回退到 localStorage / 硬编码默认仓，避免单据与数据库不一致
+  if (getAuthToken()) {
+    warehouseOptionsRef.value = []
+    return
+  }
+
   const defaultWh = warehouseStore.getDefault(companyId)
   if (defaultWh && !isLegacyTestWarehouse({ label: defaultWh.name, value: defaultWh.name })) {
     warehouseOptionsRef.value = [{
@@ -122,4 +129,12 @@ export function refreshWarehouseOptions() {
     code: SYSTEM_DEFAULT_WAREHOUSE_CODE,
     isDefault: true
   }]
+}
+
+/** 从服务器同步仓库并刷新下拉选项（登录后开单前应优先调用） */
+export async function hydrateWarehouseOptionsFromServer(options?: { timeoutMs?: number }): Promise<boolean> {
+  const { hydrateWarehouseListFromServer } = await import('./dataStore')
+  const ok = await hydrateWarehouseListFromServer(options)
+  refreshWarehouseOptions()
+  return ok
 }

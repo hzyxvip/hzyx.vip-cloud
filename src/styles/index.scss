@@ -1,3 +1,5 @@
+@import './system-table.scss';
+
 $primary-color: #00bfa5;
 $primary-light: #4DD0E1;
 $primary-dark: #00897b;
@@ -880,5 +882,31 @@ h1, h2, h3, h4, h5, h6 {
     flex-shrink: 0;
     margin-left: 2px;
     padding: 0 4px;
+  }
+}
+
+/* 移动端基础适配：表格横向滚动、页面内边距收紧 */
+@media (max-width: 768px) {
+  .page-container {
+    padding: 12px !important;
+  }
+
+  .el-table {
+    min-width: 640px;
+  }
+
+  .table-card,
+  .form-card,
+  .search-card {
+    overflow-x: auto;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  .el-pagination {
+    flex-wrap: wrap;
+    justify-content: center;
   }
 }

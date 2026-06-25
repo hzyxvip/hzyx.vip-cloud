@@ -14,7 +14,7 @@ import {
 } from '@/utils/productBatchExpiry'
 import BatchNoFormatPicker from '@/components/common/BatchNoFormatPicker.vue'
 import BatchNoCell from '@/components/common/BatchNoCell.vue'
-import { activeWarehouseOptions, refreshWarehouseOptions } from '@/utils/warehouseSettings'
+import { activeWarehouseOptions, hydrateWarehouseOptionsFromServer } from '@/utils/warehouseSettings'
 
 const router = useRouter()
 const batchNoFormat = ref<BatchNoFormat>(loadBatchNoFormat())
@@ -168,7 +168,7 @@ const handleCancel = () => {
 }
 
 onMounted(() => {
-  refreshWarehouseOptions()
+  void hydrateWarehouseOptionsFromServer()
   form.documentNo = `PR${Date.now()}`
 })
 </script>
